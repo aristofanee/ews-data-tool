@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Frontend build output
+dist/
+
+# Rust build output
+src-tauri/target/
+
+# Logs and local environment
+*.log
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Generated E2E artifacts
+shots/desktop-test.png
+shots/desktop-test.json
+shots/desktop-export.csv

@@ -1,0 +1,156 @@
+{
+  "app": "EWS Data Tool",
+  "version": 1,
+  "name": "EWS report",
+  "created": "2026-10-24T01:04:52.062Z",
+  "filters": {
+    "lots": [],
+    "wafers": [],
+    "hbins": [],
+    "sbins": [],
+    "passOnly": false,
+    "stat": null
+  },
+  "plots": [
+    {
+      "spec": {
+        "id": "vi52k9q1",
+        "type": "box",
+        "test": 0,
+        "title": "glxy_SS_IH     <> glxy_pin2 · Box plot",
+        "groupBy": "wafer",
+        "logY": false,
+        "showPoints": "outliers",
+        "lsl": null,
+        "usl": null,
+        "showLimits": true,
+        "mapWafer": 0,
+        "mapMode": "value",
+        "palette": "brand",
+        "edgeExclusion": 0,
+        "binCategory": "hard",
+        "top": 20,
+        "cumulative": true,
+        "includePass": false,
+        "bins": null,
+        "showNormal": true,
+        "showBand": true,
+        "yMin": null,
+        "yMax": null
+      },
+      "filters": {
+        "lots": [],
+        "wafers": [],
+        "hbins": [],
+        "sbins": [],
+        "passOnly": false,
+        "stat": null
+      }
+    },
+    {
+      "spec": {
+        "id": "tvhgz4yl",
+        "type": "map",
+        "test": 0,
+        "title": "glxy_SS_IH     <> glxy_pin2 · Wafer map",
+        "groupBy": "wafer",
+        "logY": false,
+        "showPoints": "outliers",
+        "lsl": null,
+        "usl": null,
+        "showLimits": true,
+        "mapWafer": 0,
+        "mapMode": "value",
+        "palette": "brand",
+        "edgeExclusion": 0,
+        "binCategory": "hard",
+        "top": 20,
+        "cumulative": true,
+        "includePass": false,
+        "bins": null,
+        "showNormal": true,
+        "showBand": true,
+        "yMin": null,
+        "yMax": null
+      },
+      "filters": {
+        "lots": [],
+        "wafers": [],
+        "hbins": [],
+        "sbins": [],
+        "passOnly": false,
+        "stat": null
+      }
+    },
+    {
+      "spec": {
+        "id": "isl9ya9h",
+        "type": "pareto",
+        "test": 0,
+        "title": "Fail Pareto",
+        "groupBy": "wafer",
+        "logY": false,
+        "showPoints": "outliers",
+        "lsl": null,
+        "usl": null,
+        "showLimits": true,
+        "mapWafer": 0,
+        "mapMode": "value",
+        "palette": "brand",
+        "edgeExclusion": 0,
+        "binCategory": "hard",
+        "top": 20,
+        "cumulative": true,
+        "includePass": false,
+        "bins": null,
+        "showNormal": true,
+        "showBand": true,
+        "yMin": null,
+        "yMax": null
+      },
+      "filters": {
+        "lots": [],
+        "wafers": [],
+        "hbins": [],
+        "sbins": [],
+        "passOnly": false,
+        "stat": null
+      }
+    },
+    {
+      "spec": {
+        "id": "uv9bvp6c",
+        "type": "hist",
+        "test": 0,
+        "title": "glxy_SS_IH     <> glxy_pin2 · Histogram",
+        "groupBy": "wafer",
+        "logY": false,
+        "showPoints": "outliers",
+        "lsl": null,
+        "usl": null,
+        "showLimits": true,
+        "mapWafer": 0,
+        "mapMode": "value",
+        "palette": "brand",
+        "edgeExclusion": 0,
+        "binCategory": "hard",
+        "top": 20,
+        "cumulative": true,
+        "includePass": false,
+        "bins": null,
+        "showNormal": true,
+        "showBand": true,
+        "yMin": null,
+        "yMax": null
+      },
+      "filters": {
+        "lots": [],
+        "wafers": [],
+        "hbins": [],
+        "sbins": [],
+        "passOnly": false,
+        "stat": null
+      }
+    }
+  ]
+}

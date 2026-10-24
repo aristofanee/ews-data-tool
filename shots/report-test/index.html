@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EWS report · EWS report</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 38px; background: #eef2f8; color: #0f172a;
+         font-family: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif; }
+  header { max-width: 1440px; margin: 0 auto 26px; }
+  .brand { display: flex; align-items: center; gap: 9px; color: #2563eb; font-size: 12px;
+           font-weight: 600; letter-spacing: .04em; text-transform: uppercase; margin-bottom: 10px; }
+  .brand i { width: 11px; height: 11px; border-radius: 3px; background: #2563eb; display: inline-block; }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -.02em; }
+  .meta { color: #64748b; font-size: 13px; }
+  .grid { max-width: 1440px; margin: 0 auto; display: grid; gap: 22px;
+          grid-template-columns: repeat(auto-fill, minmax(540px, 1fr)); }
+  figure { margin: 0; background: #fff; border: 1px solid #e3e8f1; border-radius: 12px;
+           overflow: hidden; box-shadow: 0 1px 2px rgba(15,23,42,.06); }
+  img { width: 100%; display: block; background: #fff; }
+  figcaption { padding: 10px 14px 12px; border-top: 1px solid #eef2f8; }
+  figcaption b { display: block; font-size: 13px; font-weight: 600; }
+  figcaption span { color: #64748b; font-size: 11.5px; }
+  footer { max-width: 1440px; margin: 26px auto 0; color: #94a3b8; font-size: 11px; }
+  @media print { body { background: #fff; padding: 0; } figure { break-inside: avoid; box-shadow: none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><i></i> EWS Data Tool</div>
+  <h1>EWS report</h1>
+  <div class="meta">2 lots (W118892, GAL-LOT) · 3 wafers · generated 24/10/2026, 03:04:52</div>
+</header>
+<div class="grid">
+    <figure>
+      <img src="01_glxy_SS_IH_glxy_pin2_Box_plot.jpg" alt="glxy_SS_IH     &lt;&gt; glxy_pin2 · Box plot" loading="lazy">
+      <figcaption><b>glxy_SS_IH     &lt;&gt; glxy_pin2 · Box plot</b><span>glxy_SS_IH     &lt;&gt; glxy_pin2 [v] · 2,402 dice · by wafer</span></figcaption>
+    </figure>
+    <figure>
+      <img src="02_glxy_SS_IH_glxy_pin2_Wafer_map.jpg" alt="glxy_SS_IH     &lt;&gt; glxy_pin2 · Wafer map" loading="lazy">
+      <figcaption><b>glxy_SS_IH     &lt;&gt; glxy_pin2 · Wafer map</b><span>W118892 · Wafer R114792-03 · glxy_SS_IH     &lt;&gt; glxy_pin2 · Yield 85.11%</span></figcaption>
+    </figure>
+    <figure>
+      <img src="03_Fail_Pareto.jpg" alt="Fail Pareto" loading="lazy">
+      <figcaption><b>Fail Pareto</b><span>662 failures · hard bins</span></figcaption>
+    </figure>
+    <figure>
+      <img src="04_glxy_SS_IH_glxy_pin2_Histogram.jpg" alt="glxy_SS_IH     &lt;&gt; glxy_pin2 · Histogram" loading="lazy">
+      <figcaption><b>glxy_SS_IH     &lt;&gt; glxy_pin2 · Histogram</b><span>glxy_SS_IH     &lt;&gt; glxy_pin2 [v] · 2,402 dice</span></figcaption>
+    </figure>
+</div>
+<footer>Generated offline by EWS Data Tool.</footer>
+</body>
+</html>

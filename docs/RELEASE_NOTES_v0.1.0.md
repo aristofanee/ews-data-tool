@@ -38,8 +38,8 @@ The release was exercised against three reference STDF files (2 lots, 3 wafers,
   excluded by default).
 - Batch report: **4 JPGs + `index.html` + `report.json`** generated without
   errors.
-- Clipboard image copy, JPG/PNG file writes and CSV export (1,963,106 bytes,
-  4,807 rows) verified.
+- Clipboard image copy, JPG/PNG file writes and CSV export (1,963,457 bytes,
+  4,807 rows, units in the header) verified.
 
 ## Requirements
 

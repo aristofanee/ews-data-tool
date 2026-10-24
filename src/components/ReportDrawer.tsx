@@ -190,7 +190,6 @@ export function ReportDrawer() {
       });
       setBusy(false);
       notify(`Report ready · ${res.files.length} JPGs + index.html`);
-      void api.openInExplorer(res.indexHtml).catch(() => undefined);
     } catch (e) {
       setBusy(false);
       setError(`Report generation failed. ${String(e)}`);
@@ -300,6 +299,11 @@ export function ReportDrawer() {
             <span className="folder-path" title={folder ?? ""}>
               {folder ?? "Choose an output folder"}
             </span>
+            {folder && (
+              <button className="link-btn" onClick={() => void api.openInExplorer(folder)}>
+                Open
+              </button>
+            )}
             <button className="link-btn" onClick={chooseFolder}>
               {folder ? "Change" : "Browse"}
             </button>

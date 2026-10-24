@@ -25,8 +25,11 @@ const child = spawn(exe, [], {
     ...process.env,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
   },
-  stdio: "ignore",
+  stdio: ["ignore", "pipe", "pipe"],
 });
+child.stdout.on("data", (d) => console.error("[app]", d.toString().trim()));
+child.stderr.on("data", (d) => console.error("[app!]", d.toString().trim()));
+child.on("exit", (code, signal) => console.error(`[app] exited code=${code} signal=${signal}`));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let version = null;
@@ -48,6 +51,7 @@ if (!version) {
 }
 
 const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+browser.on("disconnected", () => console.error("[browser] disconnected"));
 let page = null;
 for (let i = 0; i < 40; i++) {
   const pages = browser.contexts().flatMap((c) => c.pages());
@@ -59,19 +63,40 @@ if (!page) {
   child.kill();
   throw new Error("No WebView2 page found");
 }
+page.on("close", () => console.error("[page] closed"));
 await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+
+// The WebView can still be navigating right after CDP attaches; retry until
+// the Tauri page and its IPC bridge are actually available.
+let tauri = null;
+for (let i = 0; i < 80; i++) {
+  try {
+    tauri = await page.evaluate(() => {
+      if (!location.href.includes("tauri.localhost") || !window.__TAURI_INTERNALS__) return null;
+      return {
+        internals: typeof window.__TAURI_INTERNALS__,
+        secure: window.isSecureContext,
+        clipboard: typeof navigator.clipboard,
+        write: typeof navigator.clipboard?.write,
+        clipboardItem: typeof ClipboardItem,
+      };
+    });
+    if (tauri) break;
+  } catch {
+    /* navigation in progress */
+  }
+  await sleep(250);
+}
+if (!tauri) {
+  child.kill();
+  throw new Error("Tauri page never became ready");
+}
 
 const out = {
   url: page.url(),
   browser: version.Browser,
   files,
-  tauri: await page.evaluate(() => ({
-    internals: typeof window.__TAURI_INTERNALS__,
-    secure: window.isSecureContext,
-    clipboard: typeof navigator.clipboard,
-    write: typeof navigator.clipboard?.write,
-    clipboardItem: typeof ClipboardItem,
-  })),
+  tauri,
 };
 
 // Load through the real Rust command.

@@ -36,6 +36,10 @@ hover values, zoom/pan and high-resolution JPG export.
 
 ### Desktop app (recommended)
 
+Download the latest Windows installer from the
+[Releases](https://github.com/aristofanee/ews-data-tool/releases/latest) page,
+or build it locally:
+
 ```powershell
 npm install
 npm run tauri dev      # development window

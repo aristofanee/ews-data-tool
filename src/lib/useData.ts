@@ -47,7 +47,6 @@ export function useExportCsv() {
       const msg = await api.exportCsv(path, filters);
       notify(msg);
       setBusy(false);
-      void api.openInExplorer(path).catch(() => undefined);
     } catch (e) {
       setBusy(false);
       setError(String(e));

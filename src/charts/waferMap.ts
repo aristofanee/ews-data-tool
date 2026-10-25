@@ -81,6 +81,7 @@ export class WaferMapRenderer {
   private panY = 0;
 
   private byKey = new Map<string, MapDie>();
+  private binCounts: Map<number, number> | null = null;
   private hover: MapDie | null = null;
   private w = 0;
   private h = 0;
@@ -126,6 +127,7 @@ export class WaferMapRenderer {
     this.data = data;
     this.opts = opts;
     this.byKey.clear();
+    this.binCounts = null;
     for (const d of data.dice) this.byKey.set(`${d.x},${d.y}`, d);
     if (prev !== next) this.resetView();
     this.draw();
@@ -258,8 +260,32 @@ export class WaferMapRenderer {
     const dieWmm = wf?.dieWMm && wf.dieWMm > 0 ? wf.dieWMm : null;
     const dieHmm = wf?.dieHMm && wf.dieHMm > 0 ? wf.dieHMm : null;
     const hasDieDims = dieWmm !== null && dieHmm !== null;
-    const centerX = wf?.centerX ?? (minX + maxX) / 2;
-    const centerY = wf?.centerY ?? (minY + maxY) / 2;
+    // WCR CENTER_X/CENTER_Y are die-grid coordinates. Some writers put a
+    // placeholder such as 128/128 in a file whose dice only span 4..45; using
+    // it would draw the whole map off-canvas. Trust the WCR centre only when
+    // it is at least near the dice we actually have. Without physical die
+    // dimensions the renderer fits a legacy coordinate grid around the dice,
+    // so the bounding-box centre is always the right anchor there.
+    const bboxCx = (minX + maxX) / 2;
+    const bboxCy = (minY + maxY) / 2;
+    const spanX = Math.max(1, maxX - minX + 1);
+    const spanY = Math.max(1, maxY - minY + 1);
+    let centerX = bboxCx;
+    let centerY = bboxCy;
+    const wcrCx = wf?.centerX;
+    const wcrCy = wf?.centerY;
+    if (
+      hasDieDims &&
+      wcrCx != null &&
+      wcrCy != null &&
+      wcrCx >= minX - spanX &&
+      wcrCx <= maxX + spanX &&
+      wcrCy >= minY - spanY &&
+      wcrCy <= maxY + spanY
+    ) {
+      centerX = wcrCx;
+      centerY = wcrCy;
+    }
     this.dieCx = centerX;
     this.dieCy = centerY;
 
@@ -329,8 +355,12 @@ export class WaferMapRenderer {
     ctx.fill();
 
     ctx.save();
+    // Clip the dice to a plain circle. Clipping every fillRect through the
+    // notch path below makes Skia fall back to a slow per-rect mask and can
+    // turn a 50k-die hover redraw into seconds. The notch is cut out again
+    // after the dice (and hover highlight) have been drawn.
     ctx.beginPath();
-    this.traceWaferPath(ctx, R);
+    ctx.arc(0, 0, R, 0, Math.PI * 2);
     ctx.clip();
     const gap = Math.max(0.3, Math.min(cellW, cellH) * 0.055);
     const dw = Math.max(0.5, cellW - gap);
@@ -338,6 +368,11 @@ export class WaferMapRenderer {
     const lo = Number.isFinite(data.vmin) ? data.vmin : 0;
     const hi = Number.isFinite(data.vmax) ? data.vmax : 1;
     const vspan = hi > lo ? hi - lo : 1;
+    // Group dice by colour and fill one path per colour. Setting fillStyle and
+    // calling fillRect 50k times is dramatically slower in WebView2 than
+    // filling a handful of batched paths, and a 256-colour palette means at
+    // most 256 fills per redraw.
+    const paths = new Map<string, Path2D>();
     for (const d of data.dice) {
       let color: string;
       if (mode === "bin") {
@@ -347,13 +382,21 @@ export class WaferMapRenderer {
       } else {
         color = this.colorFor((d.v - lo) / vspan);
       }
-      ctx.fillStyle = color;
-      ctx.fillRect(
+      let path = paths.get(color);
+      if (!path) {
+        path = new Path2D();
+        paths.set(color, path);
+      }
+      path.rect(
         (d.x - centerX) * cellW - dw / 2,
         -(d.y - centerY) * cellH - dh / 2,
         dw,
         dh
       );
+    }
+    for (const [color, path] of paths) {
+      ctx.fillStyle = color;
+      ctx.fill(path);
     }
     ctx.restore();
 
@@ -374,6 +417,15 @@ export class WaferMapRenderer {
         hw + (pres ? 5 : 3) / this.zoom,
         hh + (pres ? 5 : 3) / this.zoom
       );
+    }
+
+    // Cut the flat/notch back out of the dice and hover layer. The wafer fill
+    // already has the notch; the plain circle clip above let dice paint over it.
+    if (this.data?.wafer?.flat) {
+      ctx.beginPath();
+      this.traceNotchCutout(ctx, R);
+      ctx.fillStyle = t.bg;
+      ctx.fill();
     }
 
     // Redraw the outline on top so dice never cover it.
@@ -432,6 +484,32 @@ export class WaferMapRenderer {
     const depth = radius * 0.035;
     ctx.moveTo(Math.cos(start) * radius, Math.sin(start) * radius);
     ctx.arc(0, 0, radius, start, end, false);
+    ctx.lineTo(Math.cos(theta) * (radius - depth), Math.sin(theta) * (radius - depth));
+    ctx.closePath();
+  }
+
+  /**
+   * The region outside the flat/notch but inside the wafer circle. Filling it
+   * with the page background restores the notch after the dice have been drawn
+   * through the fast circular clip.
+   */
+  private traceNotchCutout(ctx: CanvasRenderingContext2D, radius: number): void {
+    const flat = this.data?.wafer?.flat;
+    if (!flat) return;
+    const theta =
+      flat === "U"
+        ? -Math.PI / 2
+        : flat === "L"
+          ? Math.PI
+          : flat === "R"
+            ? 0
+            : Math.PI / 2;
+    const halfGap = Math.asin(Math.min(0.92, 0.055));
+    const start = theta + halfGap;
+    const end = theta - halfGap + Math.PI * 2;
+    const depth = radius * 0.035;
+    ctx.moveTo(Math.cos(end) * radius, Math.sin(end) * radius);
+    ctx.arc(0, 0, radius, end, start, false);
     ctx.lineTo(Math.cos(theta) * (radius - depth), Math.sin(theta) * (radius - depth));
     ctx.closePath();
   }
@@ -515,11 +593,14 @@ export class WaferMapRenderer {
   ): void {
     const ctx = this.ctx;
     const k = pres ? 1.55 : 1;
-    const counts = new Map<number, number>();
-    for (const d of this.data?.dice ?? []) {
-      counts.set(d.hbin, (counts.get(d.hbin) ?? 0) + 1);
+    if (!this.binCounts) {
+      const counts = new Map<number, number>();
+      for (const d of this.data?.dice ?? []) {
+        counts.set(d.hbin, (counts.get(d.hbin) ?? 0) + 1);
+      }
+      this.binCounts = counts;
     }
-    const entries = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    const entries = [...this.binCounts.entries()].sort((a, b) => b[1] - a[1]);
     const shown = entries.slice(0, 9);
     const rest = entries.slice(9);
 

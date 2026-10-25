@@ -65,7 +65,7 @@ npm run tauri build    # release build + NSIS installer
 Build output:
 
 - `src-tauri\target\release\ews-data-tool.exe`
-- `src-tauri\target\release\bundle\nsis\EWS Data Tool_0.3.1_x64-setup.exe`
+- `src-tauri\target\release\bundle\nsis\EWS Data Tool_0.3.2_x64-setup.exe`
 
 ### Browser preview
 
@@ -177,6 +177,9 @@ signatures and realistic bin failures.
   into JavaScript.
 - Box plots cap plotted outlier points to keep the UI responsive; the box
   statistics always use every value.
+- Wafer maps batch dice into one path per colour and use a plain circular clip,
+  cutting the flat/notch back out afterwards. This keeps hover, Bin map and
+  split-map redraws responsive on large STDF files with physical WCR geometry.
 
 ## Tests
 
@@ -189,7 +192,7 @@ cargo test --manifest-path src-tauri\Cargo.toml --lib
 The suite covers the reference STDF file (1,619 dice, 74 tests), the compressed
 `.Z` fixture, wide/long CSV import, semicolon + decimal-comma CSV, text `Split`
 columns, the full query pipeline (box/map/Pareto/histogram/trend/scatter), custom
-label columns and box block colours. There are 15 Rust tests.
+label columns and box block colours. There are 19 Rust tests.
 
 Visual and desktop smoke tests (browser demo, requires `npm run dev`):
 

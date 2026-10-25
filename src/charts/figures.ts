@@ -7,7 +7,7 @@ import type {
   ScatterResponse,
   TrendResponse,
 } from "../types";
-import { axisTitle, fmt, fmtInt, tidyName } from "../lib/format";
+import { axisTitle, fmt, fmtInt, testLabel, tidyName } from "../lib/format";
 import { normalPdf, quantileSorted } from "../lib/stats";
 import type { Theme } from "../lib/theme";
 import {
@@ -30,6 +30,9 @@ export interface FigureOpts {
   theme: Theme;
   spec: PlotSpec;
   title?: string;
+  /** Render only one split/block/category. */
+  facetKey?: number;
+  facetLabel?: string;
 }
 
 const ALPHA_POINT = 0.55;
@@ -326,10 +329,14 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
   const spec = opts.spec;
   const style = chartStyle(spec.presentation);
   const units = data.test.units;
-  const n = data.groups.length;
+  const groups =
+    opts.facetLabel === undefined
+      ? data.groups
+      : data.groups.filter((g) => g.block === opts.facetLabel);
+  const n = groups.length;
   const traces: any[] = [];
 
-  data.groups.forEach((g, i) => {
+  groups.forEach((g, i) => {
     const line = categoricalColor(t, g.blockCode, g.block);
     const fill = categoricalFill(t, g.blockCode, g.block);
     const idx: number[] = [];
@@ -412,13 +419,13 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
     t,
     spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null,
     spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null,
-    data.test.loLimit,
-    data.test.hiLimit,
+    spec.showControlLimits ? data.test.loLimit : null,
+    spec.showControlLimits ? data.test.hiLimit : null,
     "y",
     style
   );
 
-  const labels = data.groups.map((g) => g.label);
+  const labels = groups.map((g) => g.label);
   const short = labels.map(shortTick);
   const stride = n > (spec.presentation ? 30 : 40) ? 2 : 1;
   const angle = n > (spec.presentation ? 10 : 12) && short.some((s) => s.length > 5) ? -45 : 0;
@@ -451,13 +458,13 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
   layout.yaxis = {
     ...layout.yaxis,
     title: {
-      text: axisTitle(data.test.name, units, style.axisTitle * 0.62),
+      text: axisTitle(testLabel(data.test), units, style.axisTitle * 0.62),
       font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
     },
     type: spec.logY ? "log" : "linear",
   };
   applyYRange(layout, spec, data.summary.min, data.summary.max);
-  if (addBoxBlocks(t, data.groups, shapes, annotations, style)) {
+  if (addBoxBlocks(t, groups, shapes, annotations, style)) {
     layout.margin.t = Math.max(
       layout.margin.t,
       style.margin.t + Math.round(style.annotation * 1.1)
@@ -473,57 +480,145 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
 /* Pareto                                                              */
 /* ------------------------------------------------------------------ */
 
+function withYield(title: string, yieldPct: number): string {
+  return /yield/i.test(title) ? title : `${title} · Yield ${yieldPct.toFixed(1)}%`;
+}
+
 export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
   const style = chartStyle(spec.presentation);
-  const bars = data.bars;
-  const labels = bars.map((b) => b.name);
-  const counts = bars.map((b) => b.count);
-  const cum = bars.map((b) => b.cumPct);
   const traces: any[] = [];
-  const angle = labels.some((l) => l.length > 8) ? -38 : 0;
 
+  if (data.mode === "grouped") {
+    const groups = data.groups;
+    const labels = groups.map((g) => g.label);
+    const angle = labels.some((l) => l.length > 8) ? -38 : 0;
+    for (const s of data.series) {
+      traces.push({
+        type: "bar",
+        name: s.name,
+        x: labels,
+        y: s.counts,
+        customdata: s.pcts,
+        marker: {
+          color: categoricalColor(t, s.code, s.name),
+          line: { width: 0 },
+        },
+        hovertemplate:
+          `<b>${s.name}</b><br>%{y} dice · %{customdata:.2f}% of group<extra></extra>`,
+      });
+    }
+    traces.push({
+      type: "scatter",
+      mode: "lines+markers",
+      name: "Good yield",
+      x: labels,
+      y: groups.map((g) => g.yieldPct),
+      yaxis: "y2",
+      line: { color: t.green, width: style.line * 2.2 },
+      marker: {
+        size: style.marker,
+        color: t.green,
+        line: { color: t.paper, width: Math.max(1, style.line * 0.5) },
+      },
+      hovertemplate: "Good yield %{y:.1f}%<extra></extra>",
+      cliponaxis: false,
+    });
+
+    const layout = baseLayout(t, withYield(opts.title ?? "Fail Pareto", data.yieldPct), spec.presentation);
+    layout.margin = {
+      ...layout.margin,
+      l: style.margin.l,
+      r: style.margin.r + Math.round(style.axisTitle * 1.4),
+      b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.0) : 0),
+      t: layout.margin.t + Math.round(style.annotation * 1.2),
+    };
+    layout.barmode = "stack";
+    layout.bargap = 0.35;
+    layout.showlegend = data.series.length > 0;
+    layout.legend = {
+      orientation: "h",
+      x: 0,
+      xanchor: "left",
+      y: 1.02,
+      yanchor: "bottom",
+      font: { size: Math.round(style.annotation * 0.8), color: t.text, family: CHART_FONT },
+      bgcolor: "rgba(0,0,0,0)",
+      borderwidth: 0,
+      itemwidth: 30,
+    };
+    layout.xaxis = {
+      ...layout.xaxis,
+      title: {
+        text: data.groupLabel || "Group",
+        font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
+      },
+      tickangle: angle,
+      tickfont: { size: Math.round(style.tick * 0.82), color: t.muted, family: CHART_FONT },
+      showgrid: false,
+      zeroline: false,
+    };
+    layout.yaxis = {
+      ...layout.yaxis,
+      title: {
+        text: "Dice",
+        font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
+      },
+      rangemode: "tozero",
+    };
+    layout.yaxis2 = {
+      overlaying: "y",
+      side: "right",
+      range: [0, 105],
+      tickmode: "array",
+      tickvals: [0, 20, 40, 60, 80, 100],
+      ticktext: ["0%", "20%", "40%", "60%", "80%", "100%"],
+      showgrid: false,
+      zeroline: false,
+      linecolor: t.axis,
+      linewidth: style.axisLine,
+      showline: true,
+      tickfont: { size: Math.round(style.tick * 0.82), color: t.muted, family: CHART_FONT },
+      title: {
+        text: "Good yield %",
+        font: { size: Math.round(style.axisTitle * 0.82), color: t.muted, family: CHART_FONT },
+        standoff: Math.round(style.axisTitle * 0.5),
+      },
+    };
+    return { data: traces, layout };
+  }
+
+  const bars = data.bars;
+  const labels = bars.map((b) => b.name || `Bin ${b.code}`);
+  const counts = bars.map((b) => b.count);
+  const angle = labels.some((l) => l.length > 8) ? -38 : 0;
   traces.push({
     type: "bar",
     x: labels,
     y: counts,
     marker: {
-      color: bars.map((b) => (b.pass ? t.gray : t.blue)),
+      color: bars.map((b) => (b.pass ? t.green : b.code === 0xffff ? t.gray : t.blue)),
       line: { width: 0 },
     },
-    text: bars.length <= (spec.presentation ? 10 : 16) ? bars.map((b) => fmtInt(b.count)) : undefined,
+    text:
+      bars.length <= (spec.presentation ? 14 : 22)
+        ? bars.map((b) => `${b.pct.toFixed(1)}%`)
+        : undefined,
     textposition: "outside",
     cliponaxis: false,
     textfont: { size: Math.round(style.tick * 0.72), color: t.muted, family: CHART_FONT },
-    customdata: bars.map((b) => [b.pct, b.code]),
+    customdata: bars.map((b) => [b.pct, b.code, b.pass ? "pass" : "fail"]),
     hovertemplate:
-      "<b>%{x}</b><br>%{y} dice · %{customdata[0]:.2f}%<br>bin %{customdata[1]}<extra></extra>",
+      "<b>%{x}</b><br>%{y} dice · %{customdata[0]:.2f}%<br>" +
+      "bin %{customdata[1]} · %{customdata[2]}<extra></extra>",
   });
 
-  if (spec.cumulative && bars.length > 1) {
-    traces.push({
-      type: "scatter",
-      mode: "lines+markers",
-      x: labels,
-      y: cum,
-      yaxis: "y2",
-      line: { color: t.yellow, width: style.line * 1.8 },
-      marker: {
-        size: style.marker,
-        color: t.yellow,
-        line: { color: t.paper, width: Math.max(1, style.line * 0.5) },
-      },
-      hovertemplate: "cumulative %{y:.1f}%<extra></extra>",
-      cliponaxis: false,
-    });
-  }
-
-  const layout = baseLayout(t, opts.title, spec.presentation);
+  const layout = baseLayout(t, withYield(opts.title ?? "Fail Pareto", data.yieldPct), spec.presentation);
   layout.margin = {
     ...layout.margin,
     l: style.margin.l,
-    r: style.margin.r + (spec.cumulative ? Math.round(style.axisTitle * 1.2) : 0),
+    r: style.margin.r,
     b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.0) : 0),
   };
   layout.bargap = 0.42;
@@ -542,53 +637,6 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
     },
     rangemode: "tozero",
   };
-  if (spec.cumulative && bars.length > 1) {
-    layout.yaxis2 = {
-      overlaying: "y",
-      side: "right",
-      range: [0, 105],
-      tickmode: "array",
-      tickvals: [0, 20, 40, 60, 80, 100],
-      ticktext: ["0%", "20%", "40%", "60%", "80%", "100%"],
-      showgrid: false,
-      zeroline: false,
-      linecolor: t.axis,
-      linewidth: style.axisLine,
-      showline: true,
-      tickfont: { size: Math.round(style.tick * 0.82), color: t.muted, family: CHART_FONT },
-      title: {
-        text: "Cumulative %",
-        font: { size: Math.round(style.axisTitle * 0.82), color: t.muted, family: CHART_FONT },
-        standoff: Math.round(style.axisTitle * 0.5),
-      },
-    };
-    layout.shapes = [
-      {
-        type: "line",
-        xref: "paper",
-        x0: 0,
-        x1: 1,
-        yref: "y2",
-        y0: 80,
-        y1: 80,
-        line: { color: t.gray, width: Math.max(1, style.line * 0.6), dash: "dot" },
-        layer: "below",
-      },
-    ];
-    layout.annotations = [
-      {
-        xref: "paper",
-        x: 0.004,
-        xanchor: "left",
-        yref: "y2",
-        y: 80,
-        yshift: Math.round(style.annotation * 0.85),
-        text: "80%",
-        showarrow: false,
-        font: { size: style.annotation, color: t.muted, family: CHART_FONT },
-      },
-    ];
-  }
   return { data: traces, layout };
 }
 
@@ -650,8 +698,8 @@ export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
     t,
     spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null,
     spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null,
-    data.test.loLimit,
-    data.test.hiLimit,
+    spec.showControlLimits ? data.test.loLimit : null,
+    spec.showControlLimits ? data.test.hiLimit : null,
     style
   );
   // mean marker
@@ -675,7 +723,7 @@ export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
   layout.xaxis = {
     ...layout.xaxis,
     title: {
-      text: axisTitle(data.test.name, data.test.units, style.axisTitle * 0.62),
+      text: axisTitle(testLabel(data.test), data.test.units, style.axisTitle * 0.62),
       font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
     },
     showgrid: false,
@@ -753,8 +801,8 @@ export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
     t,
     spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null,
     spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null,
-    data.test.loLimit,
-    data.test.hiLimit,
+    spec.showControlLimits ? data.test.loLimit : null,
+    spec.showControlLimits ? data.test.hiLimit : null,
     "y",
     style
   );
@@ -789,7 +837,7 @@ export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
   layout.yaxis = {
     ...layout.yaxis,
     title: {
-      text: axisTitle(data.test.name, data.test.units, style.axisTitle * 0.62),
+      text: axisTitle(testLabel(data.test), data.test.units, style.axisTitle * 0.62),
       font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
     },
     type: spec.logY ? "log" : "linear",
@@ -855,12 +903,17 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
   const spec = opts.spec;
   const style = chartStyle(spec.presentation);
   const traces: any[] = [];
-  const totalPoints = data.series.reduce((n, s) => n + s.points.length, 0);
+  const series =
+    opts.facetKey === undefined
+      ? data.series
+      : data.series.filter((s) => s.key === opts.facetKey);
+  const totalPoints = series.reduce((n, s) => n + s.points.length, 0);
   const traceType = totalPoints > 12000 ? "scattergl" : "scatter";
-  const showLegend = data.zMode === "category" && data.series.length > 1;
+  const showLegend =
+    data.zMode === "category" && series.length > 1 && opts.facetKey === undefined;
 
   if (data.zMode === "continuous") {
-    const points = data.series[0]?.points ?? [];
+    const points = series[0]?.points ?? [];
     const finite = points.filter((p) => p.z !== null && Number.isFinite(p.z));
     const missing = points.filter((p) => p.z === null || !Number.isFinite(p.z));
     if (finite.length) {
@@ -932,8 +985,8 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
     // Draw large groups first so smaller categories stay visible when the
     // populations overlap (common when wafers track the same distribution).
     // `legendrank` keeps the natural, alphabetical legend order.
-    const legendRank = new Map(data.series.map((s, i) => [s.key, i]));
-    const drawOrder = [...data.series].sort((a, b) => b.points.length - a.points.length);
+    const legendRank = new Map(series.map((s, i) => [s.key, i]));
+    const drawOrder = [...series].sort((a, b) => b.points.length - a.points.length);
     const symbols = ["circle", "square", "diamond", "triangle-up", "cross", "x", "star", "hexagon"];
     for (const s of drawOrder) {
       if (!s.points.length) continue;
@@ -960,7 +1013,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
       });
     }
   } else {
-    const points = data.series[0]?.points ?? [];
+    const points = series[0]?.points ?? [];
     if (points.length) {
       const arr = pointArrays(points, data);
       traces.push({
@@ -981,8 +1034,9 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
     }
   }
 
-  // Least-squares line through every visible point.
-  const allPoints = data.series.flatMap((s) => s.points);
+  // Least-squares line through every visible point. It is appended last and
+  // drawn in a high-contrast colour so the markers cannot hide it.
+  const allPoints = series.flatMap((s) => s.points);
   const annotations: any[] = [];
   if (spec.scatterFit && allPoints.length >= 2) {
     let sx = 0;
@@ -1012,7 +1066,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
           mode: "lines",
           x: [lo, hi],
           y: [intercept + slope * lo, intercept + slope * hi],
-          line: { color: t.gray, width: style.line * 1.2, dash: "dash" },
+          line: { color: t.red, width: Math.max(2.5, style.line * 2.2) },
           hoverinfo: "skip",
           showlegend: false,
         });
@@ -1050,7 +1104,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
   layout.xaxis = {
     ...layout.xaxis,
     title: {
-      text: axisTitle(data.xTest.name, data.xTest.units, style.axisTitle * 0.62),
+      text: axisTitle(testLabel(data.xTest), data.xTest.units, style.axisTitle * 0.62),
       font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
     },
     showgrid: true,
@@ -1059,7 +1113,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
   layout.yaxis = {
     ...layout.yaxis,
     title: {
-      text: axisTitle(data.yTest.name, data.yTest.units, style.axisTitle * 0.62),
+      text: axisTitle(testLabel(data.yTest), data.yTest.units, style.axisTitle * 0.62),
       font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
     },
     showgrid: true,

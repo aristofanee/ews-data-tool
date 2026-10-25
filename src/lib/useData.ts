@@ -2,6 +2,9 @@ import { useCallback } from "react";
 import * as api from "./api";
 import { fmtInt, safeName } from "./format";
 import { useStore, type TemplateFile } from "../store";
+import type { CsvMapping } from "../types";
+
+const CSV_EXT = /\.(csv|txt|tsv|dat)$/i;
 
 export function useOpenFiles() {
   const setBusy = useStore((s) => s.setBusy);
@@ -9,16 +12,41 @@ export function useOpenFiles() {
   const setInfo = useStore((s) => s.setInfo);
   const setError = useStore((s) => s.setError);
   const notify = useStore((s) => s.notify);
+  const setCsvPrompt = useStore((s) => s.setCsvPrompt);
 
   return useCallback(
-    async (pathsArg?: string[]) => {
+    async (pathsArg?: string[], mapping?: CsvMapping) => {
       try {
         const paths = pathsArg ?? (await api.pickFiles());
         if (!paths.length) return;
         setError(null);
+
+        // Inspect text/CSV files first. If OCR/Wafer/X/Y cannot be detected,
+        // ask the user to map those columns instead of silently importing a
+        // misaligned table.
+        if (!mapping) {
+          const csvPaths = paths.filter((p) => CSV_EXT.test(p));
+          if (csvPaths.length) {
+            setBusy(true, 0, "Inspecting CSV columns…");
+            for (const path of csvPaths) {
+              const inspection = await api.inspectCsv(path);
+              if (inspection.missing.length) {
+                setBusy(false);
+                setCsvPrompt({ paths, path, inspection });
+                return;
+              }
+            }
+          }
+        }
+
         setBusy(true, 1, `Opening ${paths.length} file${paths.length > 1 ? "s" : ""}…`);
-        const info = await api.openPaths(paths, (pct, msg) => setProgress(pct, msg));
+        const info = await api.openPaths(
+          paths,
+          (pct, msg) => setProgress(pct, msg),
+          mapping ?? null
+        );
         setInfo(info);
+        setCsvPrompt(null);
         notify(`Loaded ${fmtInt(info.rows)} dice · ${info.tests.length} tests · ${info.lots.length} lot${info.lots.length > 1 ? "s" : ""}`);
       } catch (e) {
         setError(String(e));
@@ -26,7 +54,7 @@ export function useOpenFiles() {
         setBusy(false);
       }
     },
-    [setBusy, setProgress, setInfo, setError, notify]
+    [setBusy, setProgress, setInfo, setError, notify, setCsvPrompt]
   );
 }
 

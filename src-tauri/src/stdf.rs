@@ -1,6 +1,7 @@
 use crate::dataset::Imported;
-use crate::model::NAN;
+use crate::model::{WaferGeom, NAN};
 use memmap2::Mmap;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -147,6 +148,11 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
     let mut have_wafer = false;
     let mut row: Option<usize> = None;
     let mut last_report = 0.0f32;
+    let mut cur_geom = WaferGeom::default();
+    // Unit strings are not guaranteed to be identical on every PTR/MPR
+    // record. Count them across the file and use the most common non-empty
+    // value instead of trusting the first die.
+    let mut unit_votes: HashMap<usize, HashMap<String, usize>> = HashMap::new();
 
     while off + 4 <= d.len() {
         let len = read_u16(d, off, be) as usize;
@@ -181,6 +187,9 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 cur_lot = out.lot_index(&lot);
                 have_lot = true;
                 have_wafer = false;
+                // WCR geometry belongs to the current lot. Do not leak it into
+                // a following lot that has no WCR of its own.
+                cur_geom = WaferGeom::default();
                 row = None;
             }
             // WIR - wafer information record
@@ -195,6 +204,9 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 };
                 cur_wafer = out.wafer_index(cur_lot, &name);
                 have_wafer = true;
+                if (cur_wafer as usize) < out.wafer_geom.len() {
+                    out.wafer_geom[cur_wafer as usize] = cur_geom;
+                }
             }
             // WRR - wafer results record
             (2, 20) => {
@@ -204,33 +216,44 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 if !have_wafer && !name.is_empty() {
                     cur_wafer = out.wafer_index(cur_lot, &name);
                     have_wafer = true;
+                    if (cur_wafer as usize) < out.wafer_geom.len() {
+                        out.wafer_geom[cur_wafer as usize] = cur_geom;
+                    }
                 }
             }
-            // PCR - pin count record (wafer size / die size)
-            (1, 30) => {
+            // WCR - wafer configuration record. This is the actual source of
+            // wafer/die dimensions; PCR (1,30) has no WAFR_SIZ fields.
+            (2, 30) => {
                 let mut c = Cur::new(body, be);
-                // HEAD_NUM, SITE_NUM, PART_CNT, RTST_CNT, ABRT_CNT, GOOD_CNT,
-                // FUNC_CNT = 22 bytes before WAFR_SIZ.
-                c.take(22);
                 let wafr_siz = c.f32();
                 let die_h = c.f32();
                 let die_w = c.f32();
                 let units = c.u8();
-                let scale = match units {
-                    1 => Some(25.4),
-                    2 => Some(10.0),
-                    3 => Some(1.0),
-                    4 => Some(0.0254),
-                    _ => None,
+                let flat = c.u8() as char;
+                let center_x = c.i16();
+                let center_y = c.i16();
+                // POS_X / POS_Y are not needed for rendering, but consuming
+                // them keeps this parser aligned with the record layout.
+                let _pos_x = c.u8();
+                let _pos_y = c.u8();
+                let scale = wafer_unit_scale(units);
+                let mut geom = WaferGeom {
+                    diameter_mm: scale.and_then(|s| (wafr_siz > 0.0).then_some(wafr_siz * s)),
+                    die_h_mm: scale.and_then(|s| (die_h > 0.0).then_some(die_h * s)),
+                    die_w_mm: scale.and_then(|s| (die_w > 0.0).then_some(die_w * s)),
+                    center_x: (center_x != -32768).then_some(center_x),
+                    center_y: (center_y != -32768).then_some(center_y),
+                    flat: matches!(flat, 'U' | 'D' | 'L' | 'R').then_some(flat),
                 };
-                if let Some(s) = scale {
-                    if have_wafer && (cur_wafer as usize) < out.wafer_geom.len() {
-                        out.wafer_geom[cur_wafer as usize] = (
-                            if wafr_siz > 0.0 { Some(wafr_siz * s) } else { None },
-                            if die_w > 0.0 { Some(die_w * s) } else { None },
-                            if die_h > 0.0 { Some(die_h * s) } else { None },
-                        );
-                    }
+                // Keep a WCR without a valid unit scale useful for centre/flat.
+                if scale.is_none() {
+                    geom.diameter_mm = None;
+                    geom.die_h_mm = None;
+                    geom.die_w_mm = None;
+                }
+                cur_geom = geom;
+                if have_wafer && (cur_wafer as usize) < out.wafer_geom.len() {
+                    out.wafer_geom[cur_wafer as usize] = cur_geom;
                 }
             }
             // HBR - hard bin record
@@ -329,19 +352,49 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                     }
 
                     let idx = out.column((test_num, 0), r, result);
-                    if out.tests[idx].name.is_empty() || is_provisional(&out.tests[idx].name) {
-                        out.tests[idx].name = if txt.is_empty() {
+                    let t = &mut out.tests[idx];
+                    if t.number.is_none() {
+                        t.number = Some(test_num);
+                    }
+                    if t.name.is_empty() || is_provisional(&t.name) {
+                        t.name = if txt.is_empty() {
                             format!("T{test_num}")
                         } else {
                             txt
                         };
-                        out.tests[idx].units = units;
-                        out.tests[idx].lo_limit = scale_opt(lo_limit, llm_scal, opt, 4);
-                        out.tests[idx].hi_limit = scale_opt(hi_limit, hlm_scal, opt, 5);
-                        out.tests[idx].lo_spec =
-                            if lo_spec.is_finite() { Some(lo_spec) } else { None };
-                        out.tests[idx].hi_spec =
-                            if hi_spec.is_finite() { Some(hi_spec) } else { None };
+                    }
+                    if t.units.is_empty() && !units.is_empty() {
+                        t.units = units.clone();
+                    }
+                    let new_lo = scale_opt(lo_limit, llm_scal, opt, 4);
+                    let new_hi = scale_opt(hi_limit, hlm_scal, opt, 5);
+                    let new_lo_spec = lo_spec.is_finite().then_some(lo_spec);
+                    let new_hi_spec = hi_spec.is_finite().then_some(hi_spec);
+                    if limits_differ(t.lo_limit, new_lo)
+                        || limits_differ(t.hi_limit, new_hi)
+                        || limits_differ(t.lo_spec, new_lo_spec)
+                        || limits_differ(t.hi_spec, new_hi_spec)
+                    {
+                        t.limit_conflict = true;
+                    }
+                    if t.lo_limit.is_none() {
+                        t.lo_limit = new_lo;
+                    }
+                    if t.hi_limit.is_none() {
+                        t.hi_limit = new_hi;
+                    }
+                    if t.lo_spec.is_none() {
+                        t.lo_spec = new_lo_spec;
+                    }
+                    if t.hi_spec.is_none() {
+                        t.hi_spec = new_hi_spec;
+                    }
+                    if !units.is_empty() {
+                        *unit_votes
+                            .entry(idx)
+                            .or_default()
+                            .entry(units)
+                            .or_insert(0) += 1;
                     }
                 }
             }
@@ -391,20 +444,50 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                         }
                         let key = (test_num, i as u16);
                         let idx = out.column(key, r, v);
-                        if out.tests[idx].name.is_empty() {
+                        let t = &mut out.tests[idx];
+                        if t.number.is_none() {
+                            t.number = Some(test_num);
+                        }
+                        if t.name.is_empty() {
                             let base = if txt.is_empty() {
                                 format!("T{test_num}")
                             } else {
                                 txt.clone()
                             };
-                            out.tests[idx].name = format!("{base}[{i}]");
-                            out.tests[idx].units = units.clone();
-                            out.tests[idx].lo_limit = scale_opt(lo_limit, llm_scal, opt, 4);
-                            out.tests[idx].hi_limit = scale_opt(hi_limit, hlm_scal, opt, 5);
-                            out.tests[idx].lo_spec =
-                                if lo_spec.is_finite() { Some(lo_spec) } else { None };
-                            out.tests[idx].hi_spec =
-                                if hi_spec.is_finite() { Some(hi_spec) } else { None };
+                            t.name = format!("{base}[{i}]");
+                        }
+                        if t.units.is_empty() && !units.is_empty() {
+                            t.units = units.clone();
+                        }
+                        let new_lo = scale_opt(lo_limit, llm_scal, opt, 4);
+                        let new_hi = scale_opt(hi_limit, hlm_scal, opt, 5);
+                        let new_lo_spec = lo_spec.is_finite().then_some(lo_spec);
+                        let new_hi_spec = hi_spec.is_finite().then_some(hi_spec);
+                        if limits_differ(t.lo_limit, new_lo)
+                            || limits_differ(t.hi_limit, new_hi)
+                            || limits_differ(t.lo_spec, new_lo_spec)
+                            || limits_differ(t.hi_spec, new_hi_spec)
+                        {
+                            t.limit_conflict = true;
+                        }
+                        if t.lo_limit.is_none() {
+                            t.lo_limit = new_lo;
+                        }
+                        if t.hi_limit.is_none() {
+                            t.hi_limit = new_hi;
+                        }
+                        if t.lo_spec.is_none() {
+                            t.lo_spec = new_lo_spec;
+                        }
+                        if t.hi_spec.is_none() {
+                            t.hi_spec = new_hi_spec;
+                        }
+                        if !units.is_empty() {
+                            *unit_votes
+                                .entry(idx)
+                                .or_default()
+                                .entry(units.clone())
+                                .or_insert(0) += 1;
                         }
                     }
                 }
@@ -430,6 +513,9 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 };
                 let key = (test_num, 0);
                 if let Some(&idx) = out.col_index.get(&key) {
+                    if out.tests[idx].number.is_none() {
+                        out.tests[idx].number = Some(test_num);
+                    }
                     if out.tests[idx].name.is_empty() || is_provisional(&out.tests[idx].name) {
                         out.tests[idx].name = name;
                     }
@@ -437,7 +523,9 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                     // A test that is defined but never produced a result. Keep it in the list
                     // without allocating a data column.
                     let idx = out.tests.len();
-                    out.tests.push(crate::model::TestInfo::new(name));
+                    let mut test = crate::model::TestInfo::new(name);
+                    test.number = Some(test_num);
+                    out.tests.push(test);
                     out.cols.push(Vec::new());
                     out.col_index.insert(key, idx);
                 }
@@ -446,7 +534,34 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
         }
     }
 
+    // Resolve the unit vote after the whole file has been seen. Ties are
+    // broken deterministically by the unit string, but every non-empty unit
+    // beats a blank one.
+    for (idx, votes) in unit_votes {
+        if idx >= out.tests.len() {
+            continue;
+        }
+        if let Some((unit, _)) = votes
+            .into_iter()
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        {
+            if !unit.is_empty() {
+                out.tests[idx].units = unit;
+            }
+        }
+    }
+
     Ok(out.finish())
+}
+
+fn wafer_unit_scale(units: u8) -> Option<f32> {
+    match units {
+        1 => Some(25.4),  // inches
+        2 => Some(10.0),  // 10 mm
+        3 => Some(1.0),   // mm
+        4 => Some(0.0254),// mils
+        _ => None,
+    }
 }
 
 fn is_provisional(name: &str) -> bool {
@@ -467,6 +582,17 @@ fn scale_opt(value: f32, scal: i8, opt: u8, bit: u8) -> Option<f32> {
     } else {
         value * 10f32.powi(scal as i32)
     })
+}
+
+/// True when two populated limit values disagree beyond float noise.
+fn limits_differ(a: Option<f32>, b: Option<f32>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => {
+            let tol = 1e-6 * (1.0 + x.abs().max(y.abs()));
+            (x - y).abs() > tol
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

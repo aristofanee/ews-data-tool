@@ -1,6 +1,7 @@
 use crate::dataset::Imported;
 use crate::model::{CustomColumn, TestInfo, NAN};
 use memmap2::Mmap;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -41,37 +42,45 @@ fn decode(bytes: &[u8]) -> Cow<'_, str> {
     }
 }
 
-fn detect_delim(line: &str) -> u8 {
-    let mut counts = [0usize; 4];
+fn count_delim(line: &str, delim: char) -> usize {
+    let mut count = 0usize;
     let mut in_quotes = false;
     for ch in line.chars() {
         if ch == '"' {
             in_quotes = !in_quotes;
+        } else if !in_quotes && ch == delim {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Pick the delimiter that gives the most consistent non-trivial row shape.
+/// Looking at several lines (rather than just the first preamble line) is
+/// important for CSV exports that start with a report title.
+fn detect_delimiter(text: &str) -> u8 {
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(40)
+        .collect();
+    let candidates = [b',', b';', b'\t', b'|'];
+    let mut best = (0usize, b',');
+    for delim in candidates {
+        let d = delim as char;
+        let counts: Vec<usize> = lines.iter().map(|l| count_delim(l, d)).collect();
+        let max = counts.iter().copied().max().unwrap_or(0);
+        if max == 0 {
             continue;
         }
-        if in_quotes {
-            continue;
-        }
-        match ch {
-            ',' => counts[0] += 1,
-            ';' => counts[1] += 1,
-            '\t' => counts[2] += 1,
-            '|' => counts[3] += 1,
-            _ => {}
+        let consistent = counts.iter().filter(|c| **c == max).count();
+        let total: usize = counts.iter().sum();
+        let score = consistent * 10_000 + max * 100 + total;
+        if score > best.0 {
+            best = (score, delim);
         }
     }
-    let mut best = 0;
-    for i in 1..4 {
-        if counts[i] > counts[best] {
-            best = i;
-        }
-    }
-    match best {
-        0 => b',',
-        1 => b';',
-        2 => b'\t',
-        _ => b'|',
-    }
+    best.1
 }
 
 fn parse_f32(s: &str) -> f32 {
@@ -103,7 +112,7 @@ fn parse_i16(s: &str) -> i16 {
     if let Ok(v) = t.parse::<f64>() {
         return v as i16;
     }
-    NAN as i16
+    0
 }
 
 fn parse_u16(s: &str) -> u16 {
@@ -114,7 +123,17 @@ fn parse_u16(s: &str) -> u16 {
     if let Ok(v) = t.parse::<f64>() {
         return v.max(0.0) as u16;
     }
-    0
+    1
+}
+
+fn parse_u32(s: &str) -> Option<u32> {
+    let t = s.trim();
+    t.parse::<u32>().ok().or_else(|| {
+        t.parse::<f64>()
+            .ok()
+            .filter(|v| *v >= 0.0)
+            .map(|v| v as u32)
+    })
 }
 
 fn looks_numeric(s: &str) -> bool {
@@ -220,6 +239,29 @@ fn meta_name(header: &str) -> String {
     split_units(header).0
 }
 
+/// Manual column mapping for CSVs whose headers are not recognised.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CsvMapping {
+    pub lot: Option<usize>,
+    pub wafer: Option<usize>,
+    pub x: Option<usize>,
+    pub y: Option<usize>,
+    pub hbin: Option<usize>,
+    pub sbin: Option<usize>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CsvInspection {
+    pub headers: Vec<String>,
+    pub header_line: usize,
+    pub delimiter: String,
+    pub mapping: CsvMapping,
+    pub missing: Vec<String>,
+    pub long_format: bool,
+}
+
 #[derive(Default)]
 struct Layout {
     lot: Option<usize>,
@@ -233,42 +275,16 @@ struct Layout {
     part: Option<usize>,
 }
 
-pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Imported, String> {
-    let file = File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }.map_err(|e| format!("Cannot map file: {e}"))?;
-    let text = decode(&mmap);
-    if text.trim().is_empty() {
-        return Err("File is empty".into());
-    }
-
-    let first_line = text.lines().next().unwrap_or("");
-    let delim = detect_delim(first_line);
-
-    let mut rdr = csv::ReaderBuilder::new()
-        .delimiter(delim)
-        .has_headers(true)
-        .flexible(true)
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
-
-    let headers: Vec<String> = rdr
-        .headers()
-        .map_err(|e| format!("Cannot read CSV header: {e}"))?
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    if headers.is_empty() {
-        return Err("CSV has no columns".into());
-    }
-
+fn layout_from_headers(headers: &[String]) -> Layout {
     let mut lay = Layout::default();
     for (i, h) in headers.iter().enumerate() {
         let n = norm(h);
         let slot = match n.as_str() {
-            "lot" | "lotid" | "lotname" | "sblot" | "sblotid" | "lotnumber" => Some(&mut lay.lot),
-            "wafer" | "waferid" | "wafername" | "wafernumber" | "wf" | "wfr" | "slot" => {
-                Some(&mut lay.wafer)
+            "lot" | "lotid" | "lotname" | "sblot" | "sblotid" | "lotnumber" => {
+                Some(&mut lay.lot)
             }
+            "wafer" | "waferid" | "wafername" | "wafernumber" | "wf" | "wfr" | "slot"
+            | "ocr" | "ocrnumber" | "waferocr" => Some(&mut lay.wafer),
             "x" | "xcoord" | "xcoordinate" | "diex" | "xdie" | "col" | "column" | "sitex" => {
                 Some(&mut lay.x)
             }
@@ -292,16 +308,358 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
             }
         }
     }
+    lay
+}
+
+fn apply_mapping(mut lay: Layout, mapping: Option<&CsvMapping>, n: usize) -> Result<Layout, String> {
+    let Some(m) = mapping else {
+        return Ok(lay);
+    };
+    let check = |v: Option<usize>, name: &str| -> Result<Option<usize>, String> {
+        match v {
+            Some(i) if i >= n => Err(format!(
+                "CSV mapping column for {name} is out of range (column {i}, only {n} columns)"
+            )),
+            other => Ok(other),
+        }
+    };
+    if let Some(v) = check(m.lot, "lot")? {
+        lay.lot = Some(v);
+    }
+    if let Some(v) = check(m.wafer, "wafer")? {
+        lay.wafer = Some(v);
+    }
+    if let Some(v) = check(m.x, "x")? {
+        lay.x = Some(v);
+    }
+    if let Some(v) = check(m.y, "y")? {
+        lay.y = Some(v);
+    }
+    if let Some(v) = check(m.hbin, "hbin")? {
+        lay.hbin = Some(v);
+    }
+    if let Some(v) = check(m.sbin, "sbin")? {
+        lay.sbin = Some(v);
+    }
+    Ok(lay)
+}
+
+fn mapping_from_layout(lay: &Layout) -> CsvMapping {
+    CsvMapping {
+        lot: lay.lot,
+        wafer: lay.wafer,
+        x: lay.x,
+        y: lay.y,
+        hbin: lay.hbin,
+        sbin: lay.sbin,
+    }
+}
+
+fn missing_keys(lay: &Layout) -> Vec<String> {
+    let mut out = Vec::new();
+    if lay.lot.is_none() {
+        out.push("lot".to_string());
+    }
+    if lay.wafer.is_none() {
+        out.push("wafer".to_string());
+    }
+    if lay.x.is_none() {
+        out.push("x".to_string());
+    }
+    if lay.y.is_none() {
+        out.push("y".to_string());
+    }
+    out
+}
+
+fn header_score(headers: &[String]) -> usize {
+    let lay = layout_from_headers(headers);
+    let mut keys = 0usize;
+    for v in [lay.lot, lay.wafer, lay.x, lay.y, lay.hbin, lay.sbin] {
+        if v.is_some() {
+            keys += 1;
+        }
+    }
+    let long = (lay.test.is_some() && lay.value.is_some()) as usize;
+    keys * 10 + long * 20
+}
+
+fn is_header_record(rec: &csv::StringRecord) -> bool {
+    let headers: Vec<String> = rec.iter().map(|s| s.to_string()).collect();
+    let nonempty = headers.iter().filter(|h| !h.trim().is_empty()).count();
+    if nonempty < 2 {
+        return false;
+    }
+    let lay = layout_from_headers(&headers);
+    let keys = [lay.lot, lay.wafer, lay.x, lay.y, lay.hbin, lay.sbin]
+        .iter()
+        .filter(|v| v.is_some())
+        .count();
+    keys >= 2 || (lay.test.is_some() && lay.value.is_some())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetadataKind {
+    TestNumber,
+    Unit,
+    LowLimit,
+    HighLimit,
+}
+
+fn metadata_kind(rec: &csv::StringRecord) -> Option<(MetadataKind, usize)> {
+    // Metadata labels belong in the leading column. Restricting the check to
+    // that cell avoids treating a data row whose test is literally named
+    // "Unit" as a metadata row.
+    let (i, cell) = rec
+        .iter()
+        .enumerate()
+        .find(|(_, cell)| !cell.trim().is_empty())?;
+    let n = norm(cell);
+    let kind = match n.as_str() {
+        "tests" | "testnumber" | "testnum" | "testno" | "testid" | "testindex" => {
+            Some(MetadataKind::TestNumber)
+        }
+        "unit" | "units" | "uom" | "unitofmeasure" => Some(MetadataKind::Unit),
+        "lowl" | "lowlimit" | "lowlimits" | "lsl" | "lcl" | "lolimit" | "lolim"
+        | "lowerlimit" | "lowerlimits" | "min" | "low" => Some(MetadataKind::LowLimit),
+        "highl" | "highlimit" | "highlimits" | "usl" | "ucl" | "hilimit" | "hilim"
+        | "upperlimit" | "upperlimits" | "max" | "high" => Some(MetadataKind::HighLimit),
+        _ => None,
+    };
+    kind.map(|k| (k, i))
+}
+
+#[derive(Default, Clone)]
+struct ColumnMeta {
+    number: Option<u32>,
+    unit: Option<String>,
+    low: Option<f32>,
+    high: Option<f32>,
+}
+
+fn collect_metadata(
+    rows: &[csv::StringRecord],
+    headers: &[String],
+) -> HashMap<usize, ColumnMeta> {
+    let mut out: HashMap<usize, ColumnMeta> = HashMap::new();
+    for rec in rows {
+        let Some((kind, label_index)) = metadata_kind(rec) else {
+            continue;
+        };
+        for i in 0..headers.len() {
+            if i == label_index {
+                continue;
+            }
+            let raw = rec.get(i).unwrap_or("").trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let m = out.entry(i).or_default();
+            match kind {
+                MetadataKind::TestNumber => {
+                    if let Some(v) = parse_u32(raw) {
+                        m.number = Some(v);
+                    }
+                }
+                MetadataKind::Unit => {
+                    m.unit = Some(raw.to_string());
+                }
+                MetadataKind::LowLimit => {
+                    let v = parse_f32(raw);
+                    if v.is_finite() {
+                        m.low = Some(v);
+                    }
+                }
+                MetadataKind::HighLimit => {
+                    let v = parse_f32(raw);
+                    if v.is_finite() {
+                        m.high = Some(v);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn read_text(path: &Path) -> Result<String, String> {
+    let file = File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+    let mmap = unsafe { Mmap::map(&file) }.map_err(|e| format!("Cannot map file: {e}"))?;
+    let text = decode(&mmap).into_owned();
+    if text.trim().is_empty() {
+        return Err("File is empty".into());
+    }
+    Ok(text)
+}
+
+fn reader_for<'a>(text: &'a str, delim: u8) -> csv::Reader<&'a [u8]> {
+    csv::ReaderBuilder::new()
+        .delimiter(delim)
+        .has_headers(false)
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(text.as_bytes())
+}
+
+/// A row that looks like column names even though none of the usual key names
+/// matched. This lets the mapping dialog rescue files with fully custom headers
+/// such as `LOTX, WAFERX, COLX, ROWX`. Metadata rows (`Tests#`, `Unit`, ...) and
+/// numeric data rows are rejected.
+fn looks_like_unlabelled_header(headers: &[String]) -> bool {
+    let cells: Vec<&str> = headers
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if cells.len() < 2 {
+        return false;
+    }
+    let rec = csv::StringRecord::from(headers.to_vec());
+    if metadata_kind(&rec).is_some() {
+        return false;
+    }
+    let numeric = cells.iter().filter(|s| parse_f32(s).is_finite()).count();
+    let textual = cells
+        .iter()
+        .filter(|s| s.chars().any(|c| c.is_alphabetic()))
+        .count();
+    // Column names are mostly text. Requiring at least two text cells keeps
+    // title lines such as "Report generated, 2026-10-25" from being picked.
+    textual >= 2 && numeric * 3 <= cells.len() * 2
+}
+
+/// Find the best header row. Preamble lines from report exports are skipped,
+/// including title rows and blank rows. If no conventional key names are found,
+/// fall back to the widest header-looking row so the manual mapping dialog can
+/// still be used.
+fn find_header(
+    text: &str,
+    delim: u8,
+) -> Result<(Vec<String>, usize, usize), String> {
+    let mut rdr = reader_for(text, delim);
+    let mut rec = csv::StringRecord::new();
+    let mut best: Option<(usize, usize, Vec<String>, usize)> = None; // idx, line, headers, score
+    let mut fallback: Option<(usize, usize, Vec<String>, usize)> = None;
+    for i in 0..200 {
+        if !rdr.read_record(&mut rec).unwrap_or(false) {
+            break;
+        }
+        if rec.iter().all(|s| s.trim().is_empty()) {
+            continue;
+        }
+        let headers: Vec<String> = rec.iter().map(|s| s.to_string()).collect();
+        let line = rec
+            .position()
+            .map(|p| p.line() as usize)
+            .unwrap_or(i + 1)
+            .max(1);
+        if is_header_record(&rec) {
+            let score = header_score(&headers);
+            if score > 0 && best.as_ref().map_or(true, |b| score > b.3) {
+                best = Some((i, line, headers, score));
+            }
+            continue;
+        }
+        if looks_like_unlabelled_header(&headers) {
+            let width = headers.iter().filter(|h| !h.trim().is_empty()).count();
+            if fallback
+                .as_ref()
+                .map_or(true, |b| width > b.3 || (width == b.3 && i > b.0))
+            {
+                fallback = Some((i, line, headers, width));
+            }
+        }
+    }
+    if let Some((idx, line, headers, _)) = best {
+        return Ok((headers, line, idx));
+    }
+    if let Some((idx, line, headers, _)) = fallback {
+        return Ok((headers, line, idx));
+    }
+    Err("CSV header not found. Expected a row with columns such as Lot, Wafer, OCR, X, Y, and test names.".into())
+}
+
+fn read_metadata_and_probe(
+    rdr: &mut csv::Reader<&[u8]>,
+    headers: &[String],
+) -> (Vec<csv::StringRecord>, Vec<csv::StringRecord>) {
+    let mut metadata = Vec::new();
+    let mut probe = Vec::new();
+    let mut rec = csv::StringRecord::new();
+    let mut data_started = false;
+    while probe.len() < 200 {
+        if !rdr.read_record(&mut rec).unwrap_or(false) {
+            break;
+        }
+        if rec.iter().all(|s| s.trim().is_empty()) {
+            continue;
+        }
+        if !data_started {
+            if let Some(_) = metadata_kind(&rec) {
+                metadata.push(rec.clone());
+                continue;
+            }
+            data_started = true;
+        }
+        probe.push(rec.clone());
+    }
+    // Keep the compiler/lint aware that headers participates in the caller's
+    // contract; metadata rows are interpreted after numeric columns are known.
+    let _ = headers;
+    (metadata, probe)
+}
+
+pub fn inspect_csv(path: &Path) -> Result<CsvInspection, String> {
+    let text = read_text(path)?;
+    let delim = detect_delimiter(&text);
+    let (headers, header_line, _header_idx) = find_header(&text, delim)?;
+    let lay = layout_from_headers(&headers);
+    let mapping = mapping_from_layout(&lay);
+    let missing = missing_keys(&lay);
+    Ok(CsvInspection {
+        headers,
+        header_line,
+        delimiter: (delim as char).to_string(),
+        mapping,
+        missing,
+        long_format: lay.test.is_some() && lay.value.is_some(),
+    })
+}
+
+pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Imported, String> {
+    import_csv_with_mapping(path, progress, None)
+}
+
+pub fn import_csv_with_mapping(
+    path: &Path,
+    progress: &mut dyn FnMut(f32, &str),
+    mapping: Option<&CsvMapping>,
+) -> Result<Imported, String> {
+    let text = read_text(path)?;
+    let delim = detect_delimiter(&text);
+    let (headers, _header_line, header_idx) = find_header(&text, delim)?;
+    if headers.is_empty() {
+        return Err("CSV has no columns".into());
+    }
+    let lay = apply_mapping(layout_from_headers(&headers), mapping, headers.len())?;
+    let mut rdr = reader_for(&text, delim);
+    let mut header_rec = csv::StringRecord::new();
+    for _ in 0..=header_idx {
+        if !rdr.read_record(&mut header_rec).unwrap_or(false) {
+            return Err("CSV ended before the header row".into());
+        }
+    }
+    let (metadata_rows, probe) = read_metadata_and_probe(&mut rdr, &headers);
+    let col_meta = collect_metadata(&metadata_rows, &headers);
 
     let long_format = lay.test.is_some() && lay.value.is_some();
     let mut imp = Imported::new();
-    let mut rec = csv::StringRecord::new();
 
     if long_format {
         let ti = lay.test.unwrap();
         let vi = lay.value.unwrap();
         let mut test_ids: HashMap<String, u32> = HashMap::new();
-        let mut row_keys: HashMap<(u32, u32, i16, i16), usize> = HashMap::new();
+        let mut row_keys: HashMap<(u32, u32, i16, i16, u32), usize> = HashMap::new();
         let mut seq = 0i16;
         let meta_indices: Vec<usize> = (0..headers.len())
             .filter(|&i| {
@@ -322,7 +680,7 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
             .map(|&i| MetaColumn::new(meta_name(&headers[i])))
             .collect();
 
-        while rdr.read_record(&mut rec).unwrap_or(false) {
+        let mut push = |rec: &csv::StringRecord, imp: &mut Imported| {
             let lot_name = lay.lot.and_then(|i| rec.get(i)).unwrap_or("LOT");
             let wafer_name = lay.wafer.and_then(|i| rec.get(i)).unwrap_or("W1");
             let lot = imp.lot_index(if lot_name.is_empty() { "LOT" } else { lot_name });
@@ -330,6 +688,7 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
             for (m, &ci) in meta_indices.iter().enumerate() {
                 meta[m].observe(wafer, rec.get(ci).unwrap_or(""));
             }
+            let part = lay.part.and_then(|i| rec.get(i)).map(parse_u32).flatten().unwrap_or(0);
             let x = lay.x.and_then(|i| rec.get(i)).map(parse_i16).unwrap_or(0);
             let y = lay.y
                 .and_then(|i| rec.get(i))
@@ -338,34 +697,18 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
                     seq = seq.wrapping_add(1);
                     seq
                 });
-            let row = if lay.x.is_none() || lay.y.is_none() {
+            let key = (lot as u32, wafer as u32, x, y, part);
+            let row = *row_keys.entry(key).or_insert_with(|| {
                 let r = imp.new_row(lot, wafer);
                 imp.x[r] = x;
                 imp.y[r] = y;
-                if let Some(i) = lay.hbin {
-                    imp.hbin[r] = rec.get(i).map(parse_u16).unwrap_or(0);
-                }
-                if let Some(i) = lay.sbin {
-                    imp.sbin[r] = rec.get(i).map(parse_u16).unwrap_or(0);
-                }
+                imp.hbin[r] = lay.hbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(1);
+                imp.sbin[r] = lay.sbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(1);
                 r
-            } else {
-                *row_keys.entry((lot as u32, wafer as u32, x, y)).or_insert_with(|| {
-                    let r = imp.new_row(lot, wafer);
-                    imp.x[r] = x;
-                    imp.y[r] = y;
-                    if let Some(i) = lay.hbin {
-                        imp.hbin[r] = rec.get(i).map(parse_u16).unwrap_or(0);
-                    }
-                    if let Some(i) = lay.sbin {
-                        imp.sbin[r] = rec.get(i).map(parse_u16).unwrap_or(0);
-                    }
-                    r
-                })
-            };
+            });
             let tname = rec.get(ti).unwrap_or("").trim();
             if tname.is_empty() {
-                continue;
+                return;
             }
             let id = if let Some(id) = test_ids.get(tname) {
                 *id
@@ -382,8 +725,16 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
             if imp.records % 200_000 == 0 {
                 progress(0.0, "Reading CSV...");
             }
+        };
+
+        for rec in probe.iter() {
+            push(rec, &mut imp);
         }
-        // give tests a stable order matching their ids
+        let mut rec = csv::StringRecord::new();
+        while rdr.read_record(&mut rec).unwrap_or(false) {
+            push(&rec, &mut imp);
+        }
+        // Give tests a stable order matching their ids.
         let mut order: Vec<(u32, usize)> = test_ids
             .iter()
             .map(|(name, id)| (*id, imp.tests.iter().position(|t| &t.name == name).unwrap_or(0)))
@@ -420,11 +771,6 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
         sample.push(i);
     }
 
-    // probe the first 200 records to decide which columns are numeric
-    let mut probe: Vec<csv::StringRecord> = Vec::new();
-    while probe.len() < 200 && rdr.read_record(&mut rec).unwrap_or(false) {
-        probe.push(rec.clone());
-    }
     let mut numeric: Vec<usize> = Vec::new();
     let mut meta_indices: Vec<usize> = Vec::new();
     for &i in sample.iter() {
@@ -455,6 +801,20 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
         let (name, unit) = split_units(&headers[i]);
         let mut t = TestInfo::new(name);
         t.units = unit;
+        if let Some(m) = col_meta.get(&i) {
+            t.number = m.number;
+            if let Some(u) = &m.unit {
+                if !u.is_empty() {
+                    t.units = u.clone();
+                }
+            }
+            // The exported metadata rows are control limits; expose them as
+            // both control and spec limits so they can be drawn immediately.
+            t.lo_limit = m.low;
+            t.hi_limit = m.high;
+            t.lo_spec = m.low;
+            t.hi_spec = m.high;
+        }
         imp.tests.push(t);
         imp.cols.push(Vec::with_capacity(probe.len() + 1024));
     }
@@ -477,8 +837,14 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
         let r = imp.new_row(lot, wafer);
         imp.x[r] = lay.x.and_then(|i| rec.get(i)).map(parse_i16).unwrap_or(0);
         imp.y[r] = lay.y.and_then(|i| rec.get(i)).map(parse_i16).unwrap_or(0);
-        imp.hbin[r] = lay.hbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(0);
-        imp.sbin[r] = lay.sbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(0);
+        imp.hbin[r] = lay.hbin
+            .and_then(|i| rec.get(i))
+            .map(parse_u16)
+            .unwrap_or(1);
+        imp.sbin[r] = lay.sbin
+            .and_then(|i| rec.get(i))
+            .map(parse_u16)
+            .unwrap_or(1);
         for (k, &ci) in numeric.iter().enumerate() {
             let v = parse_f32(rec.get(ci).unwrap_or(""));
             imp.cols[k].push(v);
@@ -489,6 +855,7 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
     for r in probe.iter() {
         push_row(&mut imp, r, &mut meta);
     }
+    let mut rec = csv::StringRecord::new();
     while rdr.read_record(&mut rec).unwrap_or(false) {
         push_row(&mut imp, &rec, &mut meta);
         if imp.records % 200_000 == 0 {
@@ -605,6 +972,80 @@ mod tests {
         let imp = import_csv(&p, &mut |_, _| {}).unwrap();
         assert_eq!(imp.tests.len(), 1);
         assert!((imp.cols[0][0] - 0.41).abs() < 1e-5);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn csv_with_preamble_and_metadata_rows() {
+        let p = write_temp(
+            "preamble",
+            "EWS Data Tool report\n\
+             Generated 2026-10-25\n\
+             \n\
+             Lot,Wafer,X,Y,HBIN,Vt [V],Leakage\n\
+             Tests#, , , , ,101,202\n\
+             Unit, , , , ,V,A\n\
+             LowL, , , , ,0.35,0.01\n\
+             HighL, , , , ,0.55,0.10\n\
+             L1,01,0,0,1,0.41,0.02\n\
+             L1,01,1,0,1,0.42,0.03\n",
+        );
+        let imp = import_csv(&p, &mut |_, _| {}).unwrap();
+        assert_eq!(imp.tests.len(), 2);
+        assert_eq!(imp.tests[0].number, Some(101));
+        assert_eq!(imp.tests[0].units, "V");
+        assert_eq!(imp.tests[0].lo_limit, Some(0.35));
+        assert_eq!(imp.tests[0].hi_limit, Some(0.55));
+        assert_eq!(imp.tests[1].number, Some(202));
+        assert_eq!(imp.tests[1].units, "A");
+        assert_eq!(imp.row_lot.len(), 2);
+        assert!((imp.cols[0][0] - 0.41).abs() < 1e-6);
+        assert!((imp.cols[1][1] - 0.03).abs() < 1e-6);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn manual_mapping_finds_key_columns() {
+        let p = write_temp(
+            "mapping",
+            "LotID,OCR,DieX,DieY,Vt [V]\n\
+             L1,01,0,0,0.41\n\
+             L1,01,1,0,0.42\n",
+        );
+        let inspection = inspect_csv(&p).unwrap();
+        assert!(inspection.missing.is_empty());
+        let imp = import_csv(&p, &mut |_, _| {}).unwrap();
+        assert_eq!(imp.wafers.len(), 1);
+        assert_eq!(imp.x, vec![0, 1]);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn custom_headers_offer_manual_mapping() {
+        let p = write_temp(
+            "custom-headers",
+            "LOTX,WAFERX,COLX,ROWX,H1,S1,T1\n\
+             L1,01,0,0,1,1,0.41\n\
+             L1,01,1,0,1,1,0.42\n",
+        );
+        let inspection = inspect_csv(&p).unwrap();
+        assert_eq!(inspection.header_line, 1);
+        assert!(inspection.missing.contains(&"lot".to_string()));
+        assert!(inspection.missing.contains(&"x".to_string()));
+        let mapping = CsvMapping {
+            lot: Some(0),
+            wafer: Some(1),
+            x: Some(2),
+            y: Some(3),
+            hbin: Some(4),
+            sbin: Some(5),
+        };
+        let imp = import_csv_with_mapping(&p, &mut |_, _| {}, Some(&mapping)).unwrap();
+        assert_eq!(imp.lots, vec!["L1"]);
+        assert_eq!(imp.wafers.len(), 1);
+        assert_eq!(imp.x, vec![0, 1]);
+        assert_eq!(imp.tests.len(), 1);
+        assert!((imp.cols[0][1] - 0.42).abs() < 1e-6);
         let _ = std::fs::remove_file(&p);
     }
 }

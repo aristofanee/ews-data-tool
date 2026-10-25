@@ -1,3 +1,5 @@
+import type { TestInfo } from "../types";
+
 export function fmt(v: number | null | undefined, digits = 4): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return "–";
   const a = Math.abs(v);
@@ -30,9 +32,33 @@ export function withUnits(name: string, units: string): string {
   return units ? `${n} [${units}]` : n;
 }
 
-export function axisTitle(name: string, units: string, unitSize = 10): string {
-  const n = tidyName(name);
-  return units ? `${n}<br><span style="font-size:${Math.round(unitSize)}px">${units}</span>` : n;
+/** STDF names often use underscores as separators: `X1_Charging` -> `X1 Charging`. */
+export function testName(test: Pick<TestInfo, "name"> | null | undefined): string {
+  return test ? tidyName(test.name.replace(/_/g, " ")) : "Test";
+}
+
+/** Human test label, including the STDF test number when one is available. */
+export function testLabel(test: Pick<TestInfo, "name" | "number"> | null | undefined): string {
+  if (!test) return "Test";
+  const name = testName(test);
+  if (test.number === null || test.number === undefined) return name;
+  const prefix = String(test.number);
+  if (name === prefix || name.startsWith(`${prefix} -`) || name.startsWith(`${prefix} `)) {
+    return name;
+  }
+  return `${prefix} - ${name}`;
+}
+
+export function testLabelWithUnits(
+  test: Pick<TestInfo, "name" | "number" | "units"> | null | undefined
+): string {
+  const label = testLabel(test);
+  return test?.units ? `${label} [${test.units}]` : label;
+}
+
+/** Axis titles keep units inline, e.g. `9999 - Leakage [A]`. */
+export function axisTitle(name: string, units: string, _unitSize = 10): string {
+  return withUnits(name, units);
 }
 
 export function safeName(s: string): string {

@@ -13,6 +13,8 @@ import {
 } from "../charts/figures";
 import { PlotlyChart } from "./PlotlyChart";
 import { WaferMapView, type MapExportApi } from "./WaferMapView";
+import { BinMapView, type BinMapExportApi } from "./BinMapView";
+import { MapFacetView, type MapFacetExportApi } from "./MapFacetView";
 import { EmptyState } from "./EmptyState";
 import { EXPORT_CONFIG } from "../charts/plotlyTheme";
 import type { Theme } from "../lib/theme";
@@ -33,6 +35,7 @@ import {
 const TABS: { type: PlotType; label: string; Icon: ComponentType<{ size?: number }> }[] = [
   { type: "box", label: "Box plot", Icon: IconBox },
   { type: "map", label: "Wafer map", Icon: IconMap },
+  { type: "binmap", label: "Bin map", Icon: IconMap },
   { type: "pareto", label: "Pareto", Icon: IconPareto },
   { type: "hist", label: "Histogram", Icon: IconHist },
   { type: "trend", label: "Trend", Icon: IconTrend },
@@ -85,6 +88,22 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
         { k: "Dice", v: fmtInt(d.pass + d.fail) },
       ];
       return out;
+    }
+    case "binmap": {
+      const d = data.data;
+      const pass = d.wafers.reduce((n, w) => n + w.pass, 0);
+      const fail = d.wafers.reduce((n, w) => n + w.fail, 0);
+      const tested = pass + fail;
+      return [
+        {
+          k: "Yield",
+          v: `${tested ? ((pass * 100) / tested).toFixed(2) : "0.00"}%`,
+          tone: tested && pass / tested < 0.9 ? "bad" : tested && pass / tested < 0.96 ? "warn" : "good",
+        },
+        { k: "Wafers", v: fmtInt(d.wafers.length) },
+        { k: "Pass", v: fmtInt(pass) },
+        { k: "Fail", v: fmtInt(fail) },
+      ];
     }
     case "pareto": {
       const d = data.data;
@@ -144,15 +163,32 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
   }
 }
 
+interface Facet {
+  key?: number;
+  label: string;
+}
+
+function facetsFor(data: PlotData, spec: PlotSpec): Facet[] {
+  if (!spec.splitPlots) return [];
+  if (data.kind === "box") {
+    return [...new Set(data.data.groups.map((g) => g.block))].map((label) => ({ label }));
+  }
+  if (data.kind === "scatter" && data.data.zMode === "category") {
+    return data.data.series.map((s) => ({ key: s.key, label: s.name }));
+  }
+  return [];
+}
+
 function buildFigure(
   data: PlotData,
   spec: PlotSpec,
   theme: Theme,
-  title?: string
+  title?: string,
+  facet?: Facet
 ): Figure | null {
   switch (data.kind) {
     case "box":
-      return figureBox(data.data, { theme, spec, title });
+      return figureBox(data.data, { theme, spec, title, facetLabel: facet?.label });
     case "pareto":
       return figurePareto(data.data, { theme, spec, title });
     case "hist":
@@ -160,10 +196,20 @@ function buildFigure(
     case "trend":
       return figureTrend(data.data, { theme, spec, title });
     case "scatter":
-      return figureScatter(data.data, { theme, spec, title });
+      return figureScatter(data.data, { theme, spec, title, facetKey: facet?.key });
     default:
       return null;
   }
+}
+
+function FacetChart({ figure, label }: { figure: Figure; label: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  return (
+    <div className="facet-card">
+      <div className="facet-label">{label}</div>
+      <PlotlyChart figure={figure} hostRef={ref} />
+    </div>
+  );
 }
 
 /**
@@ -174,8 +220,8 @@ function buildFigure(
 async function renderExportFigure(
   fig: Figure,
   format: "png" | "jpeg",
-  width = 1800,
-  height = 1100
+  width = 2400,
+  height = 1500
 ): Promise<string> {
   const host = document.createElement("div");
   host.style.cssText = `position:fixed;left:-30000px;top:0;width:${width}px;height:${height}px;`;
@@ -187,8 +233,8 @@ async function renderExportFigure(
       format,
       width,
       height,
-      scale: 1,
-      quality: 0.95,
+      scale: 1.25,
+      quality: 0.96,
     });
   } finally {
     try {
@@ -204,6 +250,7 @@ export function ChartPanel() {
   const info = useStore((s) => s.info);
   const spec = useStore((s) => s.spec);
   const theme = useStore((s) => s.theme);
+  const filters = useStore((s) => s.filters);
   const setPlotType = useStore((s) => s.setPlotType);
   const patchSpec = useStore((s) => s.patchSpec);
   const addReport = useStore((s) => s.addReport);
@@ -213,10 +260,23 @@ export function ChartPanel() {
   const { data, loading, error } = usePlotData();
   const plotRef = useRef<HTMLDivElement>(null);
   const mapApi = useRef<MapExportApi | null>(null);
+  const mapFacetApi = useRef<MapFacetExportApi | null>(null);
+  const binMapApi = useRef<BinMapExportApi | null>(null);
   const [titleDraft, setTitleDraft] = useState(spec.title);
 
   useEffect(() => setTitleDraft(spec.title), [spec.title]);
 
+  const facets = useMemo<Facet[]>(() => (data ? facetsFor(data, spec) : []), [data, spec]);
+  const facetFigures = useMemo(
+    () =>
+      data
+        ? facets.map((facet) => ({
+            facet,
+            figure: buildFigure(data, spec, theme, `${spec.title} · ${facet.label}`, facet),
+          }))
+        : [],
+    [data, facets, spec, theme]
+  );
   const figure = useMemo<Figure | null>(
     () => (data ? buildFigure(data, spec, theme) : null),
     [data, spec, theme]
@@ -226,6 +286,9 @@ export function ChartPanel() {
 
   const stats = data ? statsFor(data, spec) : [];
   const isMap = spec.type === "map";
+  const isBinMap = spec.type === "binmap";
+  const mapSplitActive = isMap && spec.splitPlots;
+  const splitActive = facets.length > 1 && facetFigures.some((f) => f.figure);
 
   const commitTitle = () => {
     const t = titleDraft.trim();
@@ -236,10 +299,16 @@ export function ChartPanel() {
   const copyImage = async () => {
     try {
       let url: string | null = null;
-      if (isMap) {
-        url = mapApi.current?.toDataURL("png", "light", 1800, 1100) ?? null;
+      if (mapSplitActive) {
+        url = mapFacetApi.current?.toDataURLs("png", "light", 2400, 1500)[0]?.url ?? null;
+      } else if (isMap) {
+        url = mapApi.current?.toDataURL("png", "light", 2400, 1500) ?? null;
+      } else if (isBinMap) {
+        url = binMapApi.current?.toDataURL("png", "light", 2400, 1500) ?? null;
       } else if (data) {
-        const fig = buildFigure(data, spec, "light", spec.title);
+        const fig = splitActive
+          ? facetFigures[0]?.figure
+          : buildFigure(data, spec, "light", spec.title);
         if (fig) url = await renderExportFigure(fig, "png");
       }
       if (!url) throw new Error("The chart is not ready yet.");
@@ -275,11 +344,43 @@ export function ChartPanel() {
 
   const saveJpg = async () => {
     try {
+      // Split plots are a cluster: save one image per split into a folder,
+      // with the split name in every filename.
+      if (mapSplitActive) {
+        const folder = await api.pickFolder();
+        if (!folder) return;
+        const images = mapFacetApi.current?.toDataURLs("jpeg", "light", 2400, 1500) ?? [];
+        const base = folder.replace(/[\\/]+$/, "");
+        for (const image of images) {
+          const file = `${safeName(spec.title)}_${safeName(image.label)}.jpg`;
+          await api.saveImage(`${base}\\${file}`, image.url);
+        }
+        notify(`Saved ${images.length} split map${images.length === 1 ? "" : "s"}.`);
+        return;
+      }
+      if (splitActive && !isMap && !isBinMap) {
+        const folder = await api.pickFolder();
+        if (!folder) return;
+        let count = 0;
+        for (const { facet, figure: facetFigure } of facetFigures) {
+          if (!facetFigure) continue;
+          const url = await renderExportFigure(facetFigure, "jpeg");
+          const base = folder.replace(/[\\/]+$/, "");
+          const file = `${safeName(spec.title)}_${safeName(facet.label)}.jpg`;
+          await api.saveImage(`${base}\\${file}`, url);
+          count++;
+        }
+        notify(`Saved ${count} split image${count === 1 ? "" : "s"}.`);
+        return;
+      }
+
       const path = await api.pickSavePath(`${safeName(spec.title || "plot")}.jpg`, ["jpg", "jpeg"]);
       if (!path) return;
       let url: string | null = null;
       if (isMap) {
-        url = mapApi.current?.toDataURL("jpeg", "light", 1800, 1100) ?? null;
+        url = mapApi.current?.toDataURL("jpeg", "light", 2400, 1500) ?? null;
+      } else if (isBinMap) {
+        url = binMapApi.current?.toDataURL("jpeg", "light", 2400, 1500) ?? null;
       } else if (data) {
         const fig = buildFigure(data, spec, "light", spec.title);
         if (fig) url = await renderExportFigure(fig, "jpeg");
@@ -364,8 +465,25 @@ export function ChartPanel() {
               <div className="chart-error-msg">{error}</div>
               <div className="hint">Try a different test, or reset the filters on the left.</div>
             </div>
+          ) : mapSplitActive ? (
+            <MapFacetView
+              spec={spec}
+              filter={filters}
+              onReady={(apiRef) => (mapFacetApi.current = apiRef)}
+            />
           ) : data?.kind === "map" ? (
             <WaferMapView data={data.data} spec={spec} onReady={(apiRef) => (mapApi.current = apiRef)} />
+          ) : data?.kind === "binmap" ? (
+            <BinMapView data={data.data} spec={spec} onReady={(apiRef) => (binMapApi.current = apiRef)} />
+          ) : splitActive ? (
+            <div className="facet-grid">
+              {facetFigures.map(
+                ({ facet, figure: facetFigure }) =>
+                  facetFigure && (
+                    <FacetChart key={facet.label} figure={facetFigure} label={facet.label} />
+                  )
+              )}
+            </div>
           ) : figure ? (
             <PlotlyChart figure={figure} hostRef={plotRef} />
           ) : (

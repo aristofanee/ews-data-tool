@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import * as api from "./api";
 import { useStore } from "../store";
 import type {
+  BinOverviewResponse,
   BoxResponse,
   HistResponse,
   MapResponse,
@@ -13,6 +14,7 @@ import type {
 export type PlotData =
   | { kind: "box"; data: BoxResponse }
   | { kind: "map"; data: MapResponse }
+  | { kind: "binmap"; data: BinOverviewResponse }
   | { kind: "pareto"; data: ParetoResponse }
   | { kind: "hist"; data: HistResponse }
   | { kind: "trend"; data: TrendResponse }
@@ -40,7 +42,7 @@ export function usePlotData(): PlotDataState {
     mapMode: spec.mapMode,
     binCategory: spec.binCategory,
     top: spec.top,
-    includePass: spec.includePass,
+    paretoGroup: spec.paretoGroup,
     bins: spec.bins,
     scatterX: spec.scatterX,
     scatterY: spec.scatterY,
@@ -87,6 +89,13 @@ export function usePlotData(): PlotDataState {
             };
             break;
           }
+          case "binmap": {
+            result = {
+              kind: "binmap",
+              data: await api.binOverview({ filter: filters }),
+            };
+            break;
+          }
           case "pareto": {
             result = {
               kind: "pareto",
@@ -94,7 +103,7 @@ export function usePlotData(): PlotDataState {
                 category: spec.binCategory,
                 filter: filters,
                 top: spec.top,
-                includePass: spec.includePass,
+                groupBy: spec.paretoGroup,
               }),
             };
             break;

@@ -1,6 +1,16 @@
 use crate::model::*;
 use std::collections::HashMap;
 
+fn limits_differ(a: Option<f32>, b: Option<f32>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => {
+            let tol = 1e-6 * (1.0 + x.abs().max(y.abs()));
+            (x - y).abs() > tol
+        }
+        _ => false,
+    }
+}
+
 /// Data parsed from one file, keyed by local indices. Merged into `Dataset` afterwards.
 pub struct Imported {
     pub lots: Vec<String>,
@@ -15,7 +25,7 @@ pub struct Imported {
     pub cols: Vec<Vec<f32>>,
     pub hbin_names: HashMap<u16, (String, bool)>,
     pub sbin_names: HashMap<u16, (String, bool)>,
-    pub wafer_geom: Vec<(Option<f32>, Option<f32>, Option<f32>)>,
+    pub wafer_geom: Vec<WaferGeom>,
     pub records: u64,
     pub col_index: HashMap<(u32, u16), usize>,
     /// Text metadata imported from a CSV (for example an Excel-added Split
@@ -62,7 +72,7 @@ impl Imported {
             return i as u16;
         }
         self.wafers.push((lot, name.to_string()));
-        self.wafer_geom.push((None, None, None));
+        self.wafer_geom.push(WaferGeom::default());
         (self.wafers.len() - 1) as u16
     }
 
@@ -136,18 +146,39 @@ impl Dataset {
         let mut wafer_map = Vec::with_capacity(imp.wafers.len());
         for (wi, (li, name)) in imp.wafers.iter().enumerate() {
             let glot = lot_map[*li as usize];
+            let geom = imp
+                .wafer_geom
+                .get(wi)
+                .copied()
+                .unwrap_or_default();
             if let Some(j) = self
                 .wafers
                 .iter()
                 .position(|w| w.lot == glot && &w.name == name)
             {
+                // A later file may carry the WCR geometry for an existing
+                // wafer. Fill only missing values so the first definition wins.
+                let w = &mut self.wafers[j];
+                if w.diameter_mm.is_none() {
+                    w.diameter_mm = geom.diameter_mm;
+                }
+                if w.die_w_mm.is_none() {
+                    w.die_w_mm = geom.die_w_mm;
+                }
+                if w.die_h_mm.is_none() {
+                    w.die_h_mm = geom.die_h_mm;
+                }
+                if w.center_x.is_none() {
+                    w.center_x = geom.center_x;
+                }
+                if w.center_y.is_none() {
+                    w.center_y = geom.center_y;
+                }
+                if w.flat.is_none() {
+                    w.flat = geom.flat.map(|c| c.to_string());
+                }
                 wafer_map.push(j as u16);
             } else {
-                let geom = imp
-                    .wafer_geom
-                    .get(wi)
-                    .copied()
-                    .unwrap_or((None, None, None));
                 self.wafers.push(WaferInfo {
                     lot: glot,
                     name: name.clone(),
@@ -156,9 +187,12 @@ impl Dataset {
                     x_max: i16::MIN,
                     y_min: i16::MAX,
                     y_max: i16::MIN,
-                    diameter_mm: geom.0,
-                    die_w_mm: geom.1,
-                    die_h_mm: geom.2,
+                    diameter_mm: geom.diameter_mm,
+                    die_w_mm: geom.die_w_mm,
+                    die_h_mm: geom.die_h_mm,
+                    center_x: geom.center_x,
+                    center_y: geom.center_y,
+                    flat: geom.flat.map(|c| c.to_string()),
                 });
                 wafer_map.push((self.wafers.len() - 1) as u16);
             }
@@ -169,8 +203,18 @@ impl Dataset {
         for t in imp.tests.iter() {
             if let Some(i) = self.test_index(&t.name) {
                 let dst = &mut self.tests[i];
+                if dst.number.is_none() {
+                    dst.number = t.number;
+                }
                 if dst.units.is_empty() && !t.units.is_empty() {
                     dst.units = t.units.clone();
+                }
+                if limits_differ(dst.lo_limit, t.lo_limit)
+                    || limits_differ(dst.hi_limit, t.hi_limit)
+                    || limits_differ(dst.lo_spec, t.lo_spec)
+                    || limits_differ(dst.hi_spec, t.hi_spec)
+                {
+                    dst.limit_conflict = true;
                 }
                 if dst.lo_limit.is_none() {
                     dst.lo_limit = t.lo_limit;

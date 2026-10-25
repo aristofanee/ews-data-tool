@@ -1,12 +1,16 @@
 import type {
   BinInfo,
+  BinOverviewResponse,
   BoxResponse,
+  CsvInspection,
   CustomColumn,
   DatasetInfo,
   Filter,
   HistResponse,
   MapResponse,
+  ParetoGroup,
   ParetoResponse,
+  ParetoSeries,
   ScatterPoint,
   ScatterResponse,
   ScatterSeries,
@@ -113,7 +117,8 @@ function buildDataset(): MockDataset {
     }
   }
   const n = coords.length;
-  const tests: TestInfo[] = TEST_DEFS.map((d) => ({
+  const tests: TestInfo[] = TEST_DEFS.map((d, i) => ({
+    number: 1001 + i,
     name: d.name,
     units: d.units,
     loLimit: null,
@@ -121,6 +126,7 @@ function buildDataset(): MockDataset {
     loSpec: d.lsl,
     hiSpec: d.usl,
     count: 0,
+    limitConflict: false,
   }));
 
   const wafers: MockWafer[] = [];
@@ -224,6 +230,9 @@ function buildDataset(): MockDataset {
     diameterMm: 300,
     dieWMm: 6.4,
     dieHMm: 6.4,
+    centerX: 0,
+    centerY: 0,
+    flat: "D",
   }));
 
   for (const t of tests) {
@@ -415,6 +424,17 @@ export async function openPaths(_paths: string[], onProgress?: (pct: number, msg
   return ds.info;
 }
 
+export async function inspectCsv(_path: string): Promise<CsvInspection> {
+  return delay({
+    headers: ["Lot", "Wafer", "X", "Y", "HBIN", "Vt [V]"],
+    headerLine: 1,
+    delimiter: ",",
+    mapping: { lot: 0, wafer: 1, x: 2, y: 3, hbin: 4, sbin: null },
+    missing: [],
+    longFormat: false,
+  });
+}
+
 export async function boxPlot(req: {
   test: number;
   groupBy: "wafer" | "lot";
@@ -467,7 +487,14 @@ export async function boxPlot(req: {
     }
   }
 
-  const ordered = [...groups.values()].sort((a, b) => naturalCompare(a.label, b.label));
+  const ordered = [...groups.values()].sort((a, b) => {
+    if (req.blockCol) {
+      const byBlock = naturalCompare(a.block, b.block);
+      if (byBlock !== 0) return byBlock;
+      if (a.blockCode !== b.blockCode) return a.blockCode - b.blockCode;
+    }
+    return naturalCompare(a.label, b.label);
+  });
   let excluded = 0;
   const all: number[] = [];
   if (req.filter.stat) {
@@ -534,7 +561,19 @@ export async function boxPlot(req: {
       blockCode: g.blockCode,
     })),
     summary,
-    test: test ?? { name: "?", units: "", loLimit: null, hiLimit: null, loSpec: null, hiSpec: null, count: 0 },
+    test:
+      test ??
+      {
+        number: null,
+        name: "?",
+        units: "",
+        loLimit: null,
+        hiLimit: null,
+        loSpec: null,
+        hiSpec: null,
+        count: 0,
+        limitConflict: false,
+      },
     lsl: test?.loSpec ?? null,
     usl: test?.hiSpec ?? null,
     cp,
@@ -567,22 +606,50 @@ export async function waferMap(req: {
       yieldPct: 0,
     });
   }
-  const dice = [];
+  const byCoord = new Map<
+    string,
+    { x: number; y: number; sum: number; n: number; hb: Map<number, number>; sb: Map<number, number> }
+  >();
+  const col = req.test !== null ? w.cols[req.test] : undefined;
+  for (let i = 0; i < w.x.length; i++) {
+    if (!binAllowed(w, i, req.filter)) continue;
+    const key = `${w.x[i]},${w.y[i]}`;
+    let acc = byCoord.get(key);
+    if (!acc) {
+      acc = { x: w.x[i], y: w.y[i], sum: 0, n: 0, hb: new Map(), sb: new Map() };
+      byCoord.set(key, acc);
+    }
+    acc.hb.set(w.hbin[i], (acc.hb.get(w.hbin[i]) ?? 0) + 1);
+    acc.sb.set(w.sbin[i], (acc.sb.get(w.sbin[i]) ?? 0) + 1);
+    const v = col ? col[i] : NaN;
+    if (req.mode === "value" && Number.isFinite(v)) {
+      acc.sum += v;
+      acc.n++;
+    }
+  }
+  const majority = (m: Map<number, number>) =>
+    [...m.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0;
+  const dice = [...byCoord.values()]
+    .filter((a) => req.mode === "bin" || a.n > 0)
+    .sort((a, b) => a.x - b.x || a.y - b.y)
+    .map((a) => ({
+      x: a.x,
+      y: a.y,
+      v: req.mode === "value" ? a.sum / a.n : majority(a.hb),
+      hbin: majority(a.hb),
+      sbin: majority(a.sb),
+    }));
   let pass = 0;
   let fail = 0;
   let vmin = Infinity;
   let vmax = -Infinity;
-  const col = req.test !== null ? w.cols[req.test] : undefined;
-  for (let i = 0; i < w.x.length; i++) {
-    if (!binAllowed(w, i, req.filter)) continue;
-    const v = req.mode === "bin" ? w.hbin[i] : col ? col[i] : NaN;
-    if (req.mode === "value" && Number.isFinite(v)) {
-      vmin = Math.min(vmin, v);
-      vmax = Math.max(vmax, v);
+  for (const d of dice) {
+    if (req.mode === "value") {
+      vmin = Math.min(vmin, d.v);
+      vmax = Math.max(vmax, d.v);
     }
-    if (w.hbin[i] === 1) pass++;
+    if (d.hbin === 1) pass++;
     else fail++;
-    dice.push({ x: w.x[i], y: w.y[i], v, hbin: w.hbin[i], sbin: w.sbin[i] });
   }
   const test = req.test !== null ? ds.tests[req.test] : null;
   return delay({
@@ -600,64 +667,202 @@ export async function waferMap(req: {
   });
 }
 
+export async function binOverview(req: { filter: Filter }): Promise<BinOverviewResponse> {
+  const ds = dataset();
+  const wafers = [];
+  for (const w of ds.wafers) {
+    if (!waferAllowed(w, req.filter)) continue;
+    const byCoord = new Map<string, { x: number; y: number; hb: Map<number, number>; sb: Map<number, number> }>();
+    for (let i = 0; i < w.x.length; i++) {
+      if (!binAllowed(w, i, req.filter)) continue;
+      const key = `${w.x[i]},${w.y[i]}`;
+      let acc = byCoord.get(key);
+      if (!acc) {
+        acc = { x: w.x[i], y: w.y[i], hb: new Map(), sb: new Map() };
+        byCoord.set(key, acc);
+      }
+      acc.hb.set(w.hbin[i], (acc.hb.get(w.hbin[i]) ?? 0) + 1);
+      acc.sb.set(w.sbin[i], (acc.sb.get(w.sbin[i]) ?? 0) + 1);
+    }
+    const majority = (m: Map<number, number>) =>
+      [...m.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0;
+    const dice = [...byCoord.values()]
+      .sort((a, b) => a.x - b.x || a.y - b.y)
+      .map((a) => ({
+        x: a.x,
+        y: a.y,
+        v: majority(a.hb),
+        hbin: majority(a.hb),
+        sbin: majority(a.sb),
+      }));
+    let pass = 0;
+    let fail = 0;
+    for (const d of dice) {
+      if (d.hbin === 1) pass++;
+      else fail++;
+    }
+    if (dice.length) {
+      wafers.push({
+        wafer: ds.info.wafers[w.index],
+        lotName: ds.lots[w.lot],
+        dice,
+        pass,
+        fail,
+        yieldPct: pass + fail ? (pass * 100) / (pass + fail) : 0,
+      });
+    }
+  }
+  return delay({ wafers });
+}
+
 export async function pareto(req: {
   category: "hard" | "soft";
   filter: Filter;
   top?: number;
-  includePass?: boolean;
+  groupBy?: string | null;
 }): Promise<ParetoResponse> {
   const ds = dataset();
+  const defs = req.category === "hard" ? ds.info.hbins : ds.info.sbins;
+  const nameOf = (code: number) => defs.find((b) => b.code === code)?.name ?? `Bin ${code}`;
+  const passOf = (code: number) => defs.find((b) => b.code === code)?.pass ?? code === 1;
   const counts = new Map<number, number>();
+  const grouped = new Map<string, { total: number; pass: number; counts: Map<number, number> }>();
+  const multiLot = ds.lots.length > 1;
   let total = 0;
+  let passTotal = 0;
   for (const w of ds.wafers) {
     if (!waferAllowed(w, req.filter)) continue;
     const codes = req.category === "hard" ? w.hbin : w.sbin;
     for (let i = 0; i < codes.length; i++) {
       if (!binAllowed(w, i, req.filter)) continue;
       const code = codes[i];
-      if (code === 1 && req.includePass !== true) continue;
-      counts.set(code, (counts.get(code) ?? 0) + 1);
+      const pass = passOf(code);
       total++;
+      if (pass) passTotal++;
+      counts.set(code, (counts.get(code) ?? 0) + 1);
+      if (req.groupBy && req.groupBy !== "none") {
+        const label =
+          req.groupBy === "lot"
+            ? ds.lots[w.lot]
+            : req.groupBy === "wafer"
+              ? labelOf(w, multiLot)
+              : (() => {
+                  const c = ds.customCols.find((x) => x.name === req.groupBy);
+                  return c ? customLabel(c, c.waferValues[w.index] ?? 0) : ds.lots[w.lot];
+                })();
+        let g = grouped.get(label);
+        if (!g) {
+          g = { total: 0, pass: 0, counts: new Map() };
+          grouped.set(label, g);
+        }
+        g.total++;
+        if (pass) g.pass++;
+        g.counts.set(code, (g.counts.get(code) ?? 0) + 1);
+      }
     }
   }
-  const defs = req.category === "hard" ? ds.info.hbins : ds.info.sbins;
-  const nameOf = (code: number) => defs.find((b) => b.code === code)?.name ?? `Bin ${code}`;
-  const passOf = (code: number) => defs.find((b) => b.code === code)?.pass ?? code === 1;
-  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+  const yieldPct = total ? (passTotal * 100) / total : 0;
   const top = req.top ?? 20;
-  const bars = [];
-  let cum = 0;
-  let others = 0;
-  for (let i = 0; i < sorted.length; i++) {
-    const [code, count] = sorted[i];
-    if (i >= top) {
-      others += count;
-      continue;
+  const failureCodes = [...counts.entries()]
+    .filter(([code]) => !passOf(code))
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+  const failTotal = failureCodes.reduce((a, [, c]) => a + c, 0);
+
+  if (req.groupBy && req.groupBy !== "none") {
+    const rows = [...grouped.entries()].sort((a, b) => naturalCompare(a[0], b[0]));
+    const groups: ParetoGroup[] = rows.map(([label, g], key) => ({
+      key,
+      label,
+      total: g.total,
+      pass: g.pass,
+      fail: g.total - g.pass,
+      yieldPct: g.total ? (g.pass * 100) / g.total : 0,
+    }));
+    const selected = failureCodes.slice(0, top);
+    const hasOthers = failureCodes.length > selected.length;
+    const series: ParetoSeries[] = selected.map(([code]) => {
+      const cs = rows.map(([, g]) => g.counts.get(code) ?? 0);
+      return {
+        code,
+        name: nameOf(code),
+        counts: cs,
+        pcts: cs.map((c, i) => (rows[i][1].total ? (c * 100) / rows[i][1].total : 0)),
+        pass: false,
+      };
+    });
+    if (hasOthers) {
+      const selectedSet = new Set(selected.map(([code]) => code));
+      const cs = rows.map(([, g]) => {
+        let n = 0;
+        for (const [code, count] of g.counts) {
+          if (!selectedSet.has(code) && !passOf(code)) n += count;
+        }
+        return n;
+      });
+      series.push({
+        code: 0xffff,
+        name: "Others",
+        counts: cs,
+        pcts: cs.map((c, i) => (rows[i][1].total ? (c * 100) / rows[i][1].total : 0)),
+        pass: false,
+      });
     }
-    cum += count;
-    bars.push({
-      code,
-      name: nameOf(code),
-      count,
-      pct: total ? (count * 100) / total : 0,
-      cumPct: total ? (cum * 100) / total : 0,
-      pass: passOf(code),
+    const groupLabel =
+      req.groupBy === "lot"
+        ? "Lot"
+        : req.groupBy === "wafer"
+          ? "Wafer"
+          : ds.customCols.find((c) => c.name === req.groupBy)?.name ?? "Group";
+    return delay({
+      mode: "grouped",
+      bars: [],
+      groups,
+      series,
+      total,
+      failTotal,
+      yieldPct,
+      groupLabel,
     });
   }
-  if (others > 0) {
+
+  const bars = failureCodes.slice(0, top).map(([code, count]) => ({
+    code,
+    name: nameOf(code),
+    count,
+    pct: total ? (count * 100) / total : 0,
+    pass: false,
+  }));
+  if (failureCodes.length > top) {
+    const others = failureCodes.slice(top).reduce((a, [, c]) => a + c, 0);
     bars.push({
       code: 0xffff,
       name: "Others",
       count: others,
       pct: total ? (others * 100) / total : 0,
-      cumPct: 100,
       pass: false,
     });
   }
-  const failTotal = sorted
-    .filter(([code]) => !passOf(code))
-    .reduce((a, [, c]) => a + c, 0);
-  return delay({ bars, total, failTotal });
+  for (const [code, count] of [...counts.entries()]
+    .filter(([code]) => passOf(code))
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])) {
+    bars.push({
+      code,
+      name: nameOf(code),
+      count,
+      pct: total ? (count * 100) / total : 0,
+      pass: true,
+    });
+  }
+  return delay({
+    mode: "global",
+    bars,
+    groups: [],
+    series: [],
+    total,
+    failTotal,
+    yieldPct,
+    groupLabel: "",
+  });
 }
 
 export async function histogram(req: {
@@ -778,6 +983,7 @@ export async function scatter(req: {
 }): Promise<ScatterResponse> {
   const ds = dataset();
   const xTest = ds.tests[req.xTest] ?? {
+    number: null,
     name: "?",
     units: "",
     loLimit: null,
@@ -785,6 +991,7 @@ export async function scatter(req: {
     loSpec: null,
     hiSpec: null,
     count: 0,
+    limitConflict: false,
   };
   const yTest = ds.tests[req.yTest] ?? xTest;
   const multiLot = ds.lots.length > 1;

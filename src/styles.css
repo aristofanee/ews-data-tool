@@ -142,6 +142,20 @@ code {
   margin-top: 7px;
 }
 
+.hint.warn {
+  color: var(--yellow-text, #a16207);
+  background: var(--yellow-soft, #fef9c3);
+  border: 1px solid color-mix(in srgb, var(--yellow-text, #a16207) 22%, transparent);
+  border-radius: 6px;
+  padding: 6px 7px;
+}
+
+[data-theme="dark"] .hint.warn {
+  color: #fde68a;
+  background: #3a2f0b;
+  border-color: #6b5511;
+}
+
 /* ------------------------------------------------------------------ */
 /* Top bar                                                             */
 /* ------------------------------------------------------------------ */
@@ -839,6 +853,43 @@ select.input {
 .plotly-host {
   width: 100%;
   height: 100%;
+}
+
+.facet-grid {
+  position: absolute;
+  inset: 4px 6px 2px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-auto-rows: minmax(270px, 1fr);
+  gap: 8px;
+  overflow: auto;
+}
+
+.facet-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.facet-label {
+  flex: 0 0 auto;
+  padding: 5px 9px 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.facet-card .plotly-host {
+  flex: 1;
+  min-height: 0;
 }
 
 .chart-placeholder {
@@ -1822,6 +1873,104 @@ select.input {
   color: var(--muted);
 }
 
+.binmap-wrap {
+  height: 100%;
+  overflow-y: auto;
+  padding: 10px 14px 20px;
+}
+
+.binmap-group + .binmap-group {
+  margin-top: 18px;
+}
+
+.binmap-lot {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-2);
+}
+
+.binmap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.binmap-tile {
+  min-width: 0;
+}
+
+.binmap-open {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  text-align: left;
+  cursor: zoom-in;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.binmap-open:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.binmap-canvas-wrap {
+  width: 100%;
+  height: 164px;
+}
+
+.binmap-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.binmap-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 2px 0;
+}
+
+.binmap-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.binmap-yield {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.binmap-meta {
+  padding: 0 2px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.binmap-modal {
+  width: min(1060px, 100%);
+}
+
+.binmap-modal-body {
+  position: relative;
+  height: min(72vh, 760px);
+  min-height: 360px;
+  overflow: hidden;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1907,6 +2056,20 @@ select.input {
 
 .modal-field > span {
   font-weight: 600;
+}
+
+.label-assign-row {
+  display: flex;
+  gap: 6px;
+}
+
+.label-assign-row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.label-assign-row .btn {
+  flex: 0 0 auto;
 }
 
 .column-tools {

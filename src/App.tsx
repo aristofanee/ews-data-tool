@@ -7,10 +7,11 @@ import { Sidebar } from "./components/Sidebar";
 import { ChartPanel } from "./components/ChartPanel";
 import { Inspector } from "./components/Inspector";
 import { ReportDrawer } from "./components/ReportDrawer";
+import { CsvMappingDialog } from "./components/CsvMappingDialog";
 import { StatusBar, ErrorBanner, ProgressOverlay, Toast } from "./components/StatusBar";
 import type { PlotType } from "./types";
 
-const PLOT_KEYS: PlotType[] = ["box", "map", "pareto", "hist", "trend", "scatter"];
+const PLOT_KEYS: PlotType[] = ["box", "map", "binmap", "pareto", "hist", "trend", "scatter"];
 
 export default function App() {
   const theme = useStore((s) => s.theme);
@@ -59,7 +60,7 @@ export default function App() {
       } else if (key === "e") {
         e.preventDefault();
         void exportCsv();
-      } else if (key >= "1" && key <= "6") {
+      } else if (key >= "1" && key <= "7") {
         e.preventDefault();
         const t = PLOT_KEYS[Number(key) - 1];
         if (t) useStore.getState().setPlotType(t);
@@ -81,6 +82,7 @@ export default function App() {
       </div>
       <StatusBar />
       <ReportDrawer />
+      <CsvMappingDialog />
       <ProgressOverlay />
       <ErrorBanner />
       <Toast />

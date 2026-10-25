@@ -1,4 +1,4 @@
-import type { MapDie, MapResponse } from "../types";
+import type { BinOverviewWafer, MapDie, MapResponse } from "../types";
 import { fmt } from "../lib/format";
 import type { Theme } from "../lib/theme";
 import { binColor, paletteColor } from "../lib/theme";
@@ -12,6 +12,8 @@ export interface MapOptions {
   binNames?: Record<number, string>;
   /** Larger map labels and legend for slide-sized output. */
   presentation?: boolean;
+  /** Hide the colour/bin legend for small bin-overview thumbnails. */
+  showLegend?: boolean;
 }
 
 export interface MapHit {
@@ -67,11 +69,13 @@ export class WaferMapRenderer {
   private opts: MapOptions | null = null;
 
   private cell = 1;
+  private cellW = 1;
+  private cellH = 1;
   private cx = 0;
   private cy = 0;
   private dieCx = 0;
   private dieCy = 0;
-  private radiusDie = 1;
+  private radiusPx = 1;
   private zoom = 1;
   private panX = 0;
   private panY = 0;
@@ -179,7 +183,7 @@ export class WaferMapRenderer {
   }
 
   private clampPan(): void {
-    const max = Math.max(0, this.radiusDie * this.cell * (this.zoom - 1) * 1.1);
+    const max = Math.max(0, this.radiusPx * (this.zoom - 1) * 1.1);
     this.panX = clamp(this.panX, -max, max);
     this.panY = clamp(this.panY, -max, max);
   }
@@ -189,8 +193,8 @@ export class WaferMapRenderer {
     const rect = this.canvas.getBoundingClientRect();
     const px = clientX - rect.left;
     const py = clientY - rect.top;
-    const gx = (px - this.cx - this.panX) / this.zoom / this.cell + this.dieCx;
-    const gy = -(py - this.cy - this.panY) / this.zoom / this.cell + this.dieCy;
+    const gx = (px - this.cx - this.panX) / this.zoom / this.cellW + this.dieCx;
+    const gy = -(py - this.cy - this.panY) / this.zoom / this.cellH + this.dieCy;
     const x = Math.round(gx);
     const y = Math.round(gy);
     if (Math.abs(gx - x) > 0.5 || Math.abs(gy - y) > 0.5) return null;
@@ -250,48 +254,87 @@ export class WaferMapRenderer {
       minY = -1;
       maxY = 1;
     }
-    this.dieCx = (minX + maxX) / 2;
-    this.dieCy = (minY + maxY) / 2;
-    const span = Math.max((maxX - minX + 1) / 2, (maxY - minY + 1) / 2) + 0.5;
+    const wf = data.wafer;
+    const dieWmm = wf?.dieWMm && wf.dieWMm > 0 ? wf.dieWMm : null;
+    const dieHmm = wf?.dieHMm && wf.dieHMm > 0 ? wf.dieHMm : null;
+    const hasDieDims = dieWmm !== null && dieHmm !== null;
+    const centerX = wf?.centerX ?? (minX + maxX) / 2;
+    const centerY = wf?.centerY ?? (minY + maxY) / 2;
+    this.dieCx = centerX;
+    this.dieCy = centerY;
 
+    const showLegend = this.opts.showLegend !== false;
     const cbarW =
-      mode === "bin"
-        ? Math.min(pres ? 290 : 196, Math.max(pres ? 190 : 120, w * (pres ? 0.34 : 0.3)))
-        : pres
-          ? 164
-          : 108;
+      !showLegend
+        ? 0
+        : mode === "bin"
+          ? Math.min(pres ? 290 : 196, Math.max(pres ? 190 : 120, w * (pres ? 0.34 : 0.3)))
+          : pres
+            ? 164
+            : 108;
     const pad = pres ? 20 : 14;
-    const availW = Math.max(80, w - cbarW - pad * 2);
-    const availH = Math.max(80, h - pad * 2);
-    const area = Math.min(availW, availH);
-    const cell = area / (span * 2 + 1);
+    const availW = Math.max(40, w - cbarW - pad * 2);
+    const availH = Math.max(40, h - pad * 2);
     const cx = pad + availW / 2;
     const cy = pad + availH / 2;
 
-    this.cell = cell;
+    let cellW: number;
+    let cellH: number;
+    let R: number;
+    if (hasDieDims) {
+      // WCR gives physical die dimensions. Use their true aspect ratio and the
+      // wafer diameter, and fit the larger of the wafer circle and the die
+      // grid into the available area.
+      const halfGridW = Math.max(Math.abs(minX - centerX), Math.abs(maxX - centerX) + 1) * dieWmm;
+      const halfGridH = Math.max(Math.abs(minY - centerY), Math.abs(maxY - centerY) + 1) * dieHmm;
+      const diameter = wf?.diameterMm && wf.diameterMm > 0 ? wf.diameterMm : null;
+      const radiusMm = diameter
+        ? diameter / 2
+        : Math.max(halfGridW, halfGridH) + Math.max(dieWmm, dieHmm) * 0.5;
+      const worldW = Math.max(radiusMm * 2, halfGridW * 2, dieWmm * 2);
+      const worldH = Math.max(radiusMm * 2, halfGridH * 2, dieHmm * 2);
+      const fit = Math.min(availW / worldW, availH / worldH);
+      cellW = dieWmm * fit;
+      cellH = dieHmm * fit;
+      R = radiusMm * fit;
+    } else {
+      // Legacy files without WCR geometry: fall back to the coordinate grid.
+      // A 1:1 cell keeps the map usable even when no physical dimensions exist.
+      const cols = maxX - minX + 1;
+      const rows = maxY - minY + 1;
+      const span = Math.max(cols, rows) + 1;
+      const cell = Math.min(availW / span, availH / span);
+      cellW = cell;
+      cellH = cell;
+      R = Math.max((cols / 2) * cell, (rows / 2) * cell) + cell * 0.6;
+    }
+
+    this.cell = Math.min(cellW, cellH);
+    this.cellW = cellW;
+    this.cellH = cellH;
     this.cx = cx;
     this.cy = cy;
-    this.radiusDie = span;
+    this.radiusPx = R;
 
-    const R = span * cell;
-
-    // Wafer outline
     ctx.save();
     ctx.translate(cx + this.panX, cy + this.panY);
     ctx.scale(this.zoom, this.zoom);
+
+    // One continuous wafer path (circle + notch) is used for both filling and
+    // clipping. The notch is therefore real wafer geometry, not a triangle
+    // pasted over the outline, and scales with the wafer radius.
     ctx.beginPath();
-    ctx.arc(0, 0, R, 0, Math.PI * 2);
+    this.traceWaferPath(ctx, R);
     ctx.fillStyle = t.wafer;
     ctx.fill();
-    ctx.lineWidth = (pres ? 2.6 : 1.5) / this.zoom;
-    ctx.strokeStyle = t.outline;
-    ctx.stroke();
 
-    // Dice, clipped to the wafer
     ctx.save();
+    ctx.beginPath();
+    this.traceWaferPath(ctx, R);
     ctx.clip();
-    const gap = Math.max(0.35, cell * 0.055);
-    const size = Math.max(0.5, cell - gap);
+    const gap = Math.max(0.3, Math.min(cellW, cellH) * 0.055);
+    const dw = Math.max(0.5, cellW - gap);
+    const dh = Math.max(0.5, cellH - gap);
     const lo = Number.isFinite(data.vmin) ? data.vmin : 0;
     const hi = Number.isFinite(data.vmax) ? data.vmax : 1;
     const vspan = hi > lo ? hi - lo : 1;
@@ -306,64 +349,55 @@ export class WaferMapRenderer {
       }
       ctx.fillStyle = color;
       ctx.fillRect(
-        (d.x - this.dieCx) * cell - size / 2,
-        -(d.y - this.dieCy) * cell - size / 2,
-        size,
-        size
+        (d.x - centerX) * cellW - dw / 2,
+        -(d.y - centerY) * cellH - dh / 2,
+        dw,
+        dh
       );
     }
     ctx.restore();
 
     // Hover highlight
     if (this.hover) {
-      const s = Math.max(cell, (pres ? 6 : 4) / this.zoom);
+      const hw = Math.max(cellW, (pres ? 6 : 4) / this.zoom);
+      const hh = Math.max(cellH, (pres ? 6 : 4) / this.zoom);
+      const hx = (this.hover.x - centerX) * cellW;
+      const hy = -(this.hover.y - centerY) * cellH;
       ctx.lineWidth = (pres ? 3 : 2) / this.zoom;
       ctx.strokeStyle = this.opts.theme === "dark" ? "#ffffff" : "#0f172a";
-      ctx.strokeRect(
-        (this.hover.x - this.dieCx) * cell - s / 2,
-        -(this.hover.y - this.dieCy) * cell - s / 2,
-        s,
-        s
-      );
+      ctx.strokeRect(hx - hw / 2, hy - hh / 2, hw, hh);
       ctx.lineWidth = (pres ? 1.6 : 1) / this.zoom;
       ctx.strokeStyle = "#f5b301";
       ctx.strokeRect(
-        (this.hover.x - this.dieCx) * cell - s / 2 - (pres ? 2.5 : 1.5) / this.zoom,
-        -(this.hover.y - this.dieCy) * cell - s / 2 - (pres ? 2.5 : 1.5) / this.zoom,
-        s + (pres ? 5 : 3) / this.zoom,
-        s + (pres ? 5 : 3) / this.zoom
+        hx - hw / 2 - (pres ? 2.5 : 1.5) / this.zoom,
+        hy - hh / 2 - (pres ? 2.5 : 1.5) / this.zoom,
+        hw + (pres ? 5 : 3) / this.zoom,
+        hh + (pres ? 5 : 3) / this.zoom
       );
     }
-    ctx.restore();
 
-    // Notch at 6 o'clock
-    const notchW = Math.max(3, cell * 1.5);
-    const notchD = Math.max(3, cell * 1.2);
+    // Redraw the outline on top so dice never cover it.
     ctx.beginPath();
-    ctx.moveTo(cx + this.panX - notchW, cy + this.panY + R * this.zoom);
-    ctx.lineTo(cx + this.panX + notchW, cy + this.panY + R * this.zoom);
-    ctx.lineTo(cx + this.panX, cy + this.panY + (R - notchD) * this.zoom);
-    ctx.closePath();
-    ctx.fillStyle = t.bg;
-    ctx.fill();
+    this.traceWaferPath(ctx, R);
+    ctx.lineWidth = (pres ? 2.6 : 1.5) / this.zoom;
     ctx.strokeStyle = t.outline;
-    ctx.lineWidth = 1.4 * k;
     ctx.stroke();
+    ctx.restore();
 
     const barX = w - cbarW + (pres ? 14 : 10);
 
-    if (mode === "value") {
+    if (showLegend && mode === "value") {
       this.drawColorbar(
         t,
         barX,
         pad + 8,
         Math.min(pres ? 26 : 16, cbarW * 0.16),
-        Math.min(area, h - pad * 2 - 20),
+        Math.min(availH, h - pad * 2 - 20),
         lo,
         hi,
         pres
       );
-    } else {
+    } else if (showLegend) {
       this.drawBinLegend(t, barX, pad + 10, cbarW - 14, pres);
     }
 
@@ -375,6 +409,31 @@ export class WaferMapRenderer {
       ctx.textBaseline = "top";
       ctx.fillText(`${this.zoom.toFixed(1)}×  ·  double-click to reset`, pad, 4);
     }
+  }
+
+  /** Build a circle with a real notch/flat cut out of its outline. */
+  private traceWaferPath(ctx: CanvasRenderingContext2D, radius: number): void {
+    const flat = this.data?.wafer?.flat;
+    if (!flat) {
+      ctx.arc(0, 0, radius, 0, Math.PI * 2);
+      return;
+    }
+    const theta =
+      flat === "U"
+        ? -Math.PI / 2
+        : flat === "L"
+          ? Math.PI
+          : flat === "R"
+            ? 0
+            : Math.PI / 2;
+    const halfGap = Math.asin(Math.min(0.92, 0.055));
+    const start = theta + halfGap;
+    const end = theta - halfGap + Math.PI * 2;
+    const depth = radius * 0.035;
+    ctx.moveTo(Math.cos(start) * radius, Math.sin(start) * radius);
+    ctx.arc(0, 0, radius, start, end, false);
+    ctx.lineTo(Math.cos(theta) * (radius - depth), Math.sin(theta) * (radius - depth));
+    ctx.closePath();
   }
 
   private drawColorbar(
@@ -549,5 +608,89 @@ export function renderMapImage(
   ctx.fillRect(42, Math.round(94 * k), Math.round(74 * k), Math.round(4 * k));
 
   ctx.drawImage(map, 0, headerH);
+  return out.toDataURL(format === "png" ? "image/png" : "image/jpeg", 0.95);
+}
+
+/** Composite export for the Bin map tab: all selected wafers in one image. */
+export function renderBinOverviewImage(
+  wafers: BinOverviewWafer[],
+  opts: MapOptions,
+  width: number,
+  height: number,
+  title: string,
+  subtitle: string,
+  format: "jpeg" | "png" = "jpeg"
+): string {
+  const out = document.createElement("canvas");
+  out.width = width;
+  out.height = height;
+  const ctx = out.getContext("2d");
+  if (!ctx) return "";
+  const t = mapColors(opts.theme);
+  ctx.fillStyle = t.bg;
+  ctx.fillRect(0, 0, width, height);
+
+  const pres = opts.presentation === true;
+  const headerH = Math.round(height * (pres ? 0.14 : 0.12));
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = t.text;
+  ctx.font = `600 ${Math.round(pres ? 32 : 26)}px ${FONT}`;
+  ctx.fillText(title, 42, Math.round(pres ? 54 : 46));
+  ctx.fillStyle = t.muted;
+  ctx.font = `${Math.round(pres ? 17 : 14)}px ${FONT}`;
+  ctx.fillText(subtitle, 42, Math.round(pres ? 84 : 72));
+  ctx.fillStyle = "#2563eb";
+  ctx.fillRect(42, Math.round(pres ? 102 : 86), Math.round(pres ? 82 : 64), 4);
+
+  const n = wafers.length;
+  if (!n) return out.toDataURL(format === "png" ? "image/png" : "image/jpeg", 0.95);
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  const margin = Math.round(pres ? 34 : 24);
+  const gap = Math.round(pres ? 22 : 14);
+  const labelH = Math.round(pres ? 46 : 34);
+  const cellW = (width - margin * 2 - gap * (cols - 1)) / cols;
+  const cellH = (height - headerH - margin - gap * (rows - 1)) / rows;
+  const multiLot = new Set(wafers.map((w) => w.lotName)).size > 1;
+
+  wafers.forEach((w, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = margin + col * (cellW + gap);
+    const y = headerH + row * (cellH + gap);
+    const mapH = Math.max(10, cellH - labelH);
+    const mapCanvas = document.createElement("canvas");
+    const renderer = new WaferMapRenderer(mapCanvas);
+    renderer.setSize(Math.round(cellW), Math.round(mapH), pres ? 1.5 : 1.25);
+    const data: MapResponse = {
+      wafer: w.wafer,
+      lotName: w.lotName,
+      dice: w.dice,
+      test: null,
+      lsl: null,
+      usl: null,
+      vmin: Number.NaN,
+      vmax: Number.NaN,
+      pass: w.pass,
+      fail: w.fail,
+      yieldPct: w.yieldPct,
+    };
+    renderer.setData(data, { ...opts, mode: "bin", showLegend: false, presentation: false });
+    renderer.draw();
+
+    const label = multiLot ? `${w.lotName} / ${w.wafer.name}` : w.wafer.name;
+    ctx.fillStyle = t.text;
+    ctx.font = `600 ${Math.round(pres ? 18 : 14)}px ${FONT}`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText(label, x + 2, y + Math.round(pres ? 20 : 15));
+    ctx.fillStyle = t.muted;
+    ctx.font = `${Math.round(pres ? 15 : 12)}px ${FONT}`;
+    ctx.textAlign = "right";
+    ctx.fillText(`${w.yieldPct.toFixed(1)}%`, x + cellW - 2, y + Math.round(pres ? 20 : 15));
+    ctx.drawImage(mapCanvas, x, y + labelH, cellW, mapH);
+  });
+
   return out.toDataURL(format === "png" ? "image/png" : "image/jpeg", 0.95);
 }

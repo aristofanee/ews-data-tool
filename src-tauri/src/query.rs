@@ -191,6 +191,16 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
         }
     }
 
+    // When the boxes are coloured by a block (lot, wafer, custom split), keep
+    // contiguous blocks together instead of interleaving them by x label.
+    if req.block_col.as_deref().is_some_and(|s| !s.is_empty()) {
+        groups.sort_by(|a, b| {
+            natural_cmp(&a.block, &b.block)
+                .then_with(|| a.block_code.cmp(&b.block_code))
+                .then_with(|| natural_cmp(&a.label, &b.label))
+        });
+    }
+
     let summary = summarize(&all);
     let (cp, cpk) = cp_cpk(&all, test.lo_spec, test.hi_spec);
     BoxResponse {
@@ -327,11 +337,95 @@ pub struct MapResponse {
     pub yield_pct: f32,
 }
 
+#[derive(Default)]
+struct MapAcc {
+    sum: f64,
+    n: usize,
+    hbin_counts: HashMap<u16, usize>,
+    sbin_counts: HashMap<u16, usize>,
+}
+
+fn majority(map: &HashMap<u16, usize>) -> u16 {
+    map.iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+        .map(|(code, _)| *code)
+        .unwrap_or(0)
+}
+
+/// Aggregate one wafer by coordinate. Repeated coordinates (for example after
+/// merging several files or retests) become one die whose value is the mean of
+/// all finite values and whose bin is the majority bin. Value maps omit
+/// coordinates that have no measurement at all.
+fn aggregate_map(
+    ds: &Dataset,
+    wafer: u16,
+    test: Option<usize>,
+    mode: MapMode,
+    filter: &Filter,
+) -> (Vec<MapDie>, usize, usize, f32, f32) {
+    let mask = ds.base_mask(filter);
+    let col = test.and_then(|t| ds.cols.get(t));
+    let mut by_coord: HashMap<(i16, i16), MapAcc> = HashMap::new();
+    for r in 0..ds.rows {
+        if ds.wafer_of_row[r] != wafer || !mask[r] {
+            continue;
+        }
+        let acc = by_coord.entry((ds.x[r], ds.y[r])).or_default();
+        *acc.hbin_counts.entry(ds.hbin[r]).or_insert(0) += 1;
+        *acc.sbin_counts.entry(ds.sbin[r]).or_insert(0) += 1;
+        if mode == MapMode::Value {
+            if let Some(v) = col.and_then(|c| c.get(r)).copied() {
+                if v.is_finite() {
+                    acc.sum += v as f64;
+                    acc.n += 1;
+                }
+            }
+        }
+    }
+
+    let mut dice = Vec::with_capacity(by_coord.len());
+    let mut pass = 0usize;
+    let mut fail = 0usize;
+    let mut vmin = f32::INFINITY;
+    let mut vmax = f32::NEG_INFINITY;
+    for ((x, y), acc) in by_coord {
+        if mode == MapMode::Value && acc.n == 0 {
+            continue;
+        }
+        let v = match mode {
+            MapMode::Value => (acc.sum / acc.n as f64) as f32,
+            MapMode::Bin => majority(&acc.hbin_counts) as f32,
+        };
+        let hbin = majority(&acc.hbin_counts);
+        let sbin = majority(&acc.sbin_counts);
+        if mode == MapMode::Value {
+            vmin = vmin.min(v);
+            vmax = vmax.max(v);
+        }
+        if ds.is_pass(hbin) {
+            pass += 1;
+        } else {
+            fail += 1;
+        }
+        dice.push(MapDie {
+            x,
+            y,
+            v,
+            hbin,
+            sbin,
+        });
+    }
+    dice.sort_by_key(|d| (d.x, d.y));
+    if !vmin.is_finite() {
+        vmin = f32::NAN;
+        vmax = f32::NAN;
+    }
+    (dice, pass, fail, vmin, vmax)
+}
+
 pub fn wafer_map(ds: &Dataset, req: &MapRequest) -> MapResponse {
     let w = ds.wafers.get(req.wafer as usize).cloned();
-    let test = req
-        .test
-        .and_then(|t| ds.tests.get(t).cloned());
+    let test = req.test.and_then(|t| ds.tests.get(t).cloned());
     if w.is_none() {
         return MapResponse {
             wafer: None,
@@ -347,51 +441,16 @@ pub fn wafer_map(ds: &Dataset, req: &MapRequest) -> MapResponse {
             yield_pct: 0.0,
         };
     }
-    let mask = ds.base_mask(&req.filter);
-    let mut dice = Vec::new();
-    let mut pass = 0usize;
-    let mut fail = 0usize;
-    let mut vmin = f32::INFINITY;
-    let mut vmax = f32::NEG_INFINITY;
-    for r in 0..ds.rows {
-        if ds.wafer_of_row[r] != req.wafer || !mask[r] {
-            continue;
-        }
-        let v = match req.mode {
-            MapMode::Value => req
-                .test
-                .and_then(|t| ds.cols.get(t))
-                .and_then(|c| c.get(r))
-                .copied()
-                .unwrap_or(f32::NAN),
-            MapMode::Bin => ds.hbin[r] as f32,
-        };
-        if req.mode == MapMode::Value && v.is_finite() {
-            vmin = vmin.min(v);
-            vmax = vmax.max(v);
-        }
-        if ds.is_pass(ds.hbin[r]) {
-            pass += 1;
-        } else {
-            fail += 1;
-        }
-        dice.push(MapDie {
-            x: ds.x[r],
-            y: ds.y[r],
-            v,
-            hbin: ds.hbin[r],
-            sbin: ds.sbin[r],
-        });
-    }
-    if !vmin.is_finite() {
-        vmin = f32::NAN;
-        vmax = f32::NAN;
-    }
+    let (dice, pass, fail, vmin, vmax) =
+        aggregate_map(ds, req.wafer, req.test, req.mode, &req.filter);
     let tested = pass + fail;
     let lsl = test.as_ref().and_then(|t| t.lo_spec);
     let usl = test.as_ref().and_then(|t| t.hi_spec);
     MapResponse {
-        lot_name: w.as_ref().map(|w| ds.lot_name(w.lot).to_string()).unwrap_or_default(),
+        lot_name: w
+            .as_ref()
+            .map(|w| ds.lot_name(w.lot).to_string())
+            .unwrap_or_default(),
         wafer: w,
         dice,
         test,
@@ -411,15 +470,72 @@ pub fn wafer_map(ds: &Dataset, req: &MapRequest) -> MapResponse {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BinOverviewRequest {
+    #[serde(default)]
+    pub filter: Filter,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BinOverviewWafer {
+    pub wafer: WaferInfo,
+    pub lot_name: String,
+    pub dice: Vec<MapDie>,
+    pub pass: usize,
+    pub fail: usize,
+    pub yield_pct: f32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BinOverviewResponse {
+    pub wafers: Vec<BinOverviewWafer>,
+}
+
+/// Bin maps for every selected wafer, in dataset order. The frontend groups
+/// these by lot when more than one lot is present.
+pub fn bin_overview(ds: &Dataset, req: &BinOverviewRequest) -> BinOverviewResponse {
+    let mut wafers = Vec::new();
+    for (wi, w) in ds.wafers.iter().enumerate() {
+        let (dice, pass, fail, _, _) =
+            aggregate_map(ds, wi as u16, None, MapMode::Bin, &req.filter);
+        if dice.is_empty() {
+            continue;
+        }
+        let tested = pass + fail;
+        wafers.push(BinOverviewWafer {
+            wafer: w.clone(),
+            lot_name: ds.lot_name(w.lot).to_string(),
+            dice,
+            pass,
+            fail,
+            yield_pct: if tested > 0 {
+                pass as f32 * 100.0 / tested as f32
+            } else {
+                0.0
+            },
+        });
+    }
+    BinOverviewResponse { wafers }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ParetoRequest {
     pub category: BinCategory,
     #[serde(default)]
     pub filter: Filter,
     pub top: Option<usize>,
-    /// Include the pass bin (bin 1) in the chart. Defaults to false: a Pareto
-    /// of failures only is far more informative than one dominated by yield.
-    #[serde(default)]
-    pub include_pass: bool,
+    /// Empty/`none` is the global failure Pareto. `lot`, `wafer`, or a custom
+    /// column name switches to the grouped mode.
+    pub group_by: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ParetoMode {
+    Global,
+    Grouped,
 }
 
 #[derive(Serialize)]
@@ -429,16 +545,80 @@ pub struct ParetoBar {
     pub name: String,
     pub count: usize,
     pub pct: f32,
-    pub cum_pct: f32,
+    pub pass: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParetoGroup {
+    pub key: usize,
+    pub label: String,
+    pub total: usize,
+    pub pass: usize,
+    pub fail: usize,
+    pub yield_pct: f32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParetoSeries {
+    pub code: u16,
+    pub name: String,
+    pub counts: Vec<usize>,
+    pub pcts: Vec<f32>,
     pub pass: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParetoResponse {
+    pub mode: ParetoMode,
     pub bars: Vec<ParetoBar>,
+    pub groups: Vec<ParetoGroup>,
+    pub series: Vec<ParetoSeries>,
     pub total: usize,
     pub fail_total: usize,
+    pub yield_pct: f32,
+    pub group_label: String,
+}
+
+#[derive(Default)]
+struct ParetoGroupAcc {
+    total: usize,
+    pass: usize,
+    counts: HashMap<u16, usize>,
+}
+
+fn pareto_group_label(
+    ds: &Dataset,
+    group_by: &str,
+    row: usize,
+    multi_lot: bool,
+) -> String {
+    match group_by {
+        "lot" => ds.lot_name(ds.lot_of_row[row]).to_string(),
+        "wafer" => label(ds, GroupBy::Wafer, ds.wafer_of_row[row], multi_lot),
+        other => {
+            let wi = ds.wafer_of_row[row] as usize;
+            if let Some(cc) = ds.custom_column(other) {
+                let code = cc.wafer_values.get(wi).copied().unwrap_or(0);
+                custom_label(cc, code)
+            } else {
+                ds.lot_name(ds.lot_of_row[row]).to_string()
+            }
+        }
+    }
+}
+
+fn pareto_group_title(ds: &Dataset, group_by: &str) -> String {
+    match group_by {
+        "lot" => "Lot".to_string(),
+        "wafer" => "Wafer".to_string(),
+        other => ds
+            .custom_column(other)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "Group".to_string()),
+    }
 }
 
 pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
@@ -451,37 +631,168 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
         BinCategory::Hard => ds.pass_hbin[code as usize] || (code == 1 && ds.hbin_names.is_empty()),
         BinCategory::Soft => ds.pass_sbin[code as usize] || (code == 1 && ds.sbin_names.is_empty()),
     };
+    let multi_lot = ds.lots.len() > 1;
+    let group_by = req
+        .group_by
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "none");
     let mut counts: HashMap<u16, usize> = HashMap::new();
     let mut total = 0usize;
+    let mut pass_total = 0usize;
     let mut fail_total = 0usize;
+    let mut grouped: HashMap<String, ParetoGroupAcc> = HashMap::new();
+
     for r in 0..ds.rows {
         if !mask[r] {
             continue;
         }
         let code = codes[r];
-        if !is_pass(code) {
+        let pass = is_pass(code);
+        total += 1;
+        if pass {
+            pass_total += 1;
+        } else {
             fail_total += 1;
         }
-        if !req.include_pass && is_pass(code) {
-            continue;
-        }
-        total += 1;
         *counts.entry(code).or_insert(0) += 1;
+        if let Some(by) = group_by {
+            let glabel = pareto_group_label(ds, by, r, multi_lot);
+            let g = grouped.entry(glabel).or_default();
+            g.total += 1;
+            if pass {
+                g.pass += 1;
+            }
+            *g.counts.entry(code).or_insert(0) += 1;
+        }
     }
-    let mut bars: Vec<(u16, usize)> = counts.into_iter().collect();
-    bars.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-    let top = req.top.unwrap_or(25).max(1);
-    let mut out = Vec::new();
-    let mut cum = 0usize;
+    let yield_pct = if total > 0 {
+        pass_total as f32 * 100.0 / total as f32
+    } else {
+        0.0
+    };
+    let top = req.top.unwrap_or(20).max(1);
+
+    if let Some(by) = group_by {
+        let mut group_rows: Vec<(String, ParetoGroupAcc)> = grouped.into_iter().collect();
+        group_rows.sort_by(|a, b| natural_cmp(&a.0, &b.0));
+        let groups: Vec<ParetoGroup> = group_rows
+            .iter()
+            .enumerate()
+            .map(|(key, (label, g))| ParetoGroup {
+                key,
+                label: label.clone(),
+                total: g.total,
+                pass: g.pass,
+                fail: g.total.saturating_sub(g.pass),
+                yield_pct: if g.total > 0 {
+                    g.pass as f32 * 100.0 / g.total as f32
+                } else {
+                    0.0
+                },
+            })
+            .collect();
+
+        let mut failure_codes: Vec<(u16, usize)> = counts
+            .iter()
+            .filter(|(code, _)| !is_pass(**code))
+            .map(|(code, count)| (*code, *count))
+            .collect();
+        failure_codes.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let selected: Vec<u16> = failure_codes
+            .iter()
+            .take(top)
+            .map(|(code, _)| *code)
+            .collect();
+        let has_others = failure_codes.len() > selected.len();
+
+        let mut series = Vec::new();
+        for code in &selected {
+            let counts_by_group: Vec<usize> = group_rows
+                .iter()
+                .map(|(_, g)| g.counts.get(code).copied().unwrap_or(0))
+                .collect();
+            let pcts = counts_by_group
+                .iter()
+                .zip(group_rows.iter())
+                .map(|(count, (_, g))| {
+                    if g.total > 0 {
+                        *count as f32 * 100.0 / g.total as f32
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            series.push(ParetoSeries {
+                code: *code,
+                name: match req.category {
+                    BinCategory::Hard => ds.bin_name(true, *code),
+                    BinCategory::Soft => ds.bin_name(false, *code),
+                },
+                counts: counts_by_group,
+                pcts,
+                pass: false,
+            });
+        }
+        if has_others {
+            let selected_set: std::collections::HashSet<u16> = selected.iter().copied().collect();
+            let counts_by_group: Vec<usize> = group_rows
+                .iter()
+                .map(|(_, g)| {
+                    g.counts
+                        .iter()
+                        .filter(|(code, _)| !selected_set.contains(code) && !is_pass(**code))
+                        .map(|(_, count)| *count)
+                        .sum()
+                })
+                .collect();
+            let pcts = counts_by_group
+                .iter()
+                .zip(group_rows.iter())
+                .map(|(count, (_, g))| {
+                    if g.total > 0 {
+                        *count as f32 * 100.0 / g.total as f32
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            series.push(ParetoSeries {
+                code: 0xFFFF,
+                name: "Others".to_string(),
+                counts: counts_by_group,
+                pcts,
+                pass: false,
+            });
+        }
+
+        return ParetoResponse {
+            mode: ParetoMode::Grouped,
+            bars: Vec::new(),
+            groups,
+            series,
+            total,
+            fail_total,
+            yield_pct,
+            group_label: pareto_group_title(ds, by),
+        };
+    }
+
+    let mut failure_bars: Vec<(u16, usize)> = counts
+        .iter()
+        .filter(|(code, _)| !is_pass(**code))
+        .map(|(code, count)| (*code, *count))
+        .collect();
+    failure_bars.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut bars = Vec::new();
     let mut others = 0usize;
-    for (i, (code, count)) in bars.iter().enumerate() {
+    for (i, (code, count)) in failure_bars.iter().enumerate() {
         if i >= top {
             others += count;
             continue;
         }
-        cum += count;
-        out.push(ParetoBar {
+        bars.push(ParetoBar {
             code: *code,
             name: match req.category {
                 BinCategory::Hard => ds.bin_name(true, *code),
@@ -493,16 +804,11 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
             } else {
                 0.0
             },
-            cum_pct: if total > 0 {
-                cum as f32 * 100.0 / total as f32
-            } else {
-                0.0
-            },
-            pass: is_pass(*code),
+            pass: false,
         });
     }
     if others > 0 {
-        out.push(ParetoBar {
+        bars.push(ParetoBar {
             code: 0xFFFF,
             name: "Others".to_string(),
             count: others,
@@ -511,14 +817,43 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
             } else {
                 0.0
             },
-            cum_pct: 100.0,
             pass: false,
         });
     }
+    // The pass bin is always part of the global overview, so the percentages
+    // are against every tested die rather than only failures.
+    let mut pass_bars: Vec<(u16, usize)> = counts
+        .iter()
+        .filter(|(code, _)| is_pass(**code))
+        .map(|(code, count)| (*code, *count))
+        .collect();
+    pass_bars.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    for (code, count) in pass_bars {
+        bars.push(ParetoBar {
+            code,
+            name: match req.category {
+                BinCategory::Hard => ds.bin_name(true, code),
+                BinCategory::Soft => ds.bin_name(false, code),
+            },
+            count,
+            pct: if total > 0 {
+                count as f32 * 100.0 / total as f32
+            } else {
+                0.0
+            },
+            pass: true,
+        });
+    }
+
     ParetoResponse {
-        bars: out,
+        mode: ParetoMode::Global,
+        bars,
+        groups: Vec::new(),
+        series: Vec::new(),
         total,
         fail_total,
+        yield_pct,
+        group_label: String::new(),
     }
 }
 
@@ -975,7 +1310,7 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
     let z_col_label = match req.z_mode {
         ScatterZMode::Continuous => z_test
             .as_ref()
-            .map(|t| t.name.clone())
+            .map(|t| t.display_with_units())
             .unwrap_or_else(|| "Z".to_string()),
         ScatterZMode::Category => req
             .z_col
@@ -1147,18 +1482,28 @@ mod tests {
                 category: BinCategory::Hard,
                 filter: filter.clone(),
                 top: Some(20),
-                include_pass: false,
+                group_by: None,
             },
         );
         assert!(!pa.bars.is_empty(), "pareto bars");
-        assert!(pa.bars.iter().all(|b| !b.pass), "pareto excludes pass");
+        assert!(pa.bars.iter().any(|b| b.pass), "pareto includes pass");
         assert!(pa.bars.iter().all(|b| !b.name.is_empty()), "pareto names");
-        let last = pa.bars.last().unwrap();
-        assert!(
-            (last.cum_pct - 100.0).abs() < 0.01,
-            "cumulative {}",
-            last.cum_pct
+        assert_eq!(pa.mode, ParetoMode::Global);
+        assert!(pa.yield_pct >= 0.0 && pa.yield_pct <= 100.0);
+
+        let pg = pareto(
+            &ds,
+            &ParetoRequest {
+                category: BinCategory::Hard,
+                filter: filter.clone(),
+                top: Some(5),
+                group_by: Some("lot".to_string()),
+            },
         );
+        assert_eq!(pg.mode, ParetoMode::Grouped);
+        assert!(!pg.groups.is_empty());
+        assert!(pg.series.iter().all(|s| !s.pass));
+        assert_eq!(pg.series[0].counts.len(), pg.groups.len());
 
         let hi = histogram(
             &ds,

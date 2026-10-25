@@ -115,23 +115,24 @@ export interface ChartStyle {
 }
 
 /**
- * Presentation sizing is deliberately generous: a 1800x1100 JPG is often
- * placed 4-6 inches wide in a 2x3 slide grid. These sizes keep labels readable
- * after that reduction. Users can turn it off for dense exploratory charts.
+ * Presentation sizing is deliberately generous, but the export canvas is
+ * large enough (2400x1500) that slide-sized fonts no longer need to be huge.
+ * Keeping them proportional avoids the overlap that 46/36/32 px titles and
+ * ticks caused in dense box, Pareto and wafer charts.
  */
 export function chartStyle(presentation: boolean): ChartStyle {
   if (presentation) {
     return {
-      title: 46,
-      axisTitle: 36,
-      tick: 32,
-      annotation: 26,
-      hover: 26,
-      line: 3,
-      axisLine: 2,
-      marker: 10,
-      point: 7,
-      margin: { l: 132, r: 46, t: 104, b: 116 },
+      title: 30,
+      axisTitle: 23,
+      tick: 20,
+      annotation: 17,
+      hover: 18,
+      line: 2.4,
+      axisLine: 1.6,
+      marker: 8,
+      point: 5.5,
+      margin: { l: 104, r: 38, t: 78, b: 88 },
     };
   }
   return {
@@ -226,9 +227,9 @@ export const PLOTLY_CONFIG = {
   toImageButtonOptions: {
     format: "jpeg",
     filename: "ews-plot",
-    width: 1800,
-    height: 1100,
-    scale: 1,
+    width: 2400,
+    height: 1500,
+    scale: 1.5,
   },
 };
 

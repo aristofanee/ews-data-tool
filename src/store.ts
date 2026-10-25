@@ -1,11 +1,32 @@
 import { create } from "zustand";
-import type { CustomColumn, DatasetInfo, Filter, PlotSpec, PlotType, ReportItem, TestInfo } from "./types";
+import type {
+  CsvInspection,
+  CustomColumn,
+  DatasetInfo,
+  Filter,
+  PlotSpec,
+  PlotType,
+  ReportItem,
+  TestInfo,
+} from "./types";
 import { defaultSpec, emptyFilter } from "./types";
 import type { Theme } from "./lib/theme";
+import { testLabelWithUnits } from "./lib/format";
 
 export const PLOT_LABELS: Record<PlotType, string> = {
   box: "Box plot",
   map: "Wafer map",
+  binmap: "Bin map",
+  pareto: "Pareto",
+  hist: "Histogram",
+  trend: "Trend",
+  scatter: "Scatter",
+};
+
+const PLOT_TITLE_LABELS: Record<PlotType, string> = {
+  box: "BoxPlot",
+  map: "Wafer map",
+  binmap: "Bin map",
   pareto: "Pareto",
   hist: "Histogram",
   trend: "Trend",
@@ -33,14 +54,18 @@ function tidyTitle(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
-export function autoTitle(testName: string | null, type: PlotType): string {
+export function autoTitle(test: TestInfo | null, type: PlotType): string {
   if (type === "pareto") return "Fail Pareto";
-  if (!testName) return PLOT_LABELS[type];
-  return `${tidyTitle(testName)} · ${PLOT_LABELS[type]}`;
+  if (type === "map") return "Wafer map";
+  if (type === "binmap") return "Bin map";
+  if (!test) return PLOT_LABELS[type];
+  return `${tidyTitle(testLabelWithUnits(test))} · ${PLOT_TITLE_LABELS[type]}`;
 }
 
-export function scatterTitle(xName: string | null, yName: string | null): string {
-  if (xName && yName) return `${tidyTitle(xName)} vs ${tidyTitle(yName)}`;
+export function scatterTitle(x: TestInfo | null, y: TestInfo | null): string {
+  if (x && y) {
+    return `${tidyTitle(testLabelWithUnits(x))} vs ${tidyTitle(testLabelWithUnits(y))} - Scatter`;
+  }
   return "Scatter";
 }
 
@@ -57,13 +82,19 @@ function normalizeScatter(spec: PlotSpec, tests: TestInfo[]): PlotSpec {
 }
 
 function scatterSpecTitle(spec: PlotSpec, tests: TestInfo[]): string {
-  const x = spec.scatterX !== null ? tests[spec.scatterX]?.name ?? null : null;
-  const y = spec.scatterY !== null ? tests[spec.scatterY]?.name ?? null : null;
+  const x = spec.scatterX !== null ? tests[spec.scatterX] ?? null : null;
+  const y = spec.scatterY !== null ? tests[spec.scatterY] ?? null : null;
   return scatterTitle(x, y);
 }
 
 const initialTheme: Theme =
   typeof localStorage !== "undefined" && localStorage.getItem("ews-theme") === "dark" ? "dark" : "light";
+
+export interface CsvPrompt {
+  paths: string[];
+  path: string;
+  inspection: CsvInspection;
+}
 
 interface AppState {
   info: DatasetInfo | null;
@@ -80,6 +111,7 @@ interface AppState {
   templateName: string;
   showInspector: boolean;
   dataVersion: number;
+  csvPrompt: CsvPrompt | null;
 
   setInfo: (info: DatasetInfo | null, opts?: { keepFilters?: boolean }) => void;
   setBusy: (busy: boolean, pct?: number, msg?: string) => void;
@@ -105,6 +137,7 @@ interface AppState {
   setTemplateName: (name: string) => void;
   applyTemplate: (t: TemplateFile) => void;
   setShowInspector: (v: boolean) => void;
+  setCsvPrompt: (prompt: CsvPrompt | null) => void;
   bumpData: () => void;
 }
 
@@ -125,6 +158,7 @@ export const useStore = create<AppState>((set, get) => ({
   templateName: "",
   showInspector: true,
   dataVersion: 0,
+  csvPrompt: null,
 
   setInfo: (info, opts) => {
     const prev = get();
@@ -133,7 +167,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (info) {
       let test = prev.spec.test;
       if (test === null || test >= info.tests.length) test = 0;
-      const name = info.tests[test]?.name ?? null;
+      const testInfo = info.tests[test] ?? null;
       const wafer = prev.spec.mapWafer;
       let spec: PlotSpec = {
         ...prev.spec,
@@ -155,7 +189,7 @@ export const useStore = create<AppState>((set, get) => ({
         spec = normalizeScatter(spec, info.tests);
         spec.title = scatterSpecTitle(spec, info.tests);
       } else {
-        spec.title = autoTitle(name, spec.type);
+        spec.title = autoTitle(testInfo, spec.type);
       }
       patch.spec = spec;
     }
@@ -188,7 +222,7 @@ export const useStore = create<AppState>((set, get) => ({
       set({ spec });
       return;
     }
-    const test = s.info?.tests[s.spec.test ?? -1]?.name ?? null;
+    const test = s.info?.tests[s.spec.test ?? -1] ?? null;
     set({ spec: { ...s.spec, type, title: autoTitle(test, type) } });
   },
   patchSpec: (p) => {
@@ -218,15 +252,18 @@ export const useStore = create<AppState>((set, get) => ({
         ) {
           title = scatterSpecTitle(next, s.info?.tests ?? []);
         }
-      } else if (typeof p.test === "number") {
-        title = autoTitle(s.info?.tests[p.test]?.name ?? null, next.type);
+      } else if (p.test !== undefined || p.type !== undefined) {
+        title = autoTitle(
+          next.test !== null ? s.info?.tests[next.test] ?? null : null,
+          next.type
+        );
       }
     }
     set({ spec: { ...next, title } });
   },
   selectTest: (index) => {
     const s = get();
-    const name = s.info?.tests[index]?.name ?? null;
+    const test = s.info?.tests[index] ?? null;
     if (s.spec.type === "scatter") {
       const tests = s.info?.tests ?? [];
       let x = s.spec.scatterX;
@@ -242,7 +279,7 @@ export const useStore = create<AppState>((set, get) => ({
       set({ spec });
       return;
     }
-    set({ spec: { ...s.spec, test: index, title: autoTitle(name, s.spec.type) } });
+    set({ spec: { ...s.spec, test: index, title: autoTitle(test, s.spec.type) } });
   },
 
   patchFilters: (p) => set({ filters: { ...get().filters, ...p } }),
@@ -262,7 +299,8 @@ export const useStore = create<AppState>((set, get) => ({
         return;
       }
     } else {
-      const needsTest = s.spec.type !== "pareto" && s.spec.type !== "map";
+      const needsTest =
+        s.spec.type !== "pareto" && s.spec.type !== "map" && s.spec.type !== "binmap";
       if (needsTest && s.spec.test === null) {
         s.notify("Select a test before adding a plot.");
         return;
@@ -320,5 +358,6 @@ export const useStore = create<AppState>((set, get) => ({
     s.notify(`Template “${t.name}” loaded: ${plots.length} plots.`);
   },
   setShowInspector: (showInspector) => set({ showInspector }),
+  setCsvPrompt: (csvPrompt) => set({ csvPrompt }),
   bumpData: () => set({ dataVersion: get().dataVersion + 1 }),
 }));

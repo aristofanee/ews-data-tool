@@ -1,7 +1,7 @@
 import { useStore } from "../store";
 import { defaultSpec, type PlotType } from "../types";
 import { PALETTES, paletteGradient } from "../lib/theme";
-import { fmt, fmtInt, tidyName } from "../lib/format";
+import { fmt, fmtInt, testLabelWithUnits } from "../lib/format";
 import type { ReactNode } from "react";
 
 function Section({ title, children, hint }: { title: string; children: ReactNode; hint?: string }) {
@@ -101,8 +101,7 @@ export function Inspector() {
   const isCartesian = spec.type === "box" || spec.type === "hist" || spec.type === "trend";
   const testOptions = info.tests.map((t, i) => (
     <option key={i} value={i}>
-      {tidyName(t.name)}
-      {t.units ? ` (${t.units})` : ""}
+      {testLabelWithUnits(t)}
     </option>
   ));
   const categoryOptions = (
@@ -127,8 +126,8 @@ export function Inspector() {
         <div className="test-card">
           <div className="test-card-name">
             {isScatter
-              ? `${scatterX ? tidyName(scatterX.name) : "X"} vs ${scatterY ? tidyName(scatterY.name) : "Y"}`
-              : test ? tidyName(test.name) : "No test selected"}
+              ? `${scatterX ? testLabelWithUnits(scatterX) : "X"} vs ${scatterY ? testLabelWithUnits(scatterY) : "Y"}`
+              : test ? testLabelWithUnits(test) : "No test selected"}
           </div>
           <div className="test-card-meta">
             {isScatter ? (
@@ -192,9 +191,15 @@ export function Inspector() {
             </select>
           </Row>
           <Check label="Logarithmic Y axis" checked={spec.logY} onChange={(v) => patch({ logY: v })} />
+          <Check
+            label="Split into one plot per block"
+            checked={spec.splitPlots}
+            onChange={(v) => patch({ splitPlots: v })}
+          />
           <div className="hint">
             Colour by a custom Split column to compare labels across wafers. Lot-level boxes show
-            “Mixed” when wafers in the lot have different labels.
+            “Mixed” when wafers in the lot have different labels. Split plots are exported as a
+            cluster in reports.
           </div>
         </Section>
       )}
@@ -220,6 +225,15 @@ export function Inspector() {
               ))}
             </select>
           </Row>
+          <Check
+            label="Split into one map per wafer"
+            checked={spec.splitPlots}
+            onChange={(v) => patch({ splitPlots: v })}
+          />
+          <div className="hint">
+            Split maps show every wafer matching the filters and export as a report cluster. The
+            Wafer selector is used when the split is off.
+          </div>
           <Row label="Colour">
             <Seg
               value={spec.mapMode}
@@ -253,6 +267,20 @@ export function Inspector() {
         </Section>
       )}
 
+      {spec.type === "binmap" && (
+        <Section title="Bin map">
+          <div className="hint">
+            All wafers matching the current filters are shown side by side and grouped by lot.
+            Click any map to enlarge it.
+          </div>
+          <Check
+            label="One report image per lot"
+            checked={spec.splitPlots}
+            onChange={(v) => patch({ splitPlots: v })}
+          />
+        </Section>
+      )}
+
       {spec.type === "pareto" && (
         <Section title="Pareto">
           <Row label="Bin type">
@@ -268,8 +296,26 @@ export function Inspector() {
           <Row label="Top bins">
             <Num value={spec.top} onChange={(v) => patch({ top: v ?? 20 })} step="1" />
           </Row>
-          <Check label="Include pass bin" checked={spec.includePass} onChange={(v) => patch({ includePass: v })} />
-          <Check label="Cumulative line" checked={spec.cumulative} onChange={(v) => patch({ cumulative: v })} />
+          <Row label="Grouped by">
+            <select
+              className="input"
+              value={spec.paretoGroup}
+              onChange={(e) => patch({ paretoGroup: e.target.value })}
+            >
+              <option value="none">None (global)</option>
+              <option value="lot">Lot</option>
+              <option value="wafer">Wafer ID</option>
+              {info.customColumns.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </Row>
+          <div className="hint">
+            Global mode includes the pass bin and shows percentages of all tested dice. Grouped
+            mode stacks non-pass bins and puts good-bin yield on a secondary axis.
+          </div>
         </Section>
       )}
 
@@ -365,15 +411,27 @@ export function Inspector() {
             </Row>
           )}
           <Check label="Fit line and R²" checked={spec.scatterFit} onChange={(v) => patch({ scatterFit: v })} />
+          {spec.scatterZMode === "category" && (
+            <Check
+              label="Split into one plot per category"
+              checked={spec.splitPlots}
+              onChange={(v) => patch({ splitPlots: v })}
+            />
+          )}
         </Section>
       )}
 
       {isCartesian && (
         <Section title="Limits">
           <Check
-            label="Show spec limits"
+            label="Show spec limits (LSL/USL)"
             checked={spec.showLimits}
             onChange={(v) => patch({ showLimits: v })}
+          />
+          <Check
+            label="Show control limits (LCL/UCL)"
+            checked={spec.showControlLimits}
+            onChange={(v) => patch({ showControlLimits: v })}
           />
           {spec.showLimits && (
             <>
@@ -398,13 +456,19 @@ export function Inspector() {
               >
                 Use limits from the test
               </button>
-              {test && (test.loLimit !== null || test.hiLimit !== null) && (
-                <div className="hint">
-                  Control limits: {test.loLimit !== null ? fmt(test.loLimit) : "—"} …{" "}
-                  {test.hiLimit !== null ? fmt(test.hiLimit) : "—"}
-                </div>
-              )}
             </>
+          )}
+          {spec.showControlLimits && test && (test.loLimit !== null || test.hiLimit !== null) && (
+            <div className="hint">
+              Control limits: {test.loLimit !== null ? fmt(test.loLimit) : "—"} …{" "}
+              {test.hiLimit !== null ? fmt(test.hiLimit) : "—"}
+            </div>
+          )}
+          {test?.limitConflict && (
+            <div className="hint warn">
+              Imported files disagree on this test's limits. The first non-empty LSL/USL is
+              shown; set LSL/USL above to apply a common limit to the current view.
+            </div>
           )}
         </Section>
       )}

@@ -6,6 +6,8 @@ pub const NAN: f32 = f32::NAN;
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestInfo {
+    /// STDF test number / CSV test-number metadata, when available.
+    pub number: Option<u32>,
     pub name: String,
     pub units: String,
     pub lo_limit: Option<f32>,
@@ -13,11 +15,17 @@ pub struct TestInfo {
     pub lo_spec: Option<f32>,
     pub hi_spec: Option<f32>,
     pub count: usize,
+    /// True when imported files/records disagree about this test's limits.
+    /// The first non-empty value is kept, but the UI warns instead of silently
+    /// pretending that one limit applies to every lot.
+    #[serde(default)]
+    pub limit_conflict: bool,
 }
 
 impl TestInfo {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            number: None,
             name: name.into(),
             units: String::new(),
             lo_limit: None,
@@ -25,8 +33,59 @@ impl TestInfo {
             lo_spec: None,
             hi_spec: None,
             count: 0,
+            limit_conflict: false,
         }
     }
+
+    /// Human label used by charts and exports: `99999 - X1 Charging`.
+    /// Underscores are converted to spaces because STDF test names often use
+    /// them as visual separators.
+    pub fn display_name(&self) -> String {
+        let mut name = self
+            .name
+            .replace('_', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if name.is_empty() {
+            name = "Unnamed test".to_string();
+        }
+        match self.number {
+            Some(n) => {
+                let prefix = n.to_string();
+                let already = name == prefix
+                    || name.starts_with(&format!("{prefix} -"))
+                    || name.starts_with(&format!("{prefix} "));
+                if already {
+                    name
+                } else {
+                    format!("{prefix} - {name}")
+                }
+            }
+            None => name,
+        }
+    }
+
+    pub fn display_with_units(&self) -> String {
+        let name = self.display_name();
+        if self.units.is_empty() {
+            name
+        } else {
+            format!("{name} [{}]", self.units)
+        }
+    }
+}
+
+/// Wafer geometry from an STDF WCR record (or inferred by a CSV import).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WaferGeom {
+    pub diameter_mm: Option<f32>,
+    pub die_w_mm: Option<f32>,
+    pub die_h_mm: Option<f32>,
+    pub center_x: Option<i16>,
+    pub center_y: Option<i16>,
+    /// `U`, `D`, `L`, `R` from WF_FLAT.
+    pub flat: Option<char>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -42,6 +101,9 @@ pub struct WaferInfo {
     pub diameter_mm: Option<f32>,
     pub die_w_mm: Option<f32>,
     pub die_h_mm: Option<f32>,
+    pub center_x: Option<i16>,
+    pub center_y: Option<i16>,
+    pub flat: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

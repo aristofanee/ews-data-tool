@@ -1,5 +1,8 @@
 import type {
+  BinOverviewResponse,
   BoxResponse,
+  CsvInspection,
+  CsvMapping,
   CustomColumn,
   DatasetInfo,
   Filter,
@@ -67,10 +70,16 @@ export async function openInExplorer(path: string): Promise<void> {
 
 export async function openPaths(
   paths: string[],
-  onProgress?: (pct: number, msg: string) => void
+  onProgress?: (pct: number, msg: string) => void,
+  mapping?: CsvMapping | null
 ): Promise<DatasetInfo> {
   if (!isTauri) return mock.openPaths(paths, onProgress);
-  return invoke<DatasetInfo>("open_paths", { paths });
+  return invoke<DatasetInfo>("open_paths", { paths, mapping: mapping ?? null });
+}
+
+export async function inspectCsv(path: string): Promise<CsvInspection> {
+  if (!isTauri) return mock.inspectCsv(path);
+  return invoke<CsvInspection>("inspect_csv", { path });
 }
 
 export async function datasetInfo(): Promise<DatasetInfo | null> {
@@ -142,11 +151,16 @@ export async function waferMap(req: {
   return invoke<MapResponse>("wafer_map", { req });
 }
 
+export async function binOverview(req: { filter: Filter }): Promise<BinOverviewResponse> {
+  if (!isTauri) return mock.binOverview(req);
+  return invoke<BinOverviewResponse>("bin_overview", { req });
+}
+
 export async function pareto(req: {
   category: "hard" | "soft";
   filter: Filter;
   top?: number;
-  includePass?: boolean;
+  groupBy?: string | null;
 }): Promise<ParetoResponse> {
   if (!isTauri) return mock.pareto(req);
   return invoke<ParetoResponse>("pareto", { req });

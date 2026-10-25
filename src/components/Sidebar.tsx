@@ -202,6 +202,8 @@ interface ColumnDraft {
   editing: boolean;
   label: string;
   selected: number[];
+  /** Local, uncommitted labels keyed by wafer index. */
+  pending: Record<number, string>;
 }
 
 function CustomColumnsPanel() {
@@ -222,6 +224,7 @@ function CustomColumnsPanel() {
       editing: false,
       label: "",
       selected: filters.wafers.length ? [...filters.wafers] : [],
+      pending: {},
     });
   };
 
@@ -229,7 +232,11 @@ function CustomColumnsPanel() {
     const selected = col.waferValues
       .map((v, i) => (v !== 0 ? i : -1))
       .filter((i) => i >= 0);
-    setDraft({ name: col.name, editing: true, label: "", selected });
+    const pending: Record<number, string> = {};
+    col.waferValues.forEach((code, i) => {
+      pending[i] = code ? col.categories[code] ?? "" : "";
+    });
+    setDraft({ name: col.name, editing: true, label: "", selected, pending });
   };
 
   const currentColumn = draft
@@ -237,6 +244,9 @@ function CustomColumnsPanel() {
     : null;
 
   const labelFor = (wi: number) => {
+    if (draft && Object.prototype.hasOwnProperty.call(draft.pending, wi)) {
+      return draft.pending[wi] ?? "";
+    }
     if (!currentColumn) return "";
     const code = currentColumn.waferValues[wi] ?? 0;
     return code ? currentColumn.categories[code] ?? "" : "";
@@ -253,13 +263,25 @@ function CustomColumnsPanel() {
   };
 
   const selectUnassigned = () => {
-    if (!draft || !currentColumn) return;
+    if (!draft) return;
     setDraft({
       ...draft,
-      selected: info.wafers
-        .map((_, i) => i)
-        .filter((i) => (currentColumn.waferValues[i] ?? 0) === 0),
+      selected: info.wafers.map((_, i) => i).filter((i) => !labelFor(i)),
     });
+  };
+
+  /** Stage a label for the selected wafers; nothing is sent to Rust yet. */
+  const assignToSelected = () => {
+    if (!draft) return;
+    if (!draft.selected.length) {
+      setError("Select at least one wafer first.");
+      return;
+    }
+    const label = draft.label.trim();
+    const pending = { ...draft.pending };
+    for (const wi of draft.selected) pending[wi] = label;
+    setDraft({ ...draft, pending, label: "" });
+    setError(null);
   };
 
   const apply = async () => {
@@ -269,26 +291,34 @@ function CustomColumnsPanel() {
       setError("Enter a column name.");
       return;
     }
-    if (!draft.selected.length) {
-      setError("Select at least one wafer.");
+    // Saving also commits a label that is currently typed but not yet staged,
+    // so the quick one-label workflow still works without an extra click.
+    const pending = { ...draft.pending };
+    if (draft.label.trim() && draft.selected.length) {
+      for (const wi of draft.selected) pending[wi] = draft.label.trim();
+    }
+    const assignments = Object.entries(pending).map(([wafer, label]) => ({
+      wafer: Number(wafer),
+      label,
+    }));
+    if (!assignments.length) {
+      setError("Assign a label to at least one wafer.");
       return;
     }
-    if (!draft.editing && !draft.label.trim()) {
-      setError("Enter a label for the selected wafers.");
+    if (!draft.editing && !assignments.some((a) => a.label.trim())) {
+      setError("Assign a label to at least one wafer.");
       return;
     }
     try {
       const before = useStore.getState();
       const title = before.spec.title;
-      const updated = await api.addCustomColumn(
-        name,
-        draft.selected.map((wafer) => ({ wafer, label: draft.label }))
-      );
+      const updated = await api.addCustomColumn(name, assignments);
       before.setInfo(updated, { keepFilters: true });
       useStore.getState().patchSpec({ title });
+      const assigned = assignments.filter((a) => a.label.trim()).length;
       notify(
-        `Label column “${name}” updated · ${draft.selected.length} wafer${
-          draft.selected.length === 1 ? "" : "s"
+        `Label column "${name}" saved · ${assigned} labelled wafer${
+          assigned === 1 ? "" : "s"
         }`
       );
       setDraft(null);
@@ -356,7 +386,8 @@ function CustomColumnsPanel() {
                   {draft.editing ? "Edit label column" : "New label column"}
                 </div>
                 <div className="modal-sub">
-                  Assign a label to selected wafers. Empty labels clear the assignment.
+                  Select wafers, type a label, and stage as many labels as you need. Nothing is
+                  saved until you press Save labels.
                 </div>
               </div>
               <button className="btn icon ghost" onClick={() => setDraft(null)} title="Close">
@@ -377,14 +408,25 @@ function CustomColumnsPanel() {
               </label>
               <label className="modal-field">
                 <span>Label for selected wafers</span>
-                <input
-                  className="input"
-                  value={draft.label}
-                  autoFocus={draft.editing}
-                  placeholder={draft.editing ? "e.g. Split A (blank clears)" : "e.g. Split A"}
-                  list="custom-label-options"
-                  onChange={(e) => setDraft({ ...draft, label: e.target.value })}
-                />
+                <div className="label-assign-row">
+                  <input
+                    className="input"
+                    value={draft.label}
+                    autoFocus={draft.editing}
+                    placeholder={draft.editing ? "e.g. Split A (blank clears)" : "e.g. Split A"}
+                    list="custom-label-options"
+                    onChange={(e) => setDraft({ ...draft, label: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        assignToSelected();
+                      }
+                    }}
+                  />
+                  <button className="btn" onClick={assignToSelected} type="button">
+                    Assign
+                  </button>
+                </div>
                 <datalist id="custom-label-options">
                   {labels.map((l) => (
                     <option key={l} value={l} />
@@ -392,7 +434,10 @@ function CustomColumnsPanel() {
                 </datalist>
               </label>
               <div className="column-tools">
-                <span className="muted">{draft.selected.length} selected</span>
+                <span className="muted">
+                  {draft.selected.length} selected ·{" "}
+                  {Object.values(draft.pending).filter((v) => v.trim()).length} labels staged
+                </span>
                 <button
                   className="link-btn"
                   onClick={() =>
@@ -434,8 +479,8 @@ function CustomColumnsPanel() {
                 })}
               </div>
               <div className="hint">
-                Tip: use the filter panel to narrow the wafer list, then reopen this dialog to
-                select the filtered wafers. Applying the same column again merges labels.
+                Stage labels for several wafer groups in one session. Blank labels clear a wafer
+                when you save. Use the filter panel to narrow the list before opening this dialog.
               </div>
             </div>
             <div className="modal-foot">
@@ -443,7 +488,7 @@ function CustomColumnsPanel() {
                 Cancel
               </button>
               <button className="btn primary" onClick={() => void apply()}>
-                {draft.editing ? "Apply labels" : "Create column"}
+                {draft.editing ? "Save labels" : "Create column"}
               </button>
             </div>
           </div>

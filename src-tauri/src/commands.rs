@@ -152,6 +152,7 @@ pub async fn open_paths(
     app: AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
+    mapping: Option<csv_io::CsvMapping>,
 ) -> Result<DatasetInfo, String> {
     if paths.is_empty() {
         return Err("No files selected".into());
@@ -179,7 +180,9 @@ pub async fn open_paths(
             };
             let ext = extension(&path);
             let imp = match ext.as_str() {
-                "csv" | "txt" | "tsv" | "dat" => csv_io::import_csv(&path, &mut cb)?,
+                "csv" | "txt" | "tsv" | "dat" => {
+                    csv_io::import_csv_with_mapping(&path, &mut cb, mapping.as_ref())?
+                }
                 _ => stdf::import_stdf(&path, &mut cb)?,
             };
             let _ = app.emit(
@@ -207,6 +210,11 @@ pub async fn open_paths(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn inspect_csv(path: String) -> Result<csv_io::CsvInspection, String> {
+    csv_io::inspect_csv(std::path::Path::new(&path))
 }
 
 #[tauri::command]
@@ -301,6 +309,14 @@ pub async fn pareto(
 }
 
 #[tauri::command]
+pub async fn bin_overview(
+    state: State<'_, AppState>,
+    req: query::BinOverviewRequest,
+) -> Result<query::BinOverviewResponse, String> {
+    with_ds(state, move |ds| query::bin_overview(ds, &req)).await
+}
+
+#[tauri::command]
 pub async fn histogram(
     state: State<'_, AppState>,
     req: query::HistRequest,
@@ -348,17 +364,73 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
     write!(w, "lot,wafer,x,y,hbin,sbin").map_err(|e| e.to_string())?;
     for t in ds.tests.iter() {
         // Keep units in the header so the export can be re-imported with them.
-        let name = if t.units.is_empty() {
-            t.name.clone()
-        } else {
-            format!("{} [{}]", t.name, t.units)
-        };
-        write!(w, ",{}", csv_escape(&name)).map_err(|e| e.to_string())?;
+        write!(w, ",{}", csv_escape(&t.display_with_units())).map_err(|e| e.to_string())?;
     }
     for c in ds.custom_cols.iter() {
         write!(w, ",{}", csv_escape(&c.name)).map_err(|e| e.to_string())?;
     }
     writeln!(w).map_err(|e| e.to_string())?;
+
+    // Metadata rows understood by the importer. Keeping test numbers, units
+    // and limits here makes an exported CSV a complete round-trip instead of
+    // losing everything except the measurements.
+    let mut meta = String::from("Tests#");
+    for _ in 0..5 {
+        meta.push(',');
+    }
+    for t in ds.tests.iter() {
+        meta.push(',');
+        if let Some(n) = t.number {
+            meta.push_str(&n.to_string());
+        }
+    }
+    for _ in ds.custom_cols.iter() {
+        meta.push(',');
+    }
+    writeln!(w, "{meta}").map_err(|e| e.to_string())?;
+
+    let mut units = String::from("Unit");
+    for _ in 0..5 {
+        units.push(',');
+    }
+    for t in ds.tests.iter() {
+        units.push(',');
+        units.push_str(&csv_escape(&t.units));
+    }
+    for _ in ds.custom_cols.iter() {
+        units.push(',');
+    }
+    writeln!(w, "{units}").map_err(|e| e.to_string())?;
+
+    let mut lows = String::from("LowL");
+    for _ in 0..5 {
+        lows.push(',');
+    }
+    for t in ds.tests.iter() {
+        lows.push(',');
+        if let Some(v) = t.lo_limit.or(t.lo_spec) {
+            lows.push_str(&fmt_csv_num(v));
+        }
+    }
+    for _ in ds.custom_cols.iter() {
+        lows.push(',');
+    }
+    writeln!(w, "{lows}").map_err(|e| e.to_string())?;
+
+    let mut highs = String::from("HighL");
+    for _ in 0..5 {
+        highs.push(',');
+    }
+    for t in ds.tests.iter() {
+        highs.push(',');
+        if let Some(v) = t.hi_limit.or(t.hi_spec) {
+            highs.push_str(&fmt_csv_num(v));
+        }
+    }
+    for _ in ds.custom_cols.iter() {
+        highs.push(',');
+    }
+    writeln!(w, "{highs}").map_err(|e| e.to_string())?;
 
     let mut count = 0usize;
     let mut line = String::with_capacity(256);
@@ -381,7 +453,7 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
             let v = c[r];
             if v.is_finite() {
                 line.push(',');
-                line.push_str(&format!("{v:.6}"));
+                line.push_str(&fmt_csv_num(v));
             } else {
                 line.push(',');
             }
@@ -401,6 +473,31 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
     }
     w.flush().map_err(|e| e.to_string())?;
     Ok(format!("Exported {count} rows"))
+}
+
+/// Keep CSV numbers lossless enough for semiconductor measurements. Plain
+/// `{:.6}` turned femto-amp and similar values into "0"; use scientific
+/// notation for very small/large magnitudes and trim cosmetic trailing zeros
+/// for ordinary values.
+fn fmt_csv_num(v: f32) -> String {
+    if !v.is_finite() {
+        return String::new();
+    }
+    if v == 0.0 {
+        return "0".into();
+    }
+    let a = v.abs();
+    if a < 1e-4 || a >= 1e9 {
+        // Rust's LowerExp uses the shortest round-tripping f32 representation,
+        // so 1.2e-15 stays "1.2e-15" instead of "1.20000005e-15".
+        return format!("{v:e}");
+    }
+    let s = format!("{v}");
+    if s == "-0" {
+        "0".into()
+    } else {
+        s
+    }
 }
 
 fn csv_escape(s: &str) -> String {
@@ -436,4 +533,18 @@ pub fn file_name(path: String) -> String {
         .and_then(|f| f.to_str())
         .unwrap_or("")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fmt_csv_num;
+
+    #[test]
+    fn csv_numbers_keep_tiny_values() {
+        assert_eq!(fmt_csv_num(1.2e-15), "1.2e-15");
+        assert_eq!(fmt_csv_num(-4.5e-12), "-4.5e-12");
+        assert_eq!(fmt_csv_num(0.0), "0");
+        assert_eq!(fmt_csv_num(0.41515), "0.41515");
+        assert_eq!(fmt_csv_num(12.5), "12.5");
+    }
 }

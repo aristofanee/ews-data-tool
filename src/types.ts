@@ -1,4 +1,5 @@
 export interface TestInfo {
+  number: number | null;
   name: string;
   units: string;
   loLimit: number | null;
@@ -6,6 +7,7 @@ export interface TestInfo {
   loSpec: number | null;
   hiSpec: number | null;
   count: number;
+  limitConflict: boolean;
 }
 
 export interface WaferInfo {
@@ -19,6 +21,9 @@ export interface WaferInfo {
   diameterMm: number | null;
   dieWMm: number | null;
   dieHMm: number | null;
+  centerX: number | null;
+  centerY: number | null;
+  flat: string | null;
 }
 
 export interface BinInfo {
@@ -135,14 +140,66 @@ export interface ParetoBar {
   name: string;
   count: number;
   pct: number;
-  cumPct: number;
+  pass: boolean;
+}
+
+export interface ParetoGroup {
+  key: number;
+  label: string;
+  total: number;
+  pass: number;
+  fail: number;
+  yieldPct: number;
+}
+
+export interface ParetoSeries {
+  code: number;
+  name: string;
+  counts: number[];
+  pcts: number[];
   pass: boolean;
 }
 
 export interface ParetoResponse {
+  mode: "global" | "grouped";
   bars: ParetoBar[];
+  groups: ParetoGroup[];
+  series: ParetoSeries[];
   total: number;
   failTotal: number;
+  yieldPct: number;
+  groupLabel: string;
+}
+
+export interface BinOverviewWafer {
+  wafer: WaferInfo;
+  lotName: string;
+  dice: MapDie[];
+  pass: number;
+  fail: number;
+  yieldPct: number;
+}
+
+export interface BinOverviewResponse {
+  wafers: BinOverviewWafer[];
+}
+
+export interface CsvMapping {
+  lot: number | null;
+  wafer: number | null;
+  x: number | null;
+  y: number | null;
+  hbin: number | null;
+  sbin: number | null;
+}
+
+export interface CsvInspection {
+  headers: string[];
+  headerLine: number;
+  delimiter: string;
+  mapping: CsvMapping;
+  missing: string[];
+  longFormat: boolean;
 }
 
 export interface HistResponse {
@@ -209,7 +266,7 @@ export interface ScatterResponse {
   wafers: string[];
 }
 
-export type PlotType = "box" | "map" | "pareto" | "hist" | "trend" | "scatter";
+export type PlotType = "box" | "map" | "binmap" | "pareto" | "hist" | "trend" | "scatter";
 
 export type ShowPoints = "outliers" | "all" | "none";
 
@@ -224,14 +281,16 @@ export interface PlotSpec {
   lsl: number | null;
   usl: number | null;
   showLimits: boolean;
+  /** Draw UCL/LCL (control limits) in addition to spec limits. */
+  showControlLimits: boolean;
   mapWafer: number | null;
   mapMode: "value" | "bin";
   palette: string;
   edgeExclusion: number;
   binCategory: "hard" | "soft";
   top: number;
-  cumulative: boolean;
-  includePass: boolean;
+  /** `none` for the global Pareto, otherwise lot, wafer or a custom column. */
+  paretoGroup: string;
   bins: number | null;
   showNormal: boolean;
   showBand: boolean;
@@ -247,6 +306,8 @@ export interface PlotSpec {
   scatterZTest: number | null;
   scatterZCol: string;
   scatterFit: boolean;
+  /** Render a grouped plot as one small chart per split/lot/wafer. */
+  splitPlots: boolean;
 }
 
 export const defaultSpec = (type: PlotType, test: number | null, title: string): PlotSpec => ({
@@ -260,14 +321,14 @@ export const defaultSpec = (type: PlotType, test: number | null, title: string):
   lsl: null,
   usl: null,
   showLimits: true,
+  showControlLimits: true,
   mapWafer: null,
   mapMode: "value",
   palette: "brand",
   edgeExclusion: 0,
   binCategory: "hard",
   top: 20,
-  cumulative: true,
-  includePass: false,
+  paretoGroup: "none",
   bins: null,
   showNormal: true,
   showBand: true,
@@ -281,6 +342,7 @@ export const defaultSpec = (type: PlotType, test: number | null, title: string):
   scatterZTest: null,
   scatterZCol: "lot",
   scatterFit: true,
+  splitPlots: false,
 });
 
 export interface ReportItem {

@@ -87,16 +87,22 @@ impl Imported {
         r
     }
 
+    /// Return the index of a test column, creating an empty one if needed.
+    /// STDF default PTR/MPR records can arrive before the first die, so the
+    /// parser needs a test slot without writing a value.
+    pub fn test_slot(&mut self, key: (u32, u16)) -> usize {
+        if let Some(&i) = self.col_index.get(&key) {
+            return i;
+        }
+        let i = self.cols.len();
+        self.cols.push(Vec::new());
+        self.tests.push(TestInfo::new(String::new()));
+        self.col_index.insert(key, i);
+        i
+    }
+
     pub fn column(&mut self, key: (u32, u16), row: usize, value: f32) -> usize {
-        let idx = if let Some(&i) = self.col_index.get(&key) {
-            i
-        } else {
-            let i = self.cols.len();
-            self.cols.push(Vec::new());
-            self.tests.push(TestInfo::new(String::new()));
-            self.col_index.insert(key, i);
-            i
-        };
+        let idx = self.test_slot(key);
         let col = &mut self.cols[idx];
         if col.len() < row {
             col.resize(row, NAN);

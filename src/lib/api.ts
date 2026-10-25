@@ -1,10 +1,12 @@
 import type {
   BoxResponse,
+  CustomColumn,
   DatasetInfo,
   Filter,
   HistResponse,
   MapResponse,
   ParetoResponse,
+  ScatterResponse,
   TrendResponse,
 } from "../types";
 import * as mock from "./mock";
@@ -76,6 +78,24 @@ export async function datasetInfo(): Promise<DatasetInfo | null> {
   return invoke<DatasetInfo | null>("dataset_info");
 }
 
+export async function addCustomColumn(
+  name: string,
+  assignments: { wafer: number; label: string }[]
+): Promise<DatasetInfo> {
+  if (!isTauri) return mock.addCustomColumn(name, assignments);
+  return invoke<DatasetInfo>("add_custom_column", { name, assignments });
+}
+
+export async function removeCustomColumn(name: string): Promise<DatasetInfo> {
+  if (!isTauri) return mock.removeCustomColumn(name);
+  return invoke<DatasetInfo>("remove_custom_column", { name });
+}
+
+export async function restoreCustomColumns(columns: CustomColumn[]): Promise<DatasetInfo> {
+  if (!isTauri) return mock.restoreCustomColumns(columns);
+  return invoke<DatasetInfo>("restore_custom_columns", { columns });
+}
+
 export function onImportProgress(cb: (pct: number, msg: string) => void): () => void {
   if (!isTauri) return mock.onProgress(cb);
   let unlisten: (() => void) | null = null;
@@ -106,6 +126,7 @@ export async function boxPlot(req: {
   groupBy: "wafer" | "lot";
   filter: Filter;
   maxPoints?: number;
+  blockCol?: string;
 }): Promise<BoxResponse> {
   if (!isTauri) return mock.boxPlot(req);
   return invoke<BoxResponse>("box_plot", { req });
@@ -147,6 +168,19 @@ export async function trend(req: {
 }): Promise<TrendResponse> {
   if (!isTauri) return mock.trend(req);
   return invoke<TrendResponse>("trend", { req });
+}
+
+export async function scatter(req: {
+  xTest: number;
+  yTest: number;
+  zMode: "none" | "continuous" | "category";
+  zTest?: number | null;
+  zCol?: string | null;
+  filter: Filter;
+  maxPoints?: number;
+}): Promise<ScatterResponse> {
+  if (!isTauri) return mock.scatter(req);
+  return invoke<ScatterResponse>("scatter", { req });
 }
 
 /* ------------------------------------------------------------------ */

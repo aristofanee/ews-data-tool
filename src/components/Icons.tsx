@@ -61,6 +61,16 @@ export const IconTrend = (p: IconProps) => (
   </Svg>
 );
 
+export const IconScatter = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 4v16h16" strokeWidth={1.5} />
+    <circle cx="8" cy="15.5" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="11" cy="10" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="13" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="18" cy="7" r="1.4" fill="currentColor" stroke="none" />
+  </Svg>
+);
+
 export const IconFolder = (p: IconProps) => (
   <Svg {...p}>
     <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />

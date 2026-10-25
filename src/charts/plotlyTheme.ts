@@ -18,6 +18,12 @@ export interface ChartTheme {
   gray: string;
   hoverBg: string;
   hoverText: string;
+  /** Categorical palette used for splits, lots and other labels. */
+  palette: string[];
+  paletteFill: string[];
+  grayFill: string;
+  /** Continuous Z scale. */
+  heat: [string, string, string];
 }
 
 export function chartTheme(theme: Theme): ChartTheme {
@@ -38,6 +44,19 @@ export function chartTheme(theme: Theme): ChartTheme {
       gray: "#64748b",
       hoverBg: "#e9effb",
       hoverText: "#0b1220",
+      palette: ["#60a5fa", "#fbbf24", "#34d399", "#fb7185", "#a78bfa", "#22d3ee", "#fb923c", "#94a3b8"],
+      paletteFill: [
+        "rgba(96,165,250,0.20)",
+        "rgba(251,191,36,0.18)",
+        "rgba(52,211,153,0.18)",
+        "rgba(251,113,133,0.18)",
+        "rgba(167,139,250,0.18)",
+        "rgba(34,211,238,0.18)",
+        "rgba(251,146,60,0.18)",
+        "rgba(148,163,184,0.18)",
+      ],
+      grayFill: "rgba(148,163,184,0.16)",
+      heat: ["#60a5fa", "#c4b5fd", "#fbbf24"],
     };
   }
   return {
@@ -56,34 +75,113 @@ export function chartTheme(theme: Theme): ChartTheme {
     gray: "#94a3b8",
     hoverBg: "#0f172a",
     hoverText: "#f8fafc",
+    palette: ["#2563eb", "#eaa600", "#0f9f6e", "#e11d48", "#7c3aed", "#0891b2", "#ea580c", "#64748b"],
+    paletteFill: [
+      "rgba(37,99,235,0.15)",
+      "rgba(234,166,0,0.18)",
+      "rgba(15,159,110,0.15)",
+      "rgba(225,29,72,0.14)",
+      "rgba(124,58,237,0.14)",
+      "rgba(8,145,178,0.14)",
+      "rgba(234,88,12,0.14)",
+      "rgba(100,116,139,0.14)",
+    ],
+    grayFill: "rgba(148,163,184,0.16)",
+    heat: ["#2563eb", "#8b5cf6", "#f5b301"],
   };
 }
 
-export function axisStyle(t: ChartTheme): any {
+export function categoricalColor(t: ChartTheme, code: number, name?: string): string {
+  if (name === "Unassigned" || name === "Mixed" || name === "Other") return t.gray;
+  return t.palette[Math.abs(code) % t.palette.length];
+}
+
+export function categoricalFill(t: ChartTheme, code: number, name?: string): string {
+  if (name === "Unassigned" || name === "Mixed" || name === "Other") return t.grayFill;
+  return t.paletteFill[Math.abs(code) % t.paletteFill.length];
+}
+
+export interface ChartStyle {
+  title: number;
+  axisTitle: number;
+  tick: number;
+  annotation: number;
+  hover: number;
+  line: number;
+  axisLine: number;
+  marker: number;
+  point: number;
+  margin: { l: number; r: number; t: number; b: number };
+}
+
+/**
+ * Presentation sizing is deliberately generous: a 1800x1100 JPG is often
+ * placed 4-6 inches wide in a 2x3 slide grid. These sizes keep labels readable
+ * after that reduction. Users can turn it off for dense exploratory charts.
+ */
+export function chartStyle(presentation: boolean): ChartStyle {
+  if (presentation) {
+    return {
+      title: 46,
+      axisTitle: 36,
+      tick: 32,
+      annotation: 26,
+      hover: 26,
+      line: 3,
+      axisLine: 2,
+      marker: 10,
+      point: 7,
+      margin: { l: 132, r: 46, t: 104, b: 116 },
+    };
+  }
+  return {
+    title: 16,
+    axisTitle: 12,
+    tick: 11,
+    annotation: 10,
+    hover: 12,
+    line: 1.4,
+    axisLine: 1,
+    marker: 4,
+    point: 3,
+    margin: { l: 68, r: 30, t: 54, b: 58 },
+  };
+}
+
+export function axisStyle(t: ChartTheme, style: ChartStyle): any {
   return {
     gridcolor: t.grid,
     zerolinecolor: t.grid,
-    zerolinewidth: 1,
+    zerolinewidth: style.axisLine,
     linecolor: t.axis,
-    linewidth: 1,
+    linewidth: style.axisLine,
     showline: true,
     mirror: false,
     ticks: "outside" as const,
-    ticklen: 4,
-    tickwidth: 1,
+    ticklen: Math.max(4, Math.round(style.tick * 0.22)),
+    tickwidth: style.axisLine,
     tickcolor: t.axis,
     automargin: true,
-    tickfont: { size: 11, color: t.muted, family: CHART_FONT },
-    title: { font: { size: 12, color: t.muted, family: CHART_FONT }, standoff: 10 },
+    tickfont: { size: style.tick, color: t.muted, family: CHART_FONT },
+    title: {
+      font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
+      standoff: Math.round(style.axisTitle * 0.8),
+    },
   };
 }
 
-export function baseLayout(t: ChartTheme, title?: string): any {
+export function baseLayout(t: ChartTheme, title?: string, presentation = false): any {
+  const style = chartStyle(presentation);
   return {
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor: "rgba(0,0,0,0)",
-    font: { family: CHART_FONT, size: 12, color: t.text },
-    margin: { l: 68, r: 30, t: title ? 54 : 22, b: 58 },
+    // Explicit colours are essential: JPEG has no alpha channel, and a
+    // transparent Plotly background is encoded as solid black.
+    paper_bgcolor: t.paper,
+    plot_bgcolor: t.paper,
+    font: { family: CHART_FONT, size: style.tick, color: t.text },
+    margin: {
+      ...style.margin,
+      t: title ? style.margin.t : Math.max(22, Math.round(style.margin.t * 0.45)),
+    },
     title: title
       ? {
           text: title,
@@ -91,19 +189,20 @@ export function baseLayout(t: ChartTheme, title?: string): any {
           xanchor: "left",
           y: 0.985,
           yanchor: "top",
-          font: { family: CHART_FONT, size: 16, color: t.text },
+          yref: "container",
+          font: { family: CHART_FONT, size: style.title, color: t.text },
         }
       : undefined,
     hoverlabel: {
       bgcolor: t.hoverBg,
       bordercolor: t.hoverBg,
-      font: { color: t.hoverText, size: 12, family: CHART_FONT },
+      font: { color: t.hoverText, size: style.hover, family: CHART_FONT },
       align: "left",
     },
     hovermode: "closest" as const,
     showlegend: false,
-    xaxis: axisStyle(t),
-    yaxis: axisStyle(t),
+    xaxis: axisStyle(t, style),
+    yaxis: axisStyle(t, style),
     modebar: {
       bgcolor: "rgba(0,0,0,0)",
       color: t.muted,

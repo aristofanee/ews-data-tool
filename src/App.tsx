@@ -10,7 +10,7 @@ import { ReportDrawer } from "./components/ReportDrawer";
 import { StatusBar, ErrorBanner, ProgressOverlay, Toast } from "./components/StatusBar";
 import type { PlotType } from "./types";
 
-const PLOT_KEYS: PlotType[] = ["box", "map", "pareto", "hist", "trend"];
+const PLOT_KEYS: PlotType[] = ["box", "map", "pareto", "hist", "trend", "scatter"];
 
 export default function App() {
   const theme = useStore((s) => s.theme);
@@ -59,7 +59,7 @@ export default function App() {
       } else if (key === "e") {
         e.preventDefault();
         void exportCsv();
-      } else if (key >= "1" && key <= "5") {
+      } else if (key >= "1" && key <= "6") {
         e.preventDefault();
         const t = PLOT_KEYS[Number(key) - 1];
         if (t) useStore.getState().setPlotType(t);

@@ -3,6 +3,7 @@ import { PLOT_LABELS, useStore } from "../store";
 import type { DatasetInfo, Filter, ReportItem } from "../types";
 import * as api from "../lib/api";
 import { generateReport } from "../lib/report";
+import { tidyName } from "../lib/format";
 import { useLoadTemplate, useSaveTemplate } from "../lib/useData";
 import {
   IconBox,
@@ -18,6 +19,7 @@ import {
   IconPlus,
   IconReport,
   IconSave,
+  IconScatter,
   IconTrash,
   IconTrend,
   IconX,
@@ -36,6 +38,8 @@ function iconFor(type: ReportItem["spec"]["type"]) {
       return <IconHist {...p} />;
     case "trend":
       return <IconTrend {...p} />;
+    case "scatter":
+      return <IconScatter {...p} />;
   }
 }
 
@@ -59,7 +63,20 @@ function subtitleFor(it: ReportItem, info: DatasetInfo): string {
     const w = info.wafers[s.mapWafer ?? 0];
     parts.push(`Wafer ${w?.name ?? "?"}`);
   }
-  if (test) parts.push(test.units ? `${test.name} [${test.units}]` : test.name);
+  if (s.type === "scatter") {
+    const x = s.scatterX !== null ? info.tests[s.scatterX] : null;
+    const y = s.scatterY !== null ? info.tests[s.scatterY] : null;
+    parts.push(`${x ? tidyName(x.name) : "X"} vs ${y ? tidyName(y.name) : "Y"}`);
+    if (s.scatterZMode === "continuous") {
+      const z = s.scatterZTest !== null ? info.tests[s.scatterZTest] : null;
+      if (z) parts.push(`Z ${tidyName(z.name)}`);
+    } else if (s.scatterZMode === "category") {
+      parts.push(`Z ${s.scatterZCol}`);
+    }
+  } else if (test) {
+    const name = tidyName(test.name);
+    parts.push(test.units ? `${name} [${test.units}]` : name);
+  }
   if (s.type === "box" || s.type === "trend") parts.push(s.groupBy === "wafer" ? "by wafer" : "by lot");
   parts.push(summarizeFilters(it.filters, info));
   return parts.join(" · ");
@@ -129,7 +146,7 @@ export function ReportDrawer() {
         spec: {
           ...spec,
           mapWafer: i,
-          title: `${test?.name ?? "Wafer"} · ${info.lots[w.lot]} / ${w.name}`,
+          title: `${test ? tidyName(test.name) : "Wafer"} · ${info.lots[w.lot]} / ${w.name}`,
         },
         filters,
       }))
@@ -146,7 +163,7 @@ export function ReportDrawer() {
     if (tests.length > 20 && !window.confirm(`Add ${tests.length} plots (one per test) to the report?`)) return;
     addReportItems(
       tests.map(({ t, i }) => ({
-        spec: { ...spec, test: i, title: `${t.name} · ${PLOT_LABELS[spec.type]}` },
+        spec: { ...spec, test: i, title: `${tidyName(t.name)} · ${PLOT_LABELS[spec.type]}` },
         filters,
       }))
     );

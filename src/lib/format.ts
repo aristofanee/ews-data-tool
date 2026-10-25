@@ -20,12 +20,19 @@ export function pct(v: number, digits = 2): string {
   return `${v.toFixed(digits)}%`;
 }
 
-export function withUnits(name: string, units: string): string {
-  return units ? `${name} [${units}]` : name;
+/** STDF test names are fixed-width and often contain long runs of padding. */
+export function tidyName(name: string): string {
+  return name.replace(/\s+/g, " ").trim();
 }
 
-export function axisTitle(name: string, units: string): string {
-  return units ? `${name}<br><span style="font-size:10px">${units}</span>` : name;
+export function withUnits(name: string, units: string): string {
+  const n = tidyName(name);
+  return units ? `${n} [${units}]` : n;
+}
+
+export function axisTitle(name: string, units: string, unitSize = 10): string {
+  const n = tidyName(name);
+  return units ? `${n}<br><span style="font-size:${Math.round(unitSize)}px">${units}</span>` : n;
 }
 
 export function safeName(s: string): string {

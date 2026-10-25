@@ -18,6 +18,9 @@ pub struct Imported {
     pub wafer_geom: Vec<(Option<f32>, Option<f32>, Option<f32>)>,
     pub records: u64,
     pub col_index: HashMap<(u32, u16), usize>,
+    /// Text metadata imported from a CSV (for example an Excel-added Split
+    /// column). Codes are local to this file and are remapped by `merge`.
+    pub custom_cols: Vec<CustomColumn>,
 }
 
 impl Imported {
@@ -38,6 +41,7 @@ impl Imported {
             wafer_geom: Vec::new(),
             records: 0,
             col_index: HashMap::new(),
+            custom_cols: Vec::new(),
         }
     }
 
@@ -214,6 +218,59 @@ impl Dataset {
             }
         }
 
+        // Text columns such as an Excel-added "Split" are imported as
+        // wafer-level custom columns. Re-map the file-local wafer/category
+        // codes into the merged dataset.
+        for imported in imp.custom_cols {
+            let idx = match self.custom_cols.iter().position(|c| c.name == imported.name) {
+                Some(i) => i,
+                None => {
+                    self.custom_cols.push(CustomColumn {
+                        name: imported.name,
+                        categories: vec![String::new()],
+                        wafer_values: vec![0; self.wafers.len()],
+                    });
+                    self.custom_cols.len() - 1
+                }
+            };
+            if self.custom_cols[idx].wafer_values.len() < self.wafers.len() {
+                self.custom_cols[idx]
+                    .wafer_values
+                    .resize(self.wafers.len(), 0);
+            }
+            for (local_w, code) in imported.wafer_values.iter().enumerate() {
+                if *code == 0 {
+                    continue;
+                }
+                let Some(label) = imported
+                    .categories
+                    .get(*code as usize)
+                    .filter(|label| !label.is_empty())
+                else {
+                    continue;
+                };
+                let Some(global_w) = wafer_map.get(local_w).copied() else {
+                    continue;
+                };
+                let global_w = global_w as usize;
+                if global_w >= self.custom_cols[idx].wafer_values.len() {
+                    continue;
+                }
+                let code = match self.custom_cols[idx]
+                    .categories
+                    .iter()
+                    .position(|c| c == label)
+                {
+                    Some(i) => i as u16,
+                    None => {
+                        self.custom_cols[idx].categories.push(label.clone());
+                        (self.custom_cols[idx].categories.len() - 1) as u16
+                    }
+                };
+                self.custom_cols[idx].wafer_values[global_w] = code;
+            }
+        }
+
         for (code, (name, pass)) in imp.hbin_names {
             self.hbin_names.entry(code).or_insert(name);
             if pass {
@@ -304,6 +361,7 @@ impl Dataset {
             rows: self.rows,
             hbins,
             sbins,
+            custom_columns: self.custom_cols.clone(),
             memory_mb: self.memory_bytes() as f64 / (1024.0 * 1024.0),
         }
     }
@@ -319,5 +377,59 @@ pub struct DatasetInfo {
     pub rows: usize,
     pub hbins: Vec<BinInfo>,
     pub sbins: Vec<BinInfo>,
+    pub custom_columns: Vec<CustomColumn>,
     pub memory_mb: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_remaps_imported_custom_columns() {
+        let mut imp = Imported::new();
+        let lot = imp.lot_index("L1");
+        let w0 = imp.wafer_index(lot, "W01");
+        let w1 = imp.wafer_index(lot, "W02");
+        imp.new_row(lot, w0);
+        imp.new_row(lot, w1);
+        imp.custom_cols.push(CustomColumn {
+            name: "Split".into(),
+            categories: vec![String::new(), "A".into(), "B".into()],
+            wafer_values: vec![1, 2],
+        });
+
+        let mut ds = Dataset::new();
+        ds.merge(imp);
+        assert_eq!(ds.wafers.len(), 2);
+        assert_eq!(ds.custom_cols.len(), 1);
+        let split = &ds.custom_cols[0];
+        assert_eq!(split.name, "Split");
+        assert_eq!(split.categories, vec!["", "A", "B"]);
+        assert_eq!(split.wafer_values, vec![1, 2]);
+    }
+
+    #[test]
+    fn merge_adds_labels_to_existing_column() {
+        let mut imp = Imported::new();
+        let lot = imp.lot_index("L1");
+        let w0 = imp.wafer_index(lot, "W01");
+        imp.new_row(lot, w0);
+        imp.custom_cols.push(CustomColumn {
+            name: "Split".into(),
+            categories: vec![String::new(), "A".into()],
+            wafer_values: vec![1],
+        });
+
+        let mut ds = Dataset::new();
+        ds.custom_cols.push(CustomColumn {
+            name: "Split".into(),
+            categories: vec![String::new(), "B".into()],
+            wafer_values: vec![],
+        });
+        ds.merge(imp);
+        let split = &ds.custom_cols[0];
+        assert_eq!(split.categories, vec!["", "B", "A"]);
+        assert_eq!(split.wafer_values, vec![2]);
+    }
 }

@@ -2,6 +2,7 @@ use crate::dataset::Imported;
 use crate::model::NAN;
 use memmap2::Mmap;
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 struct Cur<'a> {
@@ -96,9 +97,33 @@ fn read_u16(d: &[u8], off: usize, be: bool) -> u16 {
 }
 
 pub fn import_stdf(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Imported, String> {
-    let file = File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+    let mut file = File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+    let mut magic = [0u8; 3];
+    let n = file
+        .read(&mut magic)
+        .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+
+    // Unix compress (.Z / LZC) is a common wrapper for STDF files on older
+    // test floors. It is not gzip/zip; decode it before parsing the records.
+    if n >= 2 && magic[0] == 0x1f && magic[1] == 0x9d {
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| format!("Cannot rewind {}: {e}", path.display()))?;
+        let mut compressed = Vec::new();
+        file.read_to_end(&mut compressed)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        progress(1.0, "Decompressing .Z...");
+        let data = lzw_z::decompress_slice(&compressed)
+            .map_err(|e| format!("Cannot decompress {}: {e}", path.display()))?;
+        progress(10.0, "Parsing STDF...");
+        let mut cb = |pct: f32, msg: &str| progress(10.0 + pct * 0.9, msg);
+        return parse_stdf_bytes(&data, &mut cb);
+    }
+
     let mmap = unsafe { Mmap::map(&file) }.map_err(|e| format!("Cannot map file: {e}"))?;
-    let d: &[u8] = &mmap;
+    parse_stdf_bytes(&mmap, progress)
+}
+
+fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imported, String> {
     if d.len() < 6 {
         return Err("File is too small to be an STDF file".into());
     }
@@ -447,6 +472,26 @@ fn scale_opt(value: f32, scal: i8, opt: u8, bit: u8) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_z_stream() {
+        // Hand-crafted non-block .Z stream from the decoder crate's tests:
+        // header (max bits 16, block mode off), then literal 'A' and 'B'.
+        let bytes = [0x1f, 0x9d, 0x10, 0x41, 0x84, 0x00];
+        assert_eq!(lzw_z::decompress_slice(&bytes).expect("decode .Z"), b"AB");
+    }
+
+    #[test]
+    fn parses_compressed_reference_file() {
+        let p = match std::env::var("STDF_DEMO_Z") {
+            Ok(p) if !p.is_empty() => p,
+            _ => return,
+        };
+        let mut cb = |_: f32, _: &str| {};
+        let imp = import_stdf(std::path::Path::new(&p), &mut cb).expect("parse .Z");
+        assert!(imp.row_lot.len() > 0, "dice from .Z");
+        assert!(!imp.tests.is_empty(), "tests from .Z");
+    }
 
     #[test]
     fn parses_reference_file() {

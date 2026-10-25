@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { DatasetInfo, Filter, PlotSpec, PlotType, ReportItem } from "./types";
+import type { CustomColumn, DatasetInfo, Filter, PlotSpec, PlotType, ReportItem, TestInfo } from "./types";
 import { defaultSpec, emptyFilter } from "./types";
 import type { Theme } from "./lib/theme";
 
@@ -9,6 +9,7 @@ export const PLOT_LABELS: Record<PlotType, string> = {
   pareto: "Pareto",
   hist: "Histogram",
   trend: "Trend",
+  scatter: "Scatter",
 };
 
 export interface TemplateFile {
@@ -19,16 +20,46 @@ export interface TemplateFile {
   theme?: Theme;
   filters: Filter;
   plots: { spec: PlotSpec; filters: Filter }[];
+  /** Labels created in the app; restored when the same wafers are loaded. */
+  customColumns?: CustomColumn[];
 }
 
 function rid(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
+/** Test names in STDF files are often padded; keep exported titles compact. */
+function tidyTitle(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
 export function autoTitle(testName: string | null, type: PlotType): string {
   if (type === "pareto") return "Fail Pareto";
   if (!testName) return PLOT_LABELS[type];
-  return `${testName} · ${PLOT_LABELS[type]}`;
+  return `${tidyTitle(testName)} · ${PLOT_LABELS[type]}`;
+}
+
+export function scatterTitle(xName: string | null, yName: string | null): string {
+  if (xName && yName) return `${tidyTitle(xName)} vs ${tidyTitle(yName)}`;
+  return "Scatter";
+}
+
+/** Fill in sensible X/Y tests (never the same test twice) for a scatter spec. */
+function normalizeScatter(spec: PlotSpec, tests: TestInfo[]): PlotSpec {
+  const n = tests.length;
+  if (n === 0) return { ...spec, scatterX: null, scatterY: null };
+  let x = spec.scatterX;
+  let y = spec.scatterY;
+  if (x === null || x < 0 || x >= n) x = spec.test !== null && spec.test < n ? spec.test : 0;
+  if (y === null || y < 0 || y >= n) y = x + 1 < n ? x + 1 : x;
+  if (n > 1 && x === y) y = (x + 1) % n;
+  return { ...spec, test: y, scatterX: x, scatterY: y };
+}
+
+function scatterSpecTitle(spec: PlotSpec, tests: TestInfo[]): string {
+  const x = spec.scatterX !== null ? tests[spec.scatterX]?.name ?? null : null;
+  const y = spec.scatterY !== null ? tests[spec.scatterY]?.name ?? null : null;
+  return scatterTitle(x, y);
 }
 
 const initialTheme: Theme =
@@ -104,12 +135,29 @@ export const useStore = create<AppState>((set, get) => ({
       if (test === null || test >= info.tests.length) test = 0;
       const name = info.tests[test]?.name ?? null;
       const wafer = prev.spec.mapWafer;
-      patch.spec = {
+      let spec: PlotSpec = {
         ...prev.spec,
         test,
-        title: autoTitle(name, prev.spec.type),
         mapWafer: wafer !== null && wafer < info.wafers.length ? wafer : 0,
       };
+      const hasColumn = (name: string) => info.customColumns.some((c) => c.name === name);
+      if (spec.blockCol && spec.blockCol !== "__wafer" && !hasColumn(spec.blockCol)) {
+        spec.blockCol = "";
+      }
+      if (
+        spec.scatterZCol &&
+        !["lot", "wafer", "hbin", "sbin"].includes(spec.scatterZCol) &&
+        !hasColumn(spec.scatterZCol)
+      ) {
+        spec.scatterZCol = "lot";
+      }
+      if (spec.type === "scatter") {
+        spec = normalizeScatter(spec, info.tests);
+        spec.title = scatterSpecTitle(spec, info.tests);
+      } else {
+        spec.title = autoTitle(name, spec.type);
+      }
+      patch.spec = spec;
     }
     set(patch);
   },
@@ -134,20 +182,66 @@ export const useStore = create<AppState>((set, get) => ({
 
   setPlotType: (type) => {
     const s = get();
+    if (type === "scatter") {
+      let spec = normalizeScatter({ ...s.spec, type }, s.info?.tests ?? []);
+      spec.title = scatterSpecTitle(spec, s.info?.tests ?? []);
+      set({ spec });
+      return;
+    }
     const test = s.info?.tests[s.spec.test ?? -1]?.name ?? null;
     set({ spec: { ...s.spec, type, title: autoTitle(test, type) } });
   },
   patchSpec: (p) => {
     const s = get();
+    const next: PlotSpec = { ...s.spec, ...p };
     let title = p.title ?? s.spec.title;
-    if (typeof p.test === "number" && p.title === undefined) {
-      title = autoTitle(s.info?.tests[p.test]?.name ?? null, p.type ?? s.spec.type);
+    if (p.title === undefined) {
+      if (next.type === "scatter") {
+        // Keep X and Y distinct when the user picks the same test twice.
+        if (next.scatterX !== null && next.scatterX === next.scatterY) {
+          if (p.scatterX !== undefined) {
+            next.scatterY =
+              s.spec.scatterY !== null && s.spec.scatterY !== p.scatterX
+                ? s.spec.scatterY
+                : (next.scatterX + 1) % Math.max(1, s.info?.tests.length ?? 1);
+          } else if (p.scatterY !== undefined) {
+            next.scatterX =
+              s.spec.scatterX !== null && s.spec.scatterX !== p.scatterY
+                ? s.spec.scatterX
+                : (next.scatterY + 1) % Math.max(1, s.info?.tests.length ?? 1);
+          }
+        }
+        if (
+          p.scatterX !== undefined ||
+          p.scatterY !== undefined ||
+          p.type !== undefined
+        ) {
+          title = scatterSpecTitle(next, s.info?.tests ?? []);
+        }
+      } else if (typeof p.test === "number") {
+        title = autoTitle(s.info?.tests[p.test]?.name ?? null, next.type);
+      }
     }
-    set({ spec: { ...s.spec, ...p, title } });
+    set({ spec: { ...next, title } });
   },
   selectTest: (index) => {
     const s = get();
     const name = s.info?.tests[index]?.name ?? null;
+    if (s.spec.type === "scatter") {
+      const tests = s.info?.tests ?? [];
+      let x = s.spec.scatterX;
+      const y = index;
+      if (x === null) x = tests.length > 1 ? (y + 1) % tests.length : y;
+      if (tests.length > 1 && x === y) {
+        x = s.spec.scatterY !== null && s.spec.scatterY !== y
+          ? s.spec.scatterY
+          : (y + 1) % tests.length;
+      }
+      const spec: PlotSpec = { ...s.spec, test: y, scatterX: x, scatterY: y };
+      spec.title = scatterSpecTitle(spec, tests);
+      set({ spec });
+      return;
+    }
     set({ spec: { ...s.spec, test: index, title: autoTitle(name, s.spec.type) } });
   },
 
@@ -162,10 +256,17 @@ export const useStore = create<AppState>((set, get) => ({
 
   addReport: () => {
     const s = get();
-    const needsTest = s.spec.type !== "pareto" && s.spec.type !== "map";
-    if (needsTest && s.spec.test === null) {
-      s.notify("Select a test before adding a plot.");
-      return;
+    if (s.spec.type === "scatter") {
+      if (s.spec.scatterX === null || s.spec.scatterY === null) {
+        s.notify("Select X and Y tests before adding a scatter plot.");
+        return;
+      }
+    } else {
+      const needsTest = s.spec.type !== "pareto" && s.spec.type !== "map";
+      if (needsTest && s.spec.test === null) {
+        s.notify("Select a test before adding a plot.");
+        return;
+      }
     }
     const spec: PlotSpec = { ...s.spec, id: rid() };
     const item: ReportItem = { id: spec.id, spec, filters: structuredClone(s.filters) };
@@ -195,11 +296,19 @@ export const useStore = create<AppState>((set, get) => ({
   setTemplateName: (templateName) => set({ templateName }),
   applyTemplate: (t) => {
     const s = get();
-    const plots = (t.plots ?? []).map((p) => ({
-      id: rid(),
-      spec: { ...defaultSpec(p.spec.type ?? "box", p.spec.test ?? null, p.spec.title ?? ""), ...p.spec, id: rid() },
-      filters: p.filters ?? emptyFilter(),
-    }));
+    const tests = s.info?.tests ?? [];
+    const plots = (t.plots ?? []).map((p) => {
+      let spec: PlotSpec = {
+        ...defaultSpec(p.spec.type ?? "box", p.spec.test ?? null, p.spec.title ?? ""),
+        ...p.spec,
+        id: rid(),
+      };
+      if (spec.type === "scatter") {
+        spec = normalizeScatter(spec, tests);
+        if (!spec.title) spec.title = scatterSpecTitle(spec, tests);
+      }
+      return { id: spec.id, spec, filters: p.filters ?? emptyFilter() };
+    });
     set({
       report: plots,
       filters: t.filters ?? emptyFilter(),

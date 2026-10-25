@@ -74,6 +74,7 @@ export function useSaveTemplate() {
         theme: s.theme,
         filters: s.filters,
         plots,
+        customColumns: s.info?.customColumns ?? [],
       };
       const path = await api.pickSavePath(`${safeName(name)}.json`, ["json"]);
       if (!path) return;
@@ -96,7 +97,18 @@ export function useLoadTemplate() {
       const text = await api.readText(path);
       const t = JSON.parse(text) as TemplateFile;
       if (!t || !Array.isArray(t.plots)) throw new Error("This file is not an EWS Data Tool template.");
+      const state = useStore.getState();
+      let customWarning: string | null = null;
+      if (state.info && t.customColumns?.length) {
+        try {
+          const info = await api.restoreCustomColumns(t.customColumns);
+          useStore.getState().setInfo(info, { keepFilters: true });
+        } catch (e) {
+          customWarning = `Template loaded, but custom labels were not restored: ${String(e)}`;
+        }
+      }
       applyTemplate(t);
+      if (customWarning) useStore.getState().notify(customWarning);
     } catch (e) {
       setError(String(e));
     }

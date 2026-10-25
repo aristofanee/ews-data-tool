@@ -3,9 +3,16 @@ import type { DatasetInfo, ReportItem } from "../types";
 import type { Theme } from "./theme";
 import * as api from "./api";
 import { EXPORT_CONFIG } from "../charts/plotlyTheme";
-import { figureBox, figureHist, figurePareto, figureTrend, type Figure } from "../charts/figures";
+import {
+  figureBox,
+  figureHist,
+  figurePareto,
+  figureScatter,
+  figureTrend,
+  type Figure,
+} from "../charts/figures";
 import { renderMapImage, type MapOptions } from "../charts/waferMap";
-import { safeName } from "./format";
+import { safeName, tidyName } from "./format";
 import { useStore } from "../store";
 
 export interface ReportResult {
@@ -114,7 +121,10 @@ export async function generateReport(opts: {
   templateName: string;
   onProgress: (pct: number, msg: string) => void;
 }): Promise<ReportResult> {
-  const { items, info, theme, folder, templateName, onProgress } = opts;
+  const { items, info, folder, templateName, onProgress } = opts;
+  // Reports are pasted into PowerPoint and viewed on a white page. Force the
+  // light chart theme so a dark in-app theme never produces dark slides.
+  const theme: Theme = "light";
   const entries: { file: string; title: string; subtitle: string }[] = [];
   const files: string[] = [];
   const binNames: Record<number, string> = {};
@@ -142,10 +152,11 @@ export async function generateReport(opts: {
         lsl: spec.showLimits ? (spec.lsl ?? md.lsl) : null,
         usl: spec.showLimits ? (spec.usl ?? md.usl) : null,
         binNames,
+        presentation: spec.presentation,
       };
       subtitle =
         `${md.lotName} · Wafer ${md.wafer?.name ?? "?"}` +
-        (md.test ? ` · ${md.test.name}` : "") +
+        (md.test ? ` · ${tidyName(md.test.name)}` : "") +
         ` · Yield ${md.yieldPct.toFixed(2)}%`;
       dataUrl = renderMapImage(md, mapOpts, 1600, 1000, spec.title, subtitle, "jpeg");
     } else {
@@ -154,12 +165,14 @@ export async function generateReport(opts: {
       switch (spec.type) {
         case "box": {
           if (spec.test === null) continue;
-          const d = await api.boxPlot({ test: spec.test, groupBy: spec.groupBy, filter: item.filters });
-          const lotOf = d.groups.map((g) =>
-            spec.groupBy === "lot" ? g.key : (info.wafers[g.key]?.lot ?? 0)
-          );
-          fig = figureBox(d, { theme, spec, title: spec.title, lotOf, lotNames: info.lots });
-          subtitle = `${test?.name ?? ""}${test?.units ? ` [${test.units}]` : ""} · ${d.summary.n.toLocaleString("en-US")} dice · ${spec.groupBy === "wafer" ? "by wafer" : "by lot"}`;
+          const d = await api.boxPlot({
+            test: spec.test,
+            groupBy: spec.groupBy,
+            filter: item.filters,
+            blockCol: spec.blockCol || undefined,
+          });
+          fig = figureBox(d, { theme, spec, title: spec.title });
+          subtitle = `${tidyName(test?.name ?? "")}${test?.units ? ` [${test.units}]` : ""} · ${d.summary.n.toLocaleString("en-US")} dice · ${spec.groupBy === "wafer" ? "by wafer" : "by lot"}`;
           break;
         }
         case "pareto": {
@@ -177,14 +190,38 @@ export async function generateReport(opts: {
           if (spec.test === null) continue;
           const d = await api.histogram({ test: spec.test, filter: item.filters, bins: spec.bins });
           fig = figureHist(d, { theme, spec, title: spec.title });
-          subtitle = `${test?.name ?? ""}${test?.units ? ` [${test.units}]` : ""} · ${d.summary.n.toLocaleString("en-US")} dice`;
+          subtitle = `${tidyName(test?.name ?? "")}${test?.units ? ` [${test.units}]` : ""} · ${d.summary.n.toLocaleString("en-US")} dice`;
           break;
         }
         case "trend": {
           if (spec.test === null) continue;
           const d = await api.trend({ test: spec.test, by: spec.groupBy, filter: item.filters });
           fig = figureTrend(d, { theme, spec, title: spec.title });
-          subtitle = `${test?.name ?? ""}${test?.units ? ` [${test.units}]` : ""} · ${d.points.length} points`;
+          subtitle = `${tidyName(test?.name ?? "")}${test?.units ? ` [${test.units}]` : ""} · ${d.points.length} points`;
+          break;
+        }
+        case "scatter": {
+          if (spec.scatterX === null || spec.scatterY === null) continue;
+          const d = await api.scatter({
+            xTest: spec.scatterX,
+            yTest: spec.scatterY,
+            zMode: spec.scatterZMode,
+            zTest: spec.scatterZTest,
+            zCol: spec.scatterZCol,
+            filter: item.filters,
+          });
+          fig = figureScatter(d, { theme, spec, title: spec.title });
+          const z =
+            d.zMode === "continuous"
+              ? ` · Z ${d.zColLabel}`
+              : d.zMode === "category"
+                ? ` · ${d.zColLabel}`
+                : "";
+          const r =
+            d.r !== null && Number.isFinite(d.r)
+              ? ` · r ${d.r.toFixed(3)}`
+              : "";
+          subtitle = `${tidyName(d.xTest.name)} vs ${tidyName(d.yTest.name)}${z} · ${d.total.toLocaleString("en-US")} dice${r}`;
           break;
         }
         default:
@@ -220,6 +257,7 @@ export async function generateReport(opts: {
     created: new Date().toISOString(),
     filters: state.filters,
     plots: items.map((r) => ({ spec: r.spec, filters: r.filters })),
+    customColumns: state.info?.customColumns ?? [],
   };
   await api.saveText(join(folder, "report.json"), JSON.stringify(template, null, 2));
 

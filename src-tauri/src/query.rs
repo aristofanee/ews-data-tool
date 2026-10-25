@@ -32,6 +32,9 @@ pub struct BoxRequest {
     #[serde(default)]
     pub filter: Filter,
     pub max_points: Option<usize>,
+    /// `None`/empty means colour by lot. `__wafer` colours by wafer; any other
+    /// value names a custom categorical column (for example `Split`).
+    pub block_col: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -43,6 +46,8 @@ pub struct BoxGroup {
     pub xs: Vec<i16>,
     pub ys: Vec<i16>,
     pub n: usize,
+    pub block: String,
+    pub block_code: u16,
 }
 
 #[derive(Serialize)]
@@ -143,6 +148,8 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
                 all.push(*v);
             }
         }
+        let (block_code, block) =
+            block_for(ds, req.group_by, k, multi_lot, req.block_col.as_deref());
         groups.push(BoxGroup {
             key: k,
             label: label(ds, req.group_by, k, multi_lot),
@@ -150,6 +157,8 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
             values,
             xs,
             ys,
+            block,
+            block_code,
         });
     }
 
@@ -211,6 +220,74 @@ fn label(ds: &Dataset, by: GroupBy, key: u16, multi_lot: bool) -> String {
             }
         }
         GroupBy::Lot => ds.lot_name(key).to_string(),
+    }
+}
+
+fn custom_label(col: &CustomColumn, code: u16) -> String {
+    col.categories
+        .get(code as usize)
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| "Unassigned".to_string())
+}
+
+/// Resolve the block/colour label for a box group. The default is the lot;
+/// custom columns are stored per wafer, so lot-level groups may be "Mixed".
+fn block_for(
+    ds: &Dataset,
+    by: GroupBy,
+    key: u16,
+    multi_lot: bool,
+    block_col: Option<&str>,
+) -> (u16, String) {
+    let fallback = || {
+        let code = match by {
+            GroupBy::Wafer => ds
+                .wafers
+                .get(key as usize)
+                .map(|w| w.lot)
+                .unwrap_or(0),
+            GroupBy::Lot => key,
+        };
+        (code, ds.lot_name(code).to_string())
+    };
+
+    let name = match block_col {
+        Some(s) if !s.is_empty() => s,
+        _ => return fallback(),
+    };
+    if name == "__wafer" {
+        let code = key;
+        let text = match by {
+            GroupBy::Wafer => label(ds, GroupBy::Wafer, key, multi_lot),
+            GroupBy::Lot => ds.lot_name(key).to_string(),
+        };
+        return (code, text);
+    }
+    let Some(col) = ds.custom_column(name) else {
+        return fallback();
+    };
+    match by {
+        GroupBy::Wafer => {
+            let code = col.wafer_values.get(key as usize).copied().unwrap_or(0);
+            (code, custom_label(col, code))
+        }
+        GroupBy::Lot => {
+            let mut codes: Vec<u16> = Vec::new();
+            for (wi, w) in ds.wafers.iter().enumerate() {
+                if w.lot == key {
+                    let code = col.wafer_values.get(wi).copied().unwrap_or(0);
+                    if !codes.contains(&code) {
+                        codes.push(code);
+                    }
+                }
+            }
+            match codes.as_slice() {
+                [] => (0, "Unassigned".to_string()),
+                [code] => (*code, custom_label(col, *code)),
+                _ => (0, "Mixed".to_string()),
+            }
+        }
     }
 }
 
@@ -640,6 +717,379 @@ pub fn trend(ds: &Dataset, req: &TrendRequest) -> TrendResponse {
     }
 }
 
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScatterZMode {
+    #[default]
+    None,
+    Continuous,
+    Category,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScatterRequest {
+    pub x_test: usize,
+    pub y_test: usize,
+    #[serde(default)]
+    pub z_mode: ScatterZMode,
+    pub z_test: Option<usize>,
+    pub z_col: Option<String>,
+    #[serde(default)]
+    pub filter: Filter,
+    pub max_points: Option<usize>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScatterPoint {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub lot: u16,
+    pub wafer: u16,
+    pub hbin: u16,
+    pub sbin: u16,
+    pub x_die: i16,
+    pub y_die: i16,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScatterSeries {
+    pub key: u16,
+    pub name: String,
+    pub points: Vec<ScatterPoint>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScatterResponse {
+    pub series: Vec<ScatterSeries>,
+    pub x_test: TestInfo,
+    pub y_test: TestInfo,
+    pub z_test: Option<TestInfo>,
+    pub z_mode: ScatterZMode,
+    pub z_col: Option<String>,
+    pub z_col_label: String,
+    pub z_min: f32,
+    pub z_max: f32,
+    pub total: usize,
+    pub excluded: usize,
+    pub truncated: bool,
+    pub r: f32,
+    pub lots: Vec<String>,
+    pub wafers: Vec<String>,
+}
+
+fn pearson(x: &[f32], y: &[f32]) -> f32 {
+    let n = x.len().min(y.len());
+    if n < 2 {
+        return f32::NAN;
+    }
+    let mut sx = 0.0f64;
+    let mut sy = 0.0f64;
+    for i in 0..n {
+        sx += x[i] as f64;
+        sy += y[i] as f64;
+    }
+    let mx = sx / n as f64;
+    let my = sy / n as f64;
+    let mut sxy = 0.0f64;
+    let mut sxx = 0.0f64;
+    let mut syy = 0.0f64;
+    for i in 0..n {
+        let dx = x[i] as f64 - mx;
+        let dy = y[i] as f64 - my;
+        sxy += dx * dy;
+        sxx += dx * dx;
+        syy += dy * dy;
+    }
+    if sxx <= 0.0 || syy <= 0.0 {
+        return f32::NAN;
+    }
+    (sxy / (sxx * syy).sqrt()) as f32
+}
+
+fn scatter_category(ds: &Dataset, col: &str, row: usize, multi_lot: bool) -> (u16, String) {
+    match col {
+        "wafer" => {
+            let wi = ds.wafer_of_row[row];
+            (wi, label(ds, GroupBy::Wafer, wi, multi_lot))
+        }
+        "hbin" => {
+            let code = ds.hbin[row];
+            (code, ds.bin_name(true, code))
+        }
+        "sbin" => {
+            let code = ds.sbin[row];
+            (code, ds.bin_name(false, code))
+        }
+        "lot" | "" => {
+            let li = ds.lot_of_row[row];
+            (li, ds.lot_name(li).to_string())
+        }
+        other => {
+            if let Some(cc) = ds.custom_column(other) {
+                let wi = ds.wafer_of_row[row];
+                let code = cc.wafer_values.get(wi as usize).copied().unwrap_or(0);
+                (code, custom_label(cc, code))
+            } else {
+                let li = ds.lot_of_row[row];
+                (li, ds.lot_name(li).to_string())
+            }
+        }
+    }
+}
+
+fn scatter_col_label(ds: &Dataset, col: &str) -> String {
+    match col {
+        "lot" | "" => "Lot".to_string(),
+        "wafer" => "Wafer ID (OCR)".to_string(),
+        "hbin" => "Hard bin".to_string(),
+        "sbin" => "Soft bin".to_string(),
+        other => ds
+            .custom_column(other)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "Lot".to_string()),
+    }
+}
+
+pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
+    let x_test = ds
+        .tests
+        .get(req.x_test)
+        .cloned()
+        .unwrap_or_else(|| TestInfo::new("?"));
+    let y_test = ds
+        .tests
+        .get(req.y_test)
+        .cloned()
+        .unwrap_or_else(|| TestInfo::new("?"));
+    let empty = || ScatterResponse {
+        series: Vec::new(),
+        x_test: x_test.clone(),
+        y_test: y_test.clone(),
+        z_test: req.z_test.and_then(|i| ds.tests.get(i).cloned()),
+        z_mode: req.z_mode,
+        z_col: req.z_col.clone(),
+        z_col_label: req
+            .z_col
+            .as_deref()
+            .map(|c| scatter_col_label(ds, c))
+            .unwrap_or_default(),
+        z_min: f32::NAN,
+        z_max: f32::NAN,
+        total: 0,
+        excluded: 0,
+        truncated: false,
+        r: f32::NAN,
+        lots: ds.lots.clone(),
+        wafers: (0..ds.wafers.len())
+            .map(|i| label(ds, GroupBy::Wafer, i as u16, ds.lots.len() > 1))
+            .collect(),
+    };
+
+    if req.x_test >= ds.cols.len()
+        || req.y_test >= ds.cols.len()
+        || ds.cols[req.x_test].is_empty()
+        || ds.cols[req.y_test].is_empty()
+    {
+        return empty();
+    }
+    let mask = ds.base_mask(&req.filter);
+    let xcol = &ds.cols[req.x_test];
+    let ycol = &ds.cols[req.y_test];
+    let mut candidates: Vec<usize> = Vec::new();
+    for r in 0..ds.rows {
+        if mask[r] && xcol[r].is_finite() && ycol[r].is_finite() {
+            candidates.push(r);
+        }
+    }
+
+    let mut kept: Vec<usize> = Vec::new();
+    let mut excluded = 0usize;
+    if let Some(sf) = &req.filter.stat {
+        if sf.per_wafer {
+            let mut by_wafer: HashMap<u16, Vec<usize>> = HashMap::new();
+            for r in &candidates {
+                by_wafer.entry(ds.wafer_of_row[*r]).or_default().push(*r);
+            }
+            for (_, idxs) in by_wafer {
+                let xv: Vec<f32> = idxs.iter().map(|r| xcol[*r]).collect();
+                let yv: Vec<f32> = idxs.iter().map(|r| ycol[*r]).collect();
+                let kx = keep_mask(&xv, sf);
+                let ky = keep_mask(&yv, sf);
+                for (j, r) in idxs.iter().enumerate() {
+                    if kx[j] && ky[j] {
+                        kept.push(*r);
+                    } else {
+                        excluded += 1;
+                    }
+                }
+            }
+            kept.sort_unstable();
+        } else {
+            let xv: Vec<f32> = candidates.iter().map(|r| xcol[*r]).collect();
+            let yv: Vec<f32> = candidates.iter().map(|r| ycol[*r]).collect();
+            let kx = keep_mask(&xv, sf);
+            let ky = keep_mask(&yv, sf);
+            for (j, r) in candidates.iter().enumerate() {
+                if kx[j] && ky[j] {
+                    kept.push(*r);
+                } else {
+                    excluded += 1;
+                }
+            }
+        }
+    } else {
+        kept = candidates;
+    }
+
+    let total = kept.len();
+    let cap = req.max_points.unwrap_or(30_000).max(1);
+    let stride = if total > cap {
+        ((total as f64 / cap as f64).ceil() as usize).max(1)
+    } else {
+        1
+    };
+    let sampled: Vec<usize> = kept.iter().step_by(stride).copied().collect();
+    let truncated = stride > 1;
+
+    let kept_x: Vec<f32> = kept.iter().map(|r| xcol[*r]).collect();
+    let kept_y: Vec<f32> = kept.iter().map(|r| ycol[*r]).collect();
+    let r = pearson(&kept_x, &kept_y);
+
+    let multi_lot = ds.lots.len() > 1;
+    let zcol = match req.z_mode {
+        ScatterZMode::Continuous => req
+            .z_test
+            .and_then(|i| ds.cols.get(i))
+            .filter(|c| !c.is_empty()),
+        _ => None,
+    };
+    let z_test = match req.z_mode {
+        ScatterZMode::Continuous => req.z_test.and_then(|i| ds.tests.get(i).cloned()),
+        _ => None,
+    };
+    let z_col_label = match req.z_mode {
+        ScatterZMode::Continuous => z_test
+            .as_ref()
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "Z".to_string()),
+        ScatterZMode::Category => req
+            .z_col
+            .as_deref()
+            .map(|c| scatter_col_label(ds, c))
+            .unwrap_or_else(|| "Lot".to_string()),
+        ScatterZMode::None => String::new(),
+    };
+
+    let mut z_min = f32::INFINITY;
+    let mut z_max = f32::NEG_INFINITY;
+    let mut series_map: HashMap<u16, ScatterSeries> = HashMap::new();
+    let mut ordered_points: Vec<ScatterPoint> = Vec::with_capacity(sampled.len());
+
+    for r in sampled {
+        let z = match (&req.z_mode, zcol) {
+            (ScatterZMode::Continuous, Some(col)) => {
+                let v = col.get(r).copied().unwrap_or(f32::NAN);
+                if v.is_finite() {
+                    z_min = z_min.min(v);
+                    z_max = z_max.max(v);
+                }
+                v
+            }
+            _ => f32::NAN,
+        };
+        let p = ScatterPoint {
+            x: xcol[r],
+            y: ycol[r],
+            z,
+            lot: ds.lot_of_row[r],
+            wafer: ds.wafer_of_row[r],
+            hbin: ds.hbin[r],
+            sbin: ds.sbin[r],
+            x_die: ds.x[r],
+            y_die: ds.y[r],
+        };
+        if req.z_mode == ScatterZMode::Category {
+            let (key, name) = scatter_category(
+                ds,
+                req.z_col.as_deref().unwrap_or("lot"),
+                r,
+                multi_lot,
+            );
+            let entry = series_map.entry(key).or_insert_with(|| ScatterSeries {
+                key,
+                name,
+                points: Vec::new(),
+            });
+            entry.points.push(p);
+        } else {
+            ordered_points.push(p);
+        }
+    }
+
+    let mut series: Vec<ScatterSeries> = if req.z_mode == ScatterZMode::Category {
+        let mut list: Vec<ScatterSeries> = series_map.into_values().collect();
+        list.sort_by(|a, b| natural_cmp(&a.name, &b.name).then(a.key.cmp(&b.key)));
+        // Keep the legend manageable. Small categories are folded into "Other".
+        if list.len() > 16 {
+            list.sort_by(|a, b| b.points.len().cmp(&a.points.len()));
+            let mut kept_series = list.split_off(16);
+            let mut other = ScatterSeries {
+                key: u16::MAX,
+                name: "Other".to_string(),
+                points: Vec::new(),
+            };
+            for s in kept_series.drain(..) {
+                other.points.extend(s.points);
+            }
+            list.push(other);
+            list.sort_by(|a, b| natural_cmp(&a.name, &b.name).then(a.key.cmp(&b.key)));
+        }
+        list
+    } else if ordered_points.is_empty() {
+        Vec::new()
+    } else {
+        vec![ScatterSeries {
+            key: 0,
+            name: String::new(),
+            points: ordered_points,
+        }]
+    };
+    if req.z_mode == ScatterZMode::Category {
+        // Stable ordering for the legend: natural order by label.
+        series.sort_by(|a, b| natural_cmp(&a.name, &b.name).then(a.key.cmp(&b.key)));
+    }
+
+    if !z_min.is_finite() {
+        z_min = f32::NAN;
+        z_max = f32::NAN;
+    }
+
+    ScatterResponse {
+        series,
+        x_test,
+        y_test,
+        z_test,
+        z_mode: req.z_mode,
+        z_col: req.z_col.clone(),
+        z_col_label,
+        z_min,
+        z_max,
+        total,
+        excluded,
+        truncated,
+        r,
+        lots: ds.lots.clone(),
+        wafers: (0..ds.wafers.len())
+            .map(|i| label(ds, GroupBy::Wafer, i as u16, multi_lot))
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +1121,7 @@ mod tests {
                 group_by: GroupBy::Wafer,
                 filter: filter.clone(),
                 max_points: None,
+                block_col: None,
             },
         );
         assert!(!bx.groups.is_empty(), "box groups");
@@ -725,10 +1176,93 @@ mod tests {
             &TrendRequest {
                 test,
                 by: GroupBy::Wafer,
-                filter,
+                filter: filter.clone(),
             },
         );
         assert!(!tr.points.is_empty(), "trend points");
         assert!(tr.points.iter().all(|p| p.n > 0));
+
+        let other = (test + 1..ds.tests.len())
+            .find(|i| ds.tests[*i].count > 0)
+            .unwrap_or(test);
+        let sc = scatter(
+            &ds,
+            &ScatterRequest {
+                x_test: test,
+                y_test: other,
+                z_mode: ScatterZMode::Continuous,
+                z_test: Some(test),
+                z_col: None,
+                filter: filter.clone(),
+                max_points: None,
+            },
+        );
+        assert!(sc.total > 0, "scatter total");
+        assert!(!sc.series.is_empty(), "scatter series");
+        assert!(
+            sc.series.iter().map(|s| s.points.len()).sum::<usize>() > 0,
+            "scatter points"
+        );
+        assert!(sc.z_min.is_finite() && sc.z_max.is_finite(), "scatter z range");
+
+        let mut ds2 = ds;
+        ds2.set_custom_column("Split", &[(0, "Split A".to_string())])
+            .expect("custom column");
+        let bx2 = box_plot(
+            &ds2,
+            &BoxRequest {
+                test,
+                group_by: GroupBy::Wafer,
+                filter: Filter::default(),
+                max_points: None,
+                block_col: Some("Split".to_string()),
+            },
+        );
+        assert!(bx2.groups.iter().any(|g| g.block == "Split A"), "box block");
+
+        let sc_cat = scatter(
+            &ds2,
+            &ScatterRequest {
+                x_test: test,
+                y_test: other,
+                z_mode: ScatterZMode::Category,
+                z_test: None,
+                z_col: Some("wafer".to_string()),
+                filter: Filter::default(),
+                max_points: None,
+            },
+        );
+        assert!(!sc_cat.series.is_empty(), "wafer category series");
+        assert!(sc_cat.series.len() <= ds2.wafers.len(), "one series per wafer");
+        assert!(
+            sc_cat.series.iter().all(|s| !s.name.is_empty()),
+            "wafer category labels"
+        );
+
+        let sc_split = scatter(
+            &ds2,
+            &ScatterRequest {
+                x_test: test,
+                y_test: other,
+                z_mode: ScatterZMode::Category,
+                z_test: None,
+                z_col: Some("Split".to_string()),
+                filter: Filter::default(),
+                max_points: None,
+            },
+        );
+        assert!(
+            sc_split.series.iter().any(|s| s.name == "Split A"),
+            "custom category series"
+        );
+
+        // A create request with only blank labels must not leave an empty column.
+        assert!(ds2
+            .set_custom_column("Empty", &[(0, String::new())])
+            .is_err());
+        assert!(
+            !ds2.custom_cols.iter().any(|c| c.name == "Empty"),
+            "empty custom column cleanup"
+        );
     }
 }

@@ -1,6 +1,6 @@
 use crate::csv_io;
 use crate::dataset::DatasetInfo;
-use crate::model::{Dataset, Filter};
+use crate::model::{CustomColumn, Dataset, Filter};
 use crate::query;
 use crate::stdf;
 use base64::Engine;
@@ -40,8 +40,11 @@ fn extension(path: &std::path::Path) -> String {
 #[tauri::command]
 pub async fn pick_files(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let mut dlg = rfd::FileDialog::new()
-        .add_filter("Semiconductor data", &["stdf", "std", "atdf", "csv", "txt", "tsv"])
-        .add_filter("STDF", &["stdf", "std"])
+        .add_filter(
+            "Semiconductor data",
+            &["stdf", "std", "atdf", "csv", "txt", "tsv", "z"],
+        )
+        .add_filter("STDF (including .Z)", &["stdf", "std", "z"])
         .add_filter("CSV / text", &["csv", "txt", "tsv"])
         .add_filter("All files", &["*"]);
     if let Some(dir) = state.last_dir.lock().unwrap().clone() {
@@ -211,6 +214,51 @@ pub fn dataset_info(state: State<'_, AppState>) -> Result<Option<DatasetInfo>, S
     Ok(state.ds.lock().unwrap().as_ref().map(|d| d.info()))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnAssignment {
+    pub wafer: u16,
+    pub label: String,
+}
+
+#[tauri::command]
+pub fn add_custom_column(
+    state: State<'_, AppState>,
+    name: String,
+    assignments: Vec<ColumnAssignment>,
+) -> Result<DatasetInfo, String> {
+    let mut guard = state.ds.lock().unwrap();
+    let ds = guard.as_mut().ok_or("No dataset loaded")?;
+    let labels: Vec<(u16, String)> = assignments
+        .into_iter()
+        .map(|a| (a.wafer, a.label))
+        .collect();
+    ds.set_custom_column(&name, &labels)?;
+    Ok(ds.info())
+}
+
+#[tauri::command]
+pub fn remove_custom_column(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<DatasetInfo, String> {
+    let mut guard = state.ds.lock().unwrap();
+    let ds = guard.as_mut().ok_or("No dataset loaded")?;
+    ds.remove_custom_column(&name);
+    Ok(ds.info())
+}
+
+#[tauri::command]
+pub fn restore_custom_columns(
+    state: State<'_, AppState>,
+    columns: Vec<CustomColumn>,
+) -> Result<DatasetInfo, String> {
+    let mut guard = state.ds.lock().unwrap();
+    let ds = guard.as_mut().ok_or("No dataset loaded")?;
+    ds.restore_custom_columns(columns)?;
+    Ok(ds.info())
+}
+
 /// Run a heavy query off the UI thread so the window never freezes while a
 /// 30-million-value aggregation is running.
 async fn with_ds<T, F>(state: State<'_, AppState>, f: F) -> Result<T, String>
@@ -269,6 +317,14 @@ pub async fn trend(
 }
 
 #[tauri::command]
+pub async fn scatter(
+    state: State<'_, AppState>,
+    req: query::ScatterRequest,
+) -> Result<query::ScatterResponse, String> {
+    with_ds(state, move |ds| query::scatter(ds, &req)).await
+}
+
+#[tauri::command]
 pub async fn export_csv(
     state: State<'_, AppState>,
     path: String,
@@ -299,6 +355,9 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
         };
         write!(w, ",{}", csv_escape(&name)).map_err(|e| e.to_string())?;
     }
+    for c in ds.custom_cols.iter() {
+        write!(w, ",{}", csv_escape(&c.name)).map_err(|e| e.to_string())?;
+    }
     writeln!(w).map_err(|e| e.to_string())?;
 
     let mut count = 0usize;
@@ -326,6 +385,15 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
             } else {
                 line.push(',');
             }
+        }
+        for c in ds.custom_cols.iter() {
+            let code = c
+                .wafer_values
+                .get(ds.wafer_of_row[r] as usize)
+                .copied()
+                .unwrap_or(0);
+            line.push(',');
+            line.push_str(&csv_escape(&c.label(code)));
         }
         line.push('\n');
         w.write_all(line.as_bytes()).map_err(|e| e.to_string())?;

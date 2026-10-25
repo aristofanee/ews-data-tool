@@ -1,9 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store";
-import type { Filter } from "../types";
+import type { CustomColumn, Filter } from "../types";
+import * as api from "../lib/api";
 import { binColor } from "../lib/theme";
-import { fmtInt } from "../lib/format";
-import { IconChevronDown, IconChevronUp, IconSearch, IconSliders } from "./Icons";
+import { fmtInt, tidyName } from "../lib/format";
+import {
+  IconChevronDown,
+  IconChevronUp,
+  IconLayers,
+  IconPlus,
+  IconSearch,
+  IconSliders,
+  IconTrash,
+  IconX,
+} from "./Icons";
 
 function FilterPanel() {
   const info = useStore((s) => s.info);
@@ -187,6 +197,262 @@ function FilterPanel() {
   );
 }
 
+interface ColumnDraft {
+  name: string;
+  editing: boolean;
+  label: string;
+  selected: number[];
+}
+
+function CustomColumnsPanel() {
+  const info = useStore((s) => s.info);
+  const filters = useStore((s) => s.filters);
+  const spec = useStore((s) => s.spec);
+  const setInfo = useStore((s) => s.setInfo);
+  const patchSpec = useStore((s) => s.patchSpec);
+  const setError = useStore((s) => s.setError);
+  const notify = useStore((s) => s.notify);
+  const [draft, setDraft] = useState<ColumnDraft | null>(null);
+
+  if (!info) return null;
+
+  const openNew = () => {
+    setDraft({
+      name: "",
+      editing: false,
+      label: "",
+      selected: filters.wafers.length ? [...filters.wafers] : [],
+    });
+  };
+
+  const openEdit = (col: CustomColumn) => {
+    const selected = col.waferValues
+      .map((v, i) => (v !== 0 ? i : -1))
+      .filter((i) => i >= 0);
+    setDraft({ name: col.name, editing: true, label: "", selected });
+  };
+
+  const currentColumn = draft
+    ? info.customColumns.find((c) => c.name === draft.name) ?? null
+    : null;
+
+  const labelFor = (wi: number) => {
+    if (!currentColumn) return "";
+    const code = currentColumn.waferValues[wi] ?? 0;
+    return code ? currentColumn.categories[code] ?? "" : "";
+  };
+
+  const toggleWafer = (wi: number) => {
+    if (!draft) return;
+    setDraft({
+      ...draft,
+      selected: draft.selected.includes(wi)
+        ? draft.selected.filter((x) => x !== wi)
+        : [...draft.selected, wi],
+    });
+  };
+
+  const selectUnassigned = () => {
+    if (!draft || !currentColumn) return;
+    setDraft({
+      ...draft,
+      selected: info.wafers
+        .map((_, i) => i)
+        .filter((i) => (currentColumn.waferValues[i] ?? 0) === 0),
+    });
+  };
+
+  const apply = async () => {
+    if (!draft) return;
+    const name = draft.name.trim();
+    if (!name) {
+      setError("Enter a column name.");
+      return;
+    }
+    if (!draft.selected.length) {
+      setError("Select at least one wafer.");
+      return;
+    }
+    if (!draft.editing && !draft.label.trim()) {
+      setError("Enter a label for the selected wafers.");
+      return;
+    }
+    try {
+      const before = useStore.getState();
+      const title = before.spec.title;
+      const updated = await api.addCustomColumn(
+        name,
+        draft.selected.map((wafer) => ({ wafer, label: draft.label }))
+      );
+      before.setInfo(updated, { keepFilters: true });
+      useStore.getState().patchSpec({ title });
+      notify(
+        `Label column “${name}” updated · ${draft.selected.length} wafer${
+          draft.selected.length === 1 ? "" : "s"
+        }`
+      );
+      setDraft(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const remove = async (col: CustomColumn) => {
+    if (!window.confirm(`Delete the label column “${col.name}”?`)) return;
+    try {
+      const updated = await api.removeCustomColumn(col.name);
+      setInfo(updated, { keepFilters: true });
+      if (spec.blockCol === col.name) patchSpec({ blockCol: "" });
+      if (spec.scatterZCol === col.name) patchSpec({ scatterZCol: "lot" });
+      notify(`Deleted label column “${col.name}”.`);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const labels = currentColumn
+    ? currentColumn.categories.filter((c, i) => i > 0 && c.length > 0)
+    : [];
+
+  return (
+    <div className="filter-panel custom-panel">
+      <div className="side-section-head">
+        <span>
+          <IconLayers size={14} /> Custom labels
+        </span>
+        <button className="link-btn" onClick={openNew}>
+          + Add column
+        </button>
+      </div>
+      <div className="hint">
+        Label selected wafers, then colour box plots or scatter categories by that column.
+      </div>
+      {info.customColumns.length === 0 ? (
+        <div className="empty-list">No custom columns yet.</div>
+      ) : (
+        <div className="custom-column-list">
+          {info.customColumns.map((c) => (
+            <div className="custom-column-row" key={c.name}>
+              <button className="custom-column-main" onClick={() => openEdit(c)} title="Edit labels">
+                <span className="custom-column-name">{c.name}</span>
+                <span className="custom-column-count">
+                  {c.categories.length - 1} label{c.categories.length === 2 ? "" : "s"}
+                </span>
+              </button>
+              <button className="mini danger" onClick={() => void remove(c)} title="Delete column">
+                <IconTrash size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {draft && (
+        <div className="modal-backdrop" onClick={() => setDraft(null)}>
+          <div className="modal column-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <div className="modal-title">
+                  {draft.editing ? "Edit label column" : "New label column"}
+                </div>
+                <div className="modal-sub">
+                  Assign a label to selected wafers. Empty labels clear the assignment.
+                </div>
+              </div>
+              <button className="btn icon ghost" onClick={() => setDraft(null)} title="Close">
+                <IconX size={15} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <label className="modal-field">
+                <span>Column name</span>
+                <input
+                  className="input"
+                  value={draft.name}
+                  disabled={draft.editing}
+                  autoFocus={!draft.editing}
+                  placeholder="e.g. Split"
+                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                />
+              </label>
+              <label className="modal-field">
+                <span>Label for selected wafers</span>
+                <input
+                  className="input"
+                  value={draft.label}
+                  autoFocus={draft.editing}
+                  placeholder={draft.editing ? "e.g. Split A (blank clears)" : "e.g. Split A"}
+                  list="custom-label-options"
+                  onChange={(e) => setDraft({ ...draft, label: e.target.value })}
+                />
+                <datalist id="custom-label-options">
+                  {labels.map((l) => (
+                    <option key={l} value={l} />
+                  ))}
+                </datalist>
+              </label>
+              <div className="column-tools">
+                <span className="muted">{draft.selected.length} selected</span>
+                <button
+                  className="link-btn"
+                  onClick={() =>
+                    setDraft({ ...draft, selected: info.wafers.map((_, i) => i) })
+                  }
+                >
+                  All
+                </button>
+                <button className="link-btn" onClick={() => setDraft({ ...draft, selected: [] })}>
+                  None
+                </button>
+                {draft.editing && (
+                  <button className="link-btn" onClick={selectUnassigned}>
+                    Unassigned
+                  </button>
+                )}
+              </div>
+              <div className="column-wafer-list">
+                {info.wafers.map((w, i) => {
+                  const current = labelFor(i);
+                  return (
+                    <label
+                      key={i}
+                      className={
+                        "wafer-check" + (draft.selected.includes(i) ? " on" : "")
+                      }
+                    >
+                      <input
+                        type="checkbox"
+                        checked={draft.selected.includes(i)}
+                        onChange={() => toggleWafer(i)}
+                      />
+                      <span className="wafer-check-name">
+                        {info.lots[w.lot]} / {w.name}
+                      </span>
+                      {current && <span className="wafer-check-label">{current}</span>}
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="hint">
+                Tip: use the filter panel to narrow the wafer list, then reopen this dialog to
+                select the filtered wafers. Applying the same column again merges labels.
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button className="btn" onClick={() => setDraft(null)}>
+                Cancel
+              </button>
+              <button className="btn primary" onClick={() => void apply()}>
+                {draft.editing ? "Apply labels" : "Create column"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TestList() {
   const info = useStore((s) => s.info);
   const selected = useStore((s) => s.spec.test);
@@ -199,7 +465,7 @@ function TestList() {
     const needle = q.trim().toLowerCase();
     return info.tests
       .map((t, i) => ({ t, i }))
-      .filter(({ t }) => !needle || t.name.toLowerCase().includes(needle) || t.units.toLowerCase().includes(needle));
+      .filter(({ t }) => !needle || tidyName(t.name).toLowerCase().includes(needle) || t.units.toLowerCase().includes(needle));
   }, [info, q]);
 
   useEffect(() => {
@@ -230,10 +496,10 @@ function TestList() {
             ref={i === selected ? activeRef : undefined}
             className={"test-row" + (i === selected ? " active" : "")}
             onClick={() => selectTest(i)}
-            title={`${t.name}${t.units ? ` [${t.units}]` : ""} · ${fmtInt(t.count)} values`}
+            title={`${tidyName(t.name)}${t.units ? ` [${t.units}]` : ""} · ${fmtInt(t.count)} values`}
           >
             <span className={"test-dot" + (t.count > 0 ? " has" : "")} />
-            <span className="test-name">{t.name}</span>
+            <span className="test-name">{tidyName(t.name)}</span>
             <span className="test-units">{t.units}</span>
           </button>
         ))}
@@ -248,6 +514,7 @@ export function Sidebar() {
     <aside className="sidebar">
       <div className="side-scroll">
         <FilterPanel />
+        <CustomColumnsPanel />
       </div>
       <TestList />
     </aside>

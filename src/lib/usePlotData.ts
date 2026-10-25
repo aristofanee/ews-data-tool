@@ -6,6 +6,7 @@ import type {
   HistResponse,
   MapResponse,
   ParetoResponse,
+  ScatterResponse,
   TrendResponse,
 } from "../types";
 
@@ -14,7 +15,8 @@ export type PlotData =
   | { kind: "map"; data: MapResponse }
   | { kind: "pareto"; data: ParetoResponse }
   | { kind: "hist"; data: HistResponse }
-  | { kind: "trend"; data: TrendResponse };
+  | { kind: "trend"; data: TrendResponse }
+  | { kind: "scatter"; data: ScatterResponse };
 
 export interface PlotDataState {
   data: PlotData | null;
@@ -33,12 +35,18 @@ export function usePlotData(): PlotDataState {
     type: spec.type,
     test: spec.test,
     groupBy: spec.groupBy,
+    blockCol: spec.blockCol,
     mapWafer: spec.mapWafer,
     mapMode: spec.mapMode,
     binCategory: spec.binCategory,
     top: spec.top,
     includePass: spec.includePass,
     bins: spec.bins,
+    scatterX: spec.scatterX,
+    scatterY: spec.scatterY,
+    scatterZMode: spec.scatterZMode,
+    scatterZTest: spec.scatterZTest,
+    scatterZCol: spec.scatterZCol,
     filters,
     dataVersion,
   });
@@ -58,7 +66,12 @@ export function usePlotData(): PlotDataState {
             if (spec.test === null) throw new Error("Select a test to plot.");
             result = {
               kind: "box",
-              data: await api.boxPlot({ test: spec.test, groupBy: spec.groupBy, filter: filters }),
+              data: await api.boxPlot({
+                test: spec.test,
+                groupBy: spec.groupBy,
+                filter: filters,
+                blockCol: spec.blockCol || undefined,
+              }),
             };
             break;
           }
@@ -99,6 +112,23 @@ export function usePlotData(): PlotDataState {
             result = {
               kind: "trend",
               data: await api.trend({ test: spec.test, by: spec.groupBy, filter: filters }),
+            };
+            break;
+          }
+          case "scatter": {
+            if (spec.scatterX === null || spec.scatterY === null) {
+              throw new Error("Select X and Y tests to plot.");
+            }
+            result = {
+              kind: "scatter",
+              data: await api.scatter({
+                xTest: spec.scatterX,
+                yTest: spec.scatterY,
+                zMode: spec.scatterZMode,
+                zTest: spec.scatterZTest,
+                zCol: spec.scatterZCol,
+                filter: filters,
+              }),
             };
             break;
           }

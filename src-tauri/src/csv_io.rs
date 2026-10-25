@@ -1,8 +1,8 @@
 use crate::dataset::Imported;
-use crate::model::{TestInfo, NAN};
+use crate::model::{CustomColumn, TestInfo, NAN};
 use memmap2::Mmap;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::Path;
 
@@ -131,6 +131,95 @@ fn looks_numeric(s: &str) -> bool {
     false
 }
 
+fn is_meta_header(norm: &str) -> bool {
+    matches!(
+        norm,
+        "split" | "group" | "grouping" | "label" | "category" | "class" | "segment" | "subgroup"
+    )
+}
+
+/// A text CSV column that can be used as a wafer-level grouping/colour key.
+/// Excel-added columns such as `Split` are imported this way.
+struct MetaColumn {
+    name: String,
+    by_wafer: HashMap<u16, String>,
+    conflict: bool,
+}
+
+impl MetaColumn {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            by_wafer: HashMap::new(),
+            conflict: false,
+        }
+    }
+
+    fn observe(&mut self, wafer: u16, raw: &str) {
+        let label = raw.trim();
+        if label.is_empty() {
+            return;
+        }
+        match self.by_wafer.get(&wafer) {
+            None => {
+                self.by_wafer.insert(wafer, label.to_string());
+            }
+            Some(existing) if existing != label => self.conflict = true,
+            _ => {}
+        }
+    }
+
+    fn finish(self, wafer_count: usize) -> Option<CustomColumn> {
+        // A wafer can only carry one category. If the CSV has several labels
+        // for the same wafer, this column is not a wafer-level grouping key.
+        if self.conflict || self.by_wafer.is_empty() {
+            return None;
+        }
+        let mut labels: Vec<String> = self.by_wafer.values().cloned().collect();
+        labels.sort();
+        labels.dedup();
+        if labels.len() > 512 {
+            return None;
+        }
+        let mut categories = vec![String::new()];
+        categories.extend(labels.iter().cloned());
+        let codes: HashMap<&str, u16> = categories
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, label)| (label.as_str(), i as u16))
+            .collect();
+        let mut wafer_values = vec![0u16; wafer_count];
+        for (wafer, label) in self.by_wafer {
+            if let Some(&code) = codes.get(label.as_str()) {
+                if let Some(slot) = wafer_values.get_mut(wafer as usize) {
+                    *slot = code;
+                }
+            }
+        }
+        Some(CustomColumn {
+            name: self.name,
+            categories,
+            wafer_values,
+        })
+    }
+}
+
+fn push_meta_columns(imp: &mut Imported, collectors: Vec<MetaColumn>) {
+    let mut seen = HashSet::new();
+    for collector in collectors {
+        if let Some(column) = collector.finish(imp.wafers.len()) {
+            if seen.insert(column.name.clone()) {
+                imp.custom_cols.push(column);
+            }
+        }
+    }
+}
+
+fn meta_name(header: &str) -> String {
+    split_units(header).0
+}
+
 #[derive(Default)]
 struct Layout {
     lot: Option<usize>,
@@ -214,12 +303,33 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
         let mut test_ids: HashMap<String, u32> = HashMap::new();
         let mut row_keys: HashMap<(u32, u32, i16, i16), usize> = HashMap::new();
         let mut seq = 0i16;
+        let meta_indices: Vec<usize> = (0..headers.len())
+            .filter(|&i| {
+                Some(i) != lay.lot
+                    && Some(i) != lay.wafer
+                    && Some(i) != lay.x
+                    && Some(i) != lay.y
+                    && Some(i) != lay.hbin
+                    && Some(i) != lay.sbin
+                    && Some(i) != lay.part
+                    && Some(i) != lay.test
+                    && Some(i) != lay.value
+            })
+            .filter(|&i| !meta_name(&headers[i]).is_empty())
+            .collect();
+        let mut meta: Vec<MetaColumn> = meta_indices
+            .iter()
+            .map(|&i| MetaColumn::new(meta_name(&headers[i])))
+            .collect();
 
         while rdr.read_record(&mut rec).unwrap_or(false) {
             let lot_name = lay.lot.and_then(|i| rec.get(i)).unwrap_or("LOT");
             let wafer_name = lay.wafer.and_then(|i| rec.get(i)).unwrap_or("W1");
             let lot = imp.lot_index(if lot_name.is_empty() { "LOT" } else { lot_name });
             let wafer = imp.wafer_index(lot, if wafer_name.is_empty() { "W1" } else { wafer_name });
+            for (m, &ci) in meta_indices.iter().enumerate() {
+                meta[m].observe(wafer, rec.get(ci).unwrap_or(""));
+            }
             let x = lay.x.and_then(|i| rec.get(i)).map(parse_i16).unwrap_or(0);
             let y = lay.y
                 .and_then(|i| rec.get(i))
@@ -288,6 +398,7 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
         imp.tests = tests;
         imp.cols = cols;
         imp.col_index.clear();
+        push_meta_columns(&mut imp, meta);
         return Ok(imp.finish());
     }
 
@@ -301,6 +412,8 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
             || Some(i) == lay.hbin
             || Some(i) == lay.sbin
             || Some(i) == lay.part
+            || Some(i) == lay.test
+            || Some(i) == lay.value
         {
             continue;
         }
@@ -313,7 +426,15 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
         probe.push(rec.clone());
     }
     let mut numeric: Vec<usize> = Vec::new();
+    let mut meta_indices: Vec<usize> = Vec::new();
     for &i in sample.iter() {
+        let n = norm(&headers[i]);
+        if is_meta_header(&n) {
+            if !meta_name(&headers[i]).is_empty() {
+                meta_indices.push(i);
+            }
+            continue;
+        }
         let total = probe.len().max(1);
         let ok = probe
             .iter()
@@ -321,6 +442,9 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
             .count();
         if ok * 10 >= total * 8 {
             numeric.push(i);
+        } else if !meta_name(&headers[i]).is_empty() {
+            // Text columns are grouping/colour metadata, not measurements.
+            meta_indices.push(i);
         }
     }
     if numeric.is_empty() {
@@ -335,12 +459,21 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
         imp.cols.push(Vec::with_capacity(probe.len() + 1024));
     }
     imp.col_index.clear();
+    let mut meta: Vec<MetaColumn> = meta_indices
+        .iter()
+        .map(|&i| MetaColumn::new(meta_name(&headers[i])))
+        .collect();
 
-    let push_row = |imp: &mut Imported, rec: &csv::StringRecord| {
+    let push_row = |imp: &mut Imported,
+                    rec: &csv::StringRecord,
+                    meta: &mut Vec<MetaColumn>| {
         let lot_name = lay.lot.and_then(|i| rec.get(i)).unwrap_or("LOT");
         let wafer_name = lay.wafer.and_then(|i| rec.get(i)).unwrap_or("W1");
         let lot = imp.lot_index(if lot_name.is_empty() { "LOT" } else { lot_name });
         let wafer = imp.wafer_index(lot, if wafer_name.is_empty() { "W1" } else { wafer_name });
+        for (m, &ci) in meta_indices.iter().enumerate() {
+            meta[m].observe(wafer, rec.get(ci).unwrap_or(""));
+        }
         let r = imp.new_row(lot, wafer);
         imp.x[r] = lay.x.and_then(|i| rec.get(i)).map(parse_i16).unwrap_or(0);
         imp.y[r] = lay.y.and_then(|i| rec.get(i)).map(parse_i16).unwrap_or(0);
@@ -354,15 +487,16 @@ pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Im
     };
 
     for r in probe.iter() {
-        push_row(&mut imp, r);
+        push_row(&mut imp, r, &mut meta);
     }
     while rdr.read_record(&mut rec).unwrap_or(false) {
-        push_row(&mut imp, &rec);
+        push_row(&mut imp, &rec, &mut meta);
         if imp.records % 200_000 == 0 {
             progress(0.0, "Reading CSV...");
         }
     }
 
+    push_meta_columns(&mut imp, meta);
     Ok(imp.finish())
 }
 
@@ -398,6 +532,45 @@ mod tests {
         assert_eq!(imp.hbin, vec![1, 1, 20, 1]);
         assert!((imp.cols[0][0] - 0.41).abs() < 1e-6);
         assert!((imp.cols[1][3] - 102.0).abs() < 1e-6);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn wide_csv_imports_text_split_column() {
+        let p = write_temp(
+            "wide-split",
+            "Lot,Wafer,X,Y,HBIN,Vt [V],Split\n\
+             L1,01,0,0,1,0.41,A\n\
+             L1,01,1,0,1,0.42,A\n\
+             L1,02,0,0,1,0.43,B\n",
+        );
+        let imp = import_csv(&p, &mut |_, _| {}).unwrap();
+        assert_eq!(imp.tests.len(), 1);
+        assert_eq!(imp.custom_cols.len(), 1);
+        let split = &imp.custom_cols[0];
+        assert_eq!(split.name, "Split");
+        assert_eq!(split.categories, vec!["", "A", "B"]);
+        assert_eq!(split.wafer_values, vec![1, 2]);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn long_csv_imports_text_split_column() {
+        let p = write_temp(
+            "long-split",
+            "Lot,Wafer,X,Y,HBIN,Test,Value,Split\n\
+             L1,01,0,0,1,Vt,0.41,A\n\
+             L1,01,0,0,1,Idsat,100,A\n\
+             L1,02,0,0,1,Vt,0.43,B\n\
+             L1,02,0,0,1,Idsat,101,B\n",
+        );
+        let imp = import_csv(&p, &mut |_, _| {}).unwrap();
+        assert_eq!(imp.tests.len(), 2);
+        assert_eq!(imp.custom_cols.len(), 1);
+        let split = &imp.custom_cols[0];
+        assert_eq!(split.name, "Split");
+        assert_eq!(split.categories, vec!["", "A", "B"]);
+        assert_eq!(split.wafer_values, vec![1, 2]);
         let _ = std::fs::remove_file(&p);
     }
 

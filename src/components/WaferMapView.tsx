@@ -2,10 +2,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { MapResponse, PlotSpec } from "../types";
 import { renderMapImage, WaferMapRenderer, type MapHit, type MapOptions } from "../charts/waferMap";
 import { useStore } from "../store";
-import { fmt, fmtInt } from "../lib/format";
+import type { Theme } from "../lib/theme";
+import { fmt, fmtInt, tidyName } from "../lib/format";
 
 export interface MapExportApi {
-  toDataURL: (format?: "jpeg" | "png") => string;
+  toDataURL: (
+    format?: "jpeg" | "png",
+    theme?: Theme,
+    width?: number,
+    height?: number
+  ) => string;
 }
 
 interface Props {
@@ -38,8 +44,20 @@ export function WaferMapView({ data, spec, onReady }: Props) {
       lsl: spec.showLimits ? (spec.lsl ?? data.lsl) : null,
       usl: spec.showLimits ? (spec.usl ?? data.usl) : null,
       binNames,
+      presentation: spec.presentation,
     }),
-    [theme, spec.palette, spec.mapMode, spec.showLimits, spec.lsl, spec.usl, data.lsl, data.usl, binNames]
+    [
+      theme,
+      spec.palette,
+      spec.mapMode,
+      spec.showLimits,
+      spec.lsl,
+      spec.usl,
+      spec.presentation,
+      data.lsl,
+      data.usl,
+      binNames,
+    ]
   );
 
   const dataRef = useRef(data);
@@ -74,15 +92,18 @@ export function WaferMapView({ data, spec, onReady }: Props) {
     canvas.addEventListener("wheel", onWheel, { passive: false });
 
     readyRef.current?.({
-      toDataURL: (format = "jpeg") => {
+      toDataURL: (format = "jpeg", themeOverride, width = 1600, height = 1000) => {
         const d = dataRef.current;
         const sp = specRef.current;
-        const test = d.test?.name ?? "";
+        const test = d.test ? tidyName(d.test.name) : "";
         const subtitle =
           `${d.lotName} · Wafer ${d.wafer?.name ?? "?"}` +
           (test ? ` · ${test}` : "") +
           ` · Yield ${d.yieldPct.toFixed(2)}%`;
-        return renderMapImage(d, optsRef.current, 1600, 1000, sp.title, subtitle, format);
+        const opts = themeOverride
+          ? { ...optsRef.current, theme: themeOverride }
+          : optsRef.current;
+        return renderMapImage(d, opts, width, height, sp.title, subtitle, format);
       },
     });
 

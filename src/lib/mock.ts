@@ -1,11 +1,15 @@
 import type {
   BinInfo,
   BoxResponse,
+  CustomColumn,
   DatasetInfo,
   Filter,
   HistResponse,
   MapResponse,
   ParetoResponse,
+  ScatterPoint,
+  ScatterResponse,
+  ScatterSeries,
   Summary,
   TestInfo,
   TrendResponse,
@@ -35,6 +39,7 @@ interface MockDataset {
   lots: string[];
   wafers: MockWafer[];
   tests: TestInfo[];
+  customCols: CustomColumn[];
   info: DatasetInfo;
 }
 
@@ -239,9 +244,10 @@ function buildDataset(): MockDataset {
     rows,
     hbins,
     sbins,
+    customColumns: [],
     memoryMb: (rows * (2 + 2 + 2 + 2 + 2 + 2) + rows * tests.length * 4) / (1024 * 1024),
   };
-  return { lots, wafers, tests, info };
+  return { lots, wafers, tests, customCols: [], info };
 }
 
 function dataset(): MockDataset {
@@ -289,6 +295,106 @@ function emptySummary(): Summary {
   };
 }
 
+function refreshInfo(ds: MockDataset): DatasetInfo {
+  ds.info = {
+    ...ds.info,
+    customColumns: ds.customCols.map((c) => ({
+      name: c.name,
+      categories: [...c.categories],
+      waferValues: [...c.waferValues],
+    })),
+  };
+  return ds.info;
+}
+
+function customLabel(col: CustomColumn, code: number): string {
+  return col.categories[code] || "Unassigned";
+}
+
+function blockFor(
+  ds: MockDataset,
+  by: "wafer" | "lot",
+  key: number,
+  blockCol?: string
+): { code: number; name: string } {
+  const fallback = () => {
+    const lot = by === "lot" ? key : ds.wafers.find((w) => w.index === key)?.lot ?? 0;
+    return { code: lot, name: ds.lots[lot] ?? `L${lot}` };
+  };
+  if (!blockCol) return fallback();
+  if (blockCol === "__wafer") {
+    if (by === "wafer") {
+      const w = ds.wafers.find((x) => x.index === key);
+      return { code: key, name: w ? labelOf(w, ds.lots.length > 1) : `W${key}` };
+    }
+    return { code: key, name: ds.lots[key] ?? `L${key}` };
+  }
+  const col = ds.customCols.find((c) => c.name === blockCol);
+  if (!col) return fallback();
+  if (by === "wafer") {
+    const code = col.waferValues[key] ?? 0;
+    return { code, name: customLabel(col, code) };
+  }
+  const codes = ds.wafers
+    .filter((w) => w.lot === key)
+    .map((w) => col.waferValues[w.index] ?? 0);
+  const unique = [...new Set(codes)];
+  if (unique.length === 1) {
+    const code = unique[0];
+    return { code, name: customLabel(col, code) };
+  }
+  return { code: 0, name: unique.length ? "Mixed" : "Unassigned" };
+}
+
+function scatterCategory(
+  ds: MockDataset,
+  w: MockWafer,
+  i: number,
+  col: string
+): { code: number; name: string } {
+  switch (col) {
+    case "wafer":
+      return { code: w.index, name: labelOf(w, ds.lots.length > 1) };
+    case "hbin":
+      return {
+        code: w.hbin[i],
+        name: ds.info.hbins.find((b) => b.code === w.hbin[i])?.name ?? `Bin ${w.hbin[i]}`,
+      };
+    case "sbin":
+      return {
+        code: w.sbin[i],
+        name: ds.info.sbins.find((b) => b.code === w.sbin[i])?.name ?? `Soft ${w.sbin[i]}`,
+      };
+    case "lot":
+    case "":
+      return { code: w.lot, name: ds.lots[w.lot] };
+    default: {
+      const c = ds.customCols.find((x) => x.name === col);
+      if (!c) return { code: w.lot, name: ds.lots[w.lot] };
+      const code = c.waferValues[w.index] ?? 0;
+      return { code, name: customLabel(c, code) };
+    }
+  }
+}
+
+function pearson(xs: number[], ys: number[]): number {
+  const n = Math.min(xs.length, ys.length);
+  if (n < 2) return NaN;
+  const mx = xs.slice(0, n).reduce((a, b) => a + b, 0) / n;
+  const my = ys.slice(0, n).reduce((a, b) => a + b, 0) / n;
+  let sxy = 0;
+  let sxx = 0;
+  let syy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = xs[i] - mx;
+    const dy = ys[i] - my;
+    sxy += dx * dy;
+    sxx += dx * dx;
+    syy += dy * dy;
+  }
+  return sxx > 0 && syy > 0 ? sxy / Math.sqrt(sxx * syy) : NaN;
+}
+
 /* ------------------------------------------------------------------ */
 /* Public mock API                                                     */
 /* ------------------------------------------------------------------ */
@@ -313,10 +419,23 @@ export async function boxPlot(req: {
   test: number;
   groupBy: "wafer" | "lot";
   filter: Filter;
+  maxPoints?: number;
+  blockCol?: string;
 }): Promise<BoxResponse> {
   const ds = dataset();
   const multiLot = ds.lots.length > 1;
-  const groups = new Map<string, { key: number; label: string; values: number[]; xs: number[]; ys: number[] }>();
+  const groups = new Map<
+    string,
+    {
+      key: number;
+      label: string;
+      values: number[];
+      xs: number[];
+      ys: number[];
+      block: string;
+      blockCode: number;
+    }
+  >();
 
   for (const w of ds.wafers) {
     if (!waferAllowed(w, req.filter)) continue;
@@ -324,12 +443,15 @@ export async function boxPlot(req: {
     const k = String(key);
     let g = groups.get(k);
     if (!g) {
+      const block = blockFor(ds, req.groupBy, key, req.blockCol);
       g = {
         key,
         label: req.groupBy === "lot" ? ds.lots[w.lot] : labelOf(w, multiLot),
         values: [],
         xs: [],
         ys: [],
+        block: block.name,
+        blockCode: block.code,
       };
       groups.set(k, g);
     }
@@ -408,6 +530,8 @@ export async function boxPlot(req: {
       xs: g.xs,
       ys: g.ys,
       n: g.values.length,
+      block: g.block,
+      blockCode: g.blockCode,
     })),
     summary,
     test: test ?? { name: "?", units: "", loLimit: null, hiLimit: null, loSpec: null, hiSpec: null, count: 0 },
@@ -641,6 +765,232 @@ export async function trend(req: {
     });
   const test = ds.tests[req.test];
   return delay({ points, test, lsl: test?.loSpec ?? null, usl: test?.hiSpec ?? null });
+}
+
+export async function scatter(req: {
+  xTest: number;
+  yTest: number;
+  zMode: "none" | "continuous" | "category";
+  zTest?: number | null;
+  zCol?: string | null;
+  filter: Filter;
+  maxPoints?: number;
+}): Promise<ScatterResponse> {
+  const ds = dataset();
+  const xTest = ds.tests[req.xTest] ?? {
+    name: "?",
+    units: "",
+    loLimit: null,
+    hiLimit: null,
+    loSpec: null,
+    hiSpec: null,
+    count: 0,
+  };
+  const yTest = ds.tests[req.yTest] ?? xTest;
+  const multiLot = ds.lots.length > 1;
+  const zTest = req.zMode === "continuous" && req.zTest != null ? ds.tests[req.zTest] ?? null : null;
+  const zColLabel =
+    req.zMode === "continuous"
+      ? zTest?.name ?? "Z"
+      : req.zMode === "category"
+        ? (() => {
+            switch (req.zCol ?? "lot") {
+              case "lot":
+              case "":
+                return "Lot";
+              case "wafer":
+                return "Wafer ID (OCR)";
+              case "hbin":
+                return "Hard bin";
+              case "sbin":
+                return "Soft bin";
+              default:
+                return ds.customCols.find((c) => c.name === req.zCol)?.name ?? "Lot";
+            }
+          })()
+        : "";
+
+  interface Raw {
+    x: number;
+    y: number;
+    z: number | null;
+    lot: number;
+    wafer: number;
+    hbin: number;
+    sbin: number;
+    xDie: number;
+    yDie: number;
+    code?: number;
+    name?: string;
+  }
+  let points: Raw[] = [];
+  let excluded = 0;
+  for (const w of ds.wafers) {
+    if (!waferAllowed(w, req.filter)) continue;
+    const xc = w.cols[req.xTest];
+    const yc = w.cols[req.yTest];
+    if (!xc || !yc) continue;
+    const zc = req.zMode === "continuous" && req.zTest != null ? w.cols[req.zTest] : undefined;
+    for (let i = 0; i < w.x.length; i++) {
+      if (!binAllowed(w, i, req.filter)) continue;
+      const x = xc[i];
+      const y = yc[i];
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const z = zc && Number.isFinite(zc[i]) ? zc[i] : null;
+      const cat =
+        req.zMode === "category" ? scatterCategory(ds, w, i, req.zCol ?? "lot") : null;
+      points.push({
+        x,
+        y,
+        z,
+        lot: w.lot,
+        wafer: w.index,
+        hbin: w.hbin[i],
+        sbin: w.sbin[i],
+        xDie: w.x[i],
+        yDie: w.y[i],
+        code: cat?.code,
+        name: cat?.name,
+      });
+    }
+  }
+
+  if (req.filter.stat) {
+    const sf = req.filter.stat;
+    const before = points.length;
+    const keepX = keepMask(points.map((p) => p.x), sf.kind, sf.k);
+    const keepY = keepMask(points.map((p) => p.y), sf.kind, sf.k);
+    points = points.filter((_, i) => keepX[i] && keepY[i]);
+    excluded = before - points.length;
+  }
+
+  const total = points.length;
+  const cap = Math.max(1, req.maxPoints ?? 30000);
+  const stride = total > cap ? Math.ceil(total / cap) : 1;
+  const sampled = points.filter((_, i) => i % stride === 0);
+  const r = pearson(
+    points.map((p) => p.x),
+    points.map((p) => p.y)
+  );
+  let zMin: number | null = null;
+  let zMax: number | null = null;
+  for (const p of sampled) {
+    if (p.z !== null) {
+      zMin = zMin === null ? p.z : Math.min(zMin, p.z);
+      zMax = zMax === null ? p.z : Math.max(zMax, p.z);
+    }
+  }
+  const toPoint = (p: Raw): ScatterPoint => ({
+    x: p.x,
+    y: p.y,
+    z: p.z,
+    lot: p.lot,
+    wafer: p.wafer,
+    hbin: p.hbin,
+    sbin: p.sbin,
+    xDie: p.xDie,
+    yDie: p.yDie,
+  });
+
+  let series: ScatterSeries[] = [];
+  if (req.zMode === "category") {
+    const map = new Map<number, ScatterSeries>();
+    for (const p of sampled) {
+      const code = p.code ?? 0;
+      const name = p.name ?? "Unassigned";
+      let s = map.get(code);
+      if (!s) {
+        s = { key: code, name, points: [] };
+        map.set(code, s);
+      }
+      s.points.push(toPoint(p));
+    }
+    series = [...map.values()];
+    if (series.length > 16) {
+      series.sort((a, b) => b.points.length - a.points.length);
+      const rest = series.splice(16);
+      const other: ScatterSeries = { key: 65535, name: "Other", points: [] };
+      for (const s of rest) other.points.push(...s.points);
+      series.push(other);
+    }
+    series.sort((a, b) => naturalCompare(a.name, b.name) || a.key - b.key);
+  } else if (sampled.length) {
+    series = [{ key: 0, name: "", points: sampled.map(toPoint) }];
+  }
+
+  return delay({
+    series,
+    xTest,
+    yTest,
+    zTest,
+    zMode: req.zMode,
+    zCol: req.zCol ?? null,
+    zColLabel,
+    zMin,
+    zMax,
+    total,
+    excluded,
+    truncated: stride > 1,
+    r: Number.isFinite(r) ? r : null,
+    lots: ds.lots,
+    wafers: ds.wafers.map((w) => labelOf(w, multiLot)),
+  });
+}
+
+export async function addCustomColumn(
+  name: string,
+  assignments: { wafer: number; label: string }[]
+): Promise<DatasetInfo> {
+  const ds = dataset();
+  const clean = name.trim();
+  if (!clean) throw new Error("Enter a column name.");
+  if (["lot", "wafer", "hbin", "sbin", "__wafer"].some((r) => r === clean.toLowerCase())) {
+    throw new Error(`“${clean}” is a reserved column name.`);
+  }
+  let col = ds.customCols.find((c) => c.name === clean);
+  if (!col) {
+    col = { name: clean, categories: [""], waferValues: new Array(ds.wafers.length).fill(0) };
+    ds.customCols.push(col);
+  }
+  for (const a of assignments) {
+    if (a.wafer < 0 || a.wafer >= ds.wafers.length) continue;
+    const label = a.label.trim();
+    if (!label) {
+      col.waferValues[a.wafer] = 0;
+      continue;
+    }
+    let code = col.categories.indexOf(label);
+    if (code < 0) {
+      col.categories.push(label);
+      code = col.categories.length - 1;
+    }
+    col.waferValues[a.wafer] = code;
+  }
+  if (col.categories.length <= 1) throw new Error("Assign at least one wafer label.");
+  return delay(refreshInfo(ds));
+}
+
+export async function removeCustomColumn(name: string): Promise<DatasetInfo> {
+  const ds = dataset();
+  ds.customCols = ds.customCols.filter((c) => c.name !== name);
+  return delay(refreshInfo(ds));
+}
+
+export async function restoreCustomColumns(columns: CustomColumn[]): Promise<DatasetInfo> {
+  const ds = dataset();
+  for (const c of columns) {
+    if (c.waferValues.length !== ds.wafers.length) {
+      throw new Error(
+        `Column “${c.name}” has ${c.waferValues.length} wafer labels but the demo has ${ds.wafers.length} wafers.`
+      );
+    }
+  }
+  ds.customCols = columns.map((c) => ({
+    name: c.name,
+    categories: [...c.categories],
+    waferValues: [...c.waferValues],
+  }));
+  return delay(refreshInfo(ds));
 }
 
 export async function pickSavePath(defaultName: string): Promise<string | null> {

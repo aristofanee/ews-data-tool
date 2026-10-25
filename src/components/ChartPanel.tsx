@@ -3,10 +3,19 @@ import Plotly from "plotly.js-dist-min";
 import { PLOT_LABELS, useStore } from "../store";
 import type { PlotSpec, PlotType } from "../types";
 import { usePlotData, type PlotData } from "../lib/usePlotData";
-import { figureBox, figureHist, figurePareto, figureTrend, type Figure } from "../charts/figures";
+import {
+  figureBox,
+  figureHist,
+  figurePareto,
+  figureScatter,
+  figureTrend,
+  type Figure,
+} from "../charts/figures";
 import { PlotlyChart } from "./PlotlyChart";
 import { WaferMapView, type MapExportApi } from "./WaferMapView";
 import { EmptyState } from "./EmptyState";
+import { EXPORT_CONFIG } from "../charts/plotlyTheme";
+import type { Theme } from "../lib/theme";
 import * as api from "../lib/api";
 import { fmt, fmtInt, safeName } from "../lib/format";
 import {
@@ -17,6 +26,7 @@ import {
   IconMap,
   IconPareto,
   IconPlus,
+  IconScatter,
   IconTrend,
 } from "./Icons";
 
@@ -26,6 +36,7 @@ const TABS: { type: PlotType; label: string; Icon: ComponentType<{ size?: number
   { type: "pareto", label: "Pareto", Icon: IconPareto },
   { type: "hist", label: "Histogram", Icon: IconHist },
   { type: "trend", label: "Trend", Icon: IconTrend },
+  { type: "scatter", label: "Scatter", Icon: IconScatter },
 ];
 
 interface Stat {
@@ -115,6 +126,77 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
       }
       return out;
     }
+    case "scatter": {
+      const d = data.data;
+      const points = d.series.reduce((n, s) => n + s.points.length, 0);
+      const out: Stat[] = [
+        { k: "Dice", v: fmtInt(d.total) },
+        { k: "Points", v: fmtInt(points) },
+      ];
+      if (d.r !== null && Number.isFinite(d.r)) {
+        out.push({ k: "r", v: fmt(d.r, 3) });
+        out.push({ k: "R²", v: fmt(d.r * d.r, 3) });
+      }
+      if (d.series.length > 1) out.push({ k: "Groups", v: fmtInt(d.series.length) });
+      if (d.excluded > 0) out.push({ k: "Excluded", v: fmtInt(d.excluded), tone: "warn" });
+      return out;
+    }
+  }
+}
+
+function buildFigure(
+  data: PlotData,
+  spec: PlotSpec,
+  theme: Theme,
+  title?: string
+): Figure | null {
+  switch (data.kind) {
+    case "box":
+      return figureBox(data.data, { theme, spec, title });
+    case "pareto":
+      return figurePareto(data.data, { theme, spec, title });
+    case "hist":
+      return figureHist(data.data, { theme, spec, title });
+    case "trend":
+      return figureTrend(data.data, { theme, spec, title });
+    case "scatter":
+      return figureScatter(data.data, { theme, spec, title });
+    default:
+      return null;
+  }
+}
+
+/**
+ * Render an export at slide-friendly dimensions. The on-screen chart has the
+ * editable title in the card header, but exported images need the title baked
+ * in, so we build a standalone light-theme figure for clipboard/JPG output.
+ */
+async function renderExportFigure(
+  fig: Figure,
+  format: "png" | "jpeg",
+  width = 1800,
+  height = 1100
+): Promise<string> {
+  const host = document.createElement("div");
+  host.style.cssText = `position:fixed;left:-30000px;top:0;width:${width}px;height:${height}px;`;
+  document.body.appendChild(host);
+  try {
+    const layout = { ...fig.layout, width, height, autosize: false };
+    await Plotly.newPlot(host, fig.data, layout, EXPORT_CONFIG);
+    return await Plotly.toImage(host, {
+      format,
+      width,
+      height,
+      scale: 1,
+      quality: 0.95,
+    });
+  } finally {
+    try {
+      Plotly.purge(host);
+    } catch {
+      /* ignore */
+    }
+    host.remove();
   }
 }
 
@@ -135,25 +217,10 @@ export function ChartPanel() {
 
   useEffect(() => setTitleDraft(spec.title), [spec.title]);
 
-  const figure = useMemo<Figure | null>(() => {
-    if (!data) return null;
-    switch (data.kind) {
-      case "box": {
-        const lotOf = data.data.groups.map((g) =>
-          spec.groupBy === "lot" ? g.key : (info?.wafers[g.key]?.lot ?? 0)
-        );
-        return figureBox(data.data, { theme, spec, lotOf, lotNames: info?.lots });
-      }
-      case "pareto":
-        return figurePareto(data.data, { theme, spec });
-      case "hist":
-        return figureHist(data.data, { theme, spec });
-      case "trend":
-        return figureTrend(data.data, { theme, spec });
-      default:
-        return null;
-    }
-  }, [data, spec, theme, info]);
+  const figure = useMemo<Figure | null>(
+    () => (data ? buildFigure(data, spec, theme) : null),
+    [data, spec, theme]
+  );
 
   if (!info) return <EmptyState />;
 
@@ -170,14 +237,10 @@ export function ChartPanel() {
     try {
       let url: string | null = null;
       if (isMap) {
-        url = mapApi.current?.toDataURL("png") ?? null;
-      } else if (plotRef.current) {
-        url = await Plotly.toImage(plotRef.current, {
-          format: "png",
-          width: 1800,
-          height: 1100,
-          scale: 1,
-        });
+        url = mapApi.current?.toDataURL("png", "light", 1800, 1100) ?? null;
+      } else if (data) {
+        const fig = buildFigure(data, spec, "light", spec.title);
+        if (fig) url = await renderExportFigure(fig, "png");
       }
       if (!url) throw new Error("The chart is not ready yet.");
 
@@ -216,15 +279,10 @@ export function ChartPanel() {
       if (!path) return;
       let url: string | null = null;
       if (isMap) {
-        url = mapApi.current?.toDataURL("jpeg") ?? null;
-      } else if (plotRef.current) {
-        url = await Plotly.toImage(plotRef.current, {
-          format: "jpeg",
-          width: 1800,
-          height: 1100,
-          scale: 1,
-          quality: 0.95,
-        });
+        url = mapApi.current?.toDataURL("jpeg", "light", 1800, 1100) ?? null;
+      } else if (data) {
+        const fig = buildFigure(data, spec, "light", spec.title);
+        if (fig) url = await renderExportFigure(fig, "jpeg");
       }
       if (!url) throw new Error("The chart is not ready yet.");
       await api.saveImage(path, url);
@@ -288,7 +346,7 @@ export function ChartPanel() {
                 <span className={"stat-v" + (s.tone ? ` tone-${s.tone}` : "")}>{s.v}</span>
               </div>
             ))}
-            {data?.kind === "box" && data.data.truncated && (
+            {(data?.kind === "box" || data?.kind === "scatter") && data.data.truncated && (
               <div className="stat">
                 <span className="stat-k">Note</span>
                 <span className="stat-v tone-warn">large N · points sampled</span>

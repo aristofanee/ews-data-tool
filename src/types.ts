@@ -28,6 +28,14 @@ export interface BinInfo {
   pass: boolean;
 }
 
+export interface CustomColumn {
+  name: string;
+  /** Index 0 is the unassigned label. */
+  categories: string[];
+  /** One category code per wafer; 0 = unassigned. */
+  waferValues: number[];
+}
+
 export interface DatasetInfo {
   files: string[];
   lots: string[];
@@ -36,6 +44,7 @@ export interface DatasetInfo {
   rows: number;
   hbins: BinInfo[];
   sbins: BinInfo[];
+  customColumns: CustomColumn[];
   memoryMb: number;
 }
 
@@ -83,6 +92,8 @@ export interface BoxGroup {
   xs: number[];
   ys: number[];
   n: number;
+  block: string;
+  blockCode: number;
 }
 
 export interface BoxResponse {
@@ -160,7 +171,45 @@ export interface TrendResponse {
   usl: number | null;
 }
 
-export type PlotType = "box" | "map" | "pareto" | "hist" | "trend";
+export type ScatterZMode = "none" | "continuous" | "category";
+
+export interface ScatterPoint {
+  x: number;
+  y: number;
+  z: number | null;
+  lot: number;
+  wafer: number;
+  hbin: number;
+  sbin: number;
+  xDie: number;
+  yDie: number;
+}
+
+export interface ScatterSeries {
+  key: number;
+  name: string;
+  points: ScatterPoint[];
+}
+
+export interface ScatterResponse {
+  series: ScatterSeries[];
+  xTest: TestInfo;
+  yTest: TestInfo;
+  zTest: TestInfo | null;
+  zMode: ScatterZMode;
+  zCol: string | null;
+  zColLabel: string;
+  zMin: number | null;
+  zMax: number | null;
+  total: number;
+  excluded: number;
+  truncated: boolean;
+  r: number | null;
+  lots: string[];
+  wafers: string[];
+}
+
+export type PlotType = "box" | "map" | "pareto" | "hist" | "trend" | "scatter";
 
 export type ShowPoints = "outliers" | "all" | "none";
 
@@ -188,6 +237,16 @@ export interface PlotSpec {
   showBand: boolean;
   yMin: number | null;
   yMax: number | null;
+  /** Larger fonts, thicker lines and stronger markers for slide-sized charts. */
+  presentation: boolean;
+  /** Lot by default; `__wafer` or a custom column name for box block/colour. */
+  blockCol: string;
+  scatterX: number | null;
+  scatterY: number | null;
+  scatterZMode: ScatterZMode;
+  scatterZTest: number | null;
+  scatterZCol: string;
+  scatterFit: boolean;
 }
 
 export const defaultSpec = (type: PlotType, test: number | null, title: string): PlotSpec => ({
@@ -214,6 +273,14 @@ export const defaultSpec = (type: PlotType, test: number | null, title: string):
   showBand: true,
   yMin: null,
   yMax: null,
+  presentation: true,
+  blockCol: "",
+  scatterX: null,
+  scatterY: null,
+  scatterZMode: "none",
+  scatterZTest: null,
+  scatterZCol: "lot",
+  scatterFit: true,
 });
 
 export interface ReportItem {

@@ -10,6 +10,8 @@ export interface MapOptions {
   lsl: number | null;
   usl: number | null;
   binNames?: Record<number, string>;
+  /** Larger map labels and legend for slide-sized output. */
+  presentation?: boolean;
 }
 
 export interface MapHit {
@@ -221,6 +223,8 @@ export class WaferMapRenderer {
     const t = mapColors(this.opts.theme);
     const data = this.data;
     const mode = this.opts.mode;
+    const pres = this.opts.presentation === true;
+    const k = pres ? 1.55 : 1;
 
     ctx.setTransform(dpr * this.scale, 0, 0, dpr * this.scale, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -250,8 +254,13 @@ export class WaferMapRenderer {
     this.dieCy = (minY + maxY) / 2;
     const span = Math.max((maxX - minX + 1) / 2, (maxY - minY + 1) / 2) + 0.5;
 
-    const cbarW = mode === "bin" ? Math.min(196, Math.max(120, w * 0.3)) : 108;
-    const pad = 14;
+    const cbarW =
+      mode === "bin"
+        ? Math.min(pres ? 290 : 196, Math.max(pres ? 190 : 120, w * (pres ? 0.34 : 0.3)))
+        : pres
+          ? 164
+          : 108;
+    const pad = pres ? 20 : 14;
     const availW = Math.max(80, w - cbarW - pad * 2);
     const availH = Math.max(80, h - pad * 2);
     const area = Math.min(availW, availH);
@@ -274,7 +283,7 @@ export class WaferMapRenderer {
     ctx.arc(0, 0, R, 0, Math.PI * 2);
     ctx.fillStyle = t.wafer;
     ctx.fill();
-    ctx.lineWidth = 1.5 / this.zoom;
+    ctx.lineWidth = (pres ? 2.6 : 1.5) / this.zoom;
     ctx.strokeStyle = t.outline;
     ctx.stroke();
 
@@ -307,8 +316,8 @@ export class WaferMapRenderer {
 
     // Hover highlight
     if (this.hover) {
-      const s = Math.max(cell, 4 / this.zoom);
-      ctx.lineWidth = 2 / this.zoom;
+      const s = Math.max(cell, (pres ? 6 : 4) / this.zoom);
+      ctx.lineWidth = (pres ? 3 : 2) / this.zoom;
       ctx.strokeStyle = this.opts.theme === "dark" ? "#ffffff" : "#0f172a";
       ctx.strokeRect(
         (this.hover.x - this.dieCx) * cell - s / 2,
@@ -316,13 +325,13 @@ export class WaferMapRenderer {
         s,
         s
       );
-      ctx.lineWidth = 1 / this.zoom;
+      ctx.lineWidth = (pres ? 1.6 : 1) / this.zoom;
       ctx.strokeStyle = "#f5b301";
       ctx.strokeRect(
-        (this.hover.x - this.dieCx) * cell - s / 2 - 1.5 / this.zoom,
-        -(this.hover.y - this.dieCy) * cell - s / 2 - 1.5 / this.zoom,
-        s + 3 / this.zoom,
-        s + 3 / this.zoom
+        (this.hover.x - this.dieCx) * cell - s / 2 - (pres ? 2.5 : 1.5) / this.zoom,
+        -(this.hover.y - this.dieCy) * cell - s / 2 - (pres ? 2.5 : 1.5) / this.zoom,
+        s + (pres ? 5 : 3) / this.zoom,
+        s + (pres ? 5 : 3) / this.zoom
       );
     }
     ctx.restore();
@@ -338,20 +347,29 @@ export class WaferMapRenderer {
     ctx.fillStyle = t.bg;
     ctx.fill();
     ctx.strokeStyle = t.outline;
-    ctx.lineWidth = 1.4;
+    ctx.lineWidth = 1.4 * k;
     ctx.stroke();
 
-    const barX = w - cbarW + 10;
+    const barX = w - cbarW + (pres ? 14 : 10);
 
     if (mode === "value") {
-      this.drawColorbar(t, barX, pad + 8, Math.min(16, cbarW * 0.16), Math.min(area, h - pad * 2 - 20), lo, hi);
+      this.drawColorbar(
+        t,
+        barX,
+        pad + 8,
+        Math.min(pres ? 26 : 16, cbarW * 0.16),
+        Math.min(area, h - pad * 2 - 20),
+        lo,
+        hi,
+        pres
+      );
     } else {
-      this.drawBinLegend(t, barX, pad + 10, cbarW - 14);
+      this.drawBinLegend(t, barX, pad + 10, cbarW - 14, pres);
     }
 
     // Zoom hint
     if (this.zoom > 1.01) {
-      ctx.font = `10px ${FONT}`;
+      ctx.font = `${Math.round(10 * k)}px ${FONT}`;
       ctx.fillStyle = t.muted;
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
@@ -366,11 +384,13 @@ export class WaferMapRenderer {
     width: number,
     height: number,
     lo: number,
-    hi: number
+    hi: number,
+    pres = false
   ): void {
     const ctx = this.ctx;
-    const barH = Math.max(80, height - 26);
-    const barY = y + 22;
+    const k = pres ? 1.55 : 1;
+    const barH = Math.max(80, height - (pres ? 40 : 26));
+    const barY = y + (pres ? 34 : 22);
     const grad = ctx.createLinearGradient(0, barY + barH, 0, barY);
     for (let i = 0; i <= 24; i++) {
       grad.addColorStop(i / 24, this.colorFor(i / 24));
@@ -378,17 +398,18 @@ export class WaferMapRenderer {
     ctx.fillStyle = grad;
     ctx.fillRect(x, barY, width, barH);
     ctx.strokeStyle = t.outline;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = k;
     ctx.strokeRect(x + 0.5, barY + 0.5, width - 1, barH - 1);
 
     const units = this.data?.test?.units || "value";
-    ctx.font = `600 10px ${FONT}`;
+    const maxUnits = pres ? 11 : 14;
+    ctx.font = `600 ${Math.round(10 * k)}px ${FONT}`;
     ctx.fillStyle = t.muted;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
-    ctx.fillText(units.length > 14 ? units.slice(0, 13) + "…" : units, x, barY - 7);
+    ctx.fillText(units.length > maxUnits ? units.slice(0, maxUnits - 1) + "…" : units, x, barY - 7 * k);
 
-    ctx.font = `10px ${FONT}`;
+    ctx.font = `${Math.round(10 * k)}px ${FONT}`;
     ctx.textBaseline = "middle";
     for (let i = 0; i <= 4; i++) {
       const f = i / 4;
@@ -397,11 +418,11 @@ export class WaferMapRenderer {
       ctx.strokeStyle = t.muted;
       ctx.beginPath();
       ctx.moveTo(x + width, yy);
-      ctx.lineTo(x + width + 4, yy);
+      ctx.lineTo(x + width + 4 * k, yy);
       ctx.stroke();
       ctx.fillStyle = t.text;
       ctx.textAlign = "left";
-      ctx.fillText(fmt(v, 3), x + width + 7, yy);
+      ctx.fillText(fmt(v, 3), x + width + 7 * k, yy);
     }
 
     const mark = (v: number, label: string) => {
@@ -410,15 +431,15 @@ export class WaferMapRenderer {
       if (f < 0 || f > 1) return;
       const yy = barY + barH * (1 - f);
       ctx.strokeStyle = "#e11d48";
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2 * k;
       ctx.beginPath();
-      ctx.moveTo(x - 2, yy);
-      ctx.lineTo(x + width + 2, yy);
+      ctx.moveTo(x - 2 * k, yy);
+      ctx.lineTo(x + width + 2 * k, yy);
       ctx.stroke();
-      ctx.font = `700 9px ${FONT}`;
+      ctx.font = `700 ${Math.round(9 * k)}px ${FONT}`;
       ctx.fillStyle = "#e11d48";
       ctx.textAlign = "right";
-      ctx.fillText(label, x - 5, yy);
+      ctx.fillText(label, x - 5 * k, yy);
     };
     if (this.opts) {
       mark(this.opts.lsl ?? NaN, "LSL");
@@ -426,8 +447,15 @@ export class WaferMapRenderer {
     }
   }
 
-  private drawBinLegend(t: MapColors, x: number, y: number, width: number): void {
+  private drawBinLegend(
+    t: MapColors,
+    x: number,
+    y: number,
+    width: number,
+    pres = false
+  ): void {
     const ctx = this.ctx;
+    const k = pres ? 1.55 : 1;
     const counts = new Map<number, number>();
     for (const d of this.data?.dice ?? []) {
       counts.set(d.hbin, (counts.get(d.hbin) ?? 0) + 1);
@@ -436,35 +464,39 @@ export class WaferMapRenderer {
     const shown = entries.slice(0, 9);
     const rest = entries.slice(9);
 
-    ctx.font = `600 10px ${FONT}`;
+    ctx.font = `600 ${Math.round(10 * k)}px ${FONT}`;
     ctx.fillStyle = t.muted;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
     ctx.fillText("HARD BIN", x, y);
-    let yy = y + 16;
-    ctx.font = `10px ${FONT}`;
+    let yy = y + 16 * k;
+    ctx.font = `${Math.round(10 * k)}px ${FONT}`;
     for (const [code, count] of shown) {
       const name = this.opts?.binNames?.[code] || (code === 1 ? "Pass" : `Bin ${code}`);
       ctx.fillStyle = binColor(code, code === 1);
-      ctx.fillRect(x, yy, 10, 10);
+      ctx.fillRect(x, yy, 10 * k, 10 * k);
       ctx.fillStyle = t.text;
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       const label = `${code}  ${name}`;
-      const maxChars = Math.max(8, Math.floor((width - 46) / 5.4));
-      ctx.fillText(label.length > maxChars ? label.slice(0, maxChars - 1) + "…" : label, x + 15, yy + 5);
+      const maxChars = Math.max(6, Math.floor((width - 46 * k) / (5.4 * k)));
+      ctx.fillText(
+        label.length > maxChars ? label.slice(0, maxChars - 1) + "…" : label,
+        x + 15 * k,
+        yy + 5 * k
+      );
       ctx.fillStyle = t.muted;
       ctx.textAlign = "right";
-      ctx.fillText(fmtCount(count), x + width, yy + 5);
-      yy += 18;
+      ctx.fillText(fmtCount(count), x + width, yy + 5 * k);
+      yy += 18 * k;
     }
     if (rest.length > 0) {
       const total = rest.reduce((a, [, c]) => a + c, 0);
       ctx.fillStyle = t.muted;
       ctx.textAlign = "left";
-      ctx.fillText(`+ ${rest.length} more bins`, x + 15, yy + 5);
+      ctx.fillText(`+ ${rest.length} more bins`, x + 15 * k, yy + 5 * k);
       ctx.textAlign = "right";
-      ctx.fillText(fmtCount(total), x + width, yy + 5);
+      ctx.fillText(fmtCount(total), x + width, yy + 5 * k);
     }
     ctx.textBaseline = "alphabetic";
   }
@@ -487,10 +519,12 @@ export function renderMapImage(
   subtitle: string,
   format: "jpeg" | "png" = "jpeg"
 ): string {
-  const headerH = Math.round(height * 0.13);
+  const pres = opts.presentation === true;
+  const k = pres ? 1.5 : 1;
+  const headerH = Math.round(height * (pres ? 0.17 : 0.13));
   const map = document.createElement("canvas");
   const renderer = new WaferMapRenderer(map);
-  renderer.setSize(width, height - headerH, 1.55);
+  renderer.setSize(width, height - headerH, pres ? 1.75 : 1.55);
   renderer.setData(data, opts);
   renderer.draw();
 
@@ -506,13 +540,13 @@ export function renderMapImage(
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = t.text;
-  ctx.font = `600 30px ${FONT}`;
-  ctx.fillText(title, 42, 50);
+  ctx.font = `600 ${Math.round(30 * k)}px ${FONT}`;
+  ctx.fillText(title, 42, Math.round(50 * k));
   ctx.fillStyle = t.muted;
-  ctx.font = `15px ${FONT}`;
-  ctx.fillText(subtitle, 42, 78);
+  ctx.font = `${Math.round(15 * k)}px ${FONT}`;
+  ctx.fillText(subtitle, 42, Math.round(78 * k));
   ctx.fillStyle = "#2563eb";
-  ctx.fillRect(42, 94, 74, 4);
+  ctx.fillRect(42, Math.round(94 * k), Math.round(74 * k), Math.round(4 * k));
 
   ctx.drawImage(map, 0, headerH);
   return out.toDataURL(format === "png" ? "image/png" : "image/jpeg", 0.95);

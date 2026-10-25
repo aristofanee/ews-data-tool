@@ -1,8 +1,9 @@
 # EWS Data Tool
 
 A fast, offline Windows desktop app for wafer-sort (EWS) data. Open STDF or CSV
-files, explore box plots, wafer maps and Pareto charts, then generate a complete
-JPG report from a reusable template.
+files (including Unix-compressed `.Z`), explore box plots, wafer maps, Pareto
+charts, histograms, trends and scatter plots, then generate a complete JPG
+report from a reusable template.
 
 Built with **Tauri 2 + Rust** for parsing/aggregation and **React + Plotly** for
 the charts. The wafer map is a custom canvas renderer for precise die grids,
@@ -13,15 +14,25 @@ hover values, zoom/pan and high-resolution JPG export.
 ## Highlights
 
 - **Fast, local and compact** — Rust parses STDF/CSV in the background; the
-  installer is about 3 MB and nothing leaves the machine.
-- **Three focus plots** — box plots (by wafer or lot), value/bin wafer maps and
-  failure Pareto charts, plus histogram and trend views.
+  installer is about 3.5 MB and nothing leaves the machine.
+- **Six plot views** — box plots (by wafer or lot), value/bin wafer maps,
+  failure Pareto charts, histograms, trends and X/Y scatter plots with optional
+  continuous or categorical Z colour.
+- **Presentation-ready** — slide-sized fonts, thicker lines and stronger
+  markers (about six plots per slide); JPG, clipboard and report exports use a
+  light background with the chart title baked in.
+- **Custom wafer labels** — add a column such as `Split`, label selected wafers,
+  then colour box plots or scatter categories by it. A text `Split` column added
+  in Excel is also imported automatically. Labels travel with templates and
+  `report.json`.
 - **Real EWS features** — LSL/USL and control limits, CP/CPK, IQR and k·sigma
   outlier filters, pass-only / bin / lot / wafer filters, hover provenance
   (die X/Y, bin, value), log axes, per-plot Y limits.
-- **Templates that build reports** — save every report plot, its filters and
-  theme to one JSON file; load it on new data and generate all JPGs in one click.
-- **STDF → CSV** — use the same import as a converter.
+- **Templates that build reports** — save every report plot, its filters,
+  theme and custom label columns to one JSON file; load it on new data and
+  generate all JPGs in one click.
+- **STDF → CSV** — use the same import as a converter; `.Z` files are
+  decompressed transparently.
 - **Blue + yellow design** with light and dark themes.
 
 | Wafer map | Pareto |
@@ -49,7 +60,7 @@ npm run tauri build    # release build + NSIS installer
 Build output:
 
 - `src-tauri\target\release\ews-data-tool.exe`
-- `src-tauri\target\release\bundle\nsis\EWS Data Tool_0.1.0_x64-setup.exe`
+- `src-tauri\target\release\bundle\nsis\EWS Data Tool_0.2.0_x64-setup.exe`
 
 ### Browser preview
 
@@ -63,20 +74,28 @@ report export and real file parsing require the desktop app.
 
 ## Using the app
 
-1. **Open data** (`Ctrl+O`) and pick one or more STDF/CSV files. Files are merged
-   into one dataset; duplicate dice are kept as separate rows.
+1. **Open data** (`Ctrl+O`) and pick one or more STDF/CSV files, including
+   compressed `.Z` files. Files are merged into one dataset; duplicate dice are
+   kept as separate rows.
 2. Use the **Filters** panel to narrow by lot, wafer, hard bin, pass dice or a
    statistical outlier rule. The test list selects the parameter.
-3. Pick a plot tab (`Ctrl+1` … `Ctrl+5`). The **Plot settings** panel on the
+3. Pick a plot tab (`Ctrl+1` … `Ctrl+6`). The **Plot settings** panel on the
    right controls grouping, spec/control limits, Y range, map palette and more.
-4. **Add to report** collects the current plot. Use **All selected wafers** (on a
+   Scatter plots choose X/Y tests plus an optional Z test or category column
+   (lot, OCR wafer ID, bin, or a custom label column).
+4. In **Custom labels**, add a column (for example `Split`), select wafers and
+   assign a label. Use it as the box **Colour / block** or scatter **Z
+   category**; empty labels clear the assignment.
+5. **Add to report** collects the current plot. Use **All selected wafers** (on a
    map) or **All tests** (on box/hist/trend) to batch-add plots.
-5. In **Report builder**, choose an output folder and **Generate JPGs**. The app
+6. In **Report builder**, choose an output folder and **Generate JPGs**. The app
    writes numbered JPGs, an `index.html` contact sheet and `report.json`.
-6. **Save template** (`Ctrl+S`) stores the report and settings; **Load template**
-   applies them to new data. Templates include the light/dark theme.
-7. **Save as JPG** exports the current chart at 1800×1100; **Copy image** puts it
-   on the clipboard. **Export CSV** (`Ctrl+E`) writes the filtered dataset.
+7. **Save template** (`Ctrl+S`) stores the report, settings and custom labels;
+   **Load template** applies them to new data. Templates include the theme.
+8. **Save as JPG** exports the current chart at 1800×1100; **Copy image** puts it
+   on the clipboard. Both use a light background and include the title.
+   **Export CSV** (`Ctrl+E`) writes the filtered dataset, including custom label
+   columns.
 
 Map interaction: scroll to zoom, drag to pan, double-click to reset. Plotly
 charts support hover, box zoom and pan from the mode bar.
@@ -86,8 +105,11 @@ charts support hover, box zoom and pan from the mode bar.
 ### STDF
 
 - STDF **V4** (`.stdf`, `.std`), little- or big-endian.
+- Unix `compress` **`.Z`** streams are detected by magic bytes and decompressed
+  before parsing; gzip/zip are not used.
 - Records used: FAR, MIR, WIR, PIR, PTR, MPR, PRR, PCR, HBR, SBR, TSR, WRR, MRR.
-- Test names, units, limits and scaling are read from the STDF records.
+- Test names, units, limits and scaling are read from the STDF records. The WIR
+  wafer ID (OCR) is available as a scatter/category grouping key.
 - Tolerant of older writers: unpadded `Cn` strings, omitted trailing
   `LO_SPEC`/`HI_SPEC` fields and `0x00` bin pass flags are handled.
 - ATDF (ASCII STDF) is **not supported yet**; non-CSV files are sent to the
@@ -101,22 +123,26 @@ and two layouts.
 **Wide** — one row per die, one column per test:
 
 ```csv
-Lot,Wafer,X,Y,HBIN,SBIN,Vt_nch [V],Idsat [uA/um],Rds_on [ohm]
-L24-0417,01,0,-22,1,1,0.41515,521.89,12.741
-L24-0417,01,-6,-21,1,1,0.41439,488.87,13.352
+Lot,Wafer,X,Y,HBIN,SBIN,Vt_nch [V],Idsat [uA/um],Rds_on [ohm],Split
+L24-0417,01,0,-22,1,1,0.41515,521.89,12.741,Split A
+L24-0417,01,-6,-21,1,1,0.41439,488.87,13.352,Split A
+L24-0417,02,0,-22,1,1,0.41602,519.11,12.803,Split B
 ```
 
 - Key columns are recognised by name: `Lot`, `Wafer`, `X`, `Y`, `HBIN`, `SBIN`.
 - Every other numeric column becomes a test. Units are read from a trailing
   `[unit]` or `(unit)` in the header.
+- Text columns such as `Split` become wafer-level custom columns and can be
+  selected as a box **Colour / block** or scatter **Z category**. A column is
+  skipped if one wafer has conflicting labels.
 - Decimal commas are accepted when the delimiter is not a comma.
 
 **Long** — one row per measurement:
 
 ```csv
-Lot,Wafer,X,Y,HBIN,Test,Value
-L24-0417,01,-6,-21,1,Vt_nch,0.41439
-L24-0417,01,-6,-21,1,Idsat,488.87
+Lot,Wafer,X,Y,HBIN,Test,Value,Split
+L24-0417,01,-6,-21,1,Vt_nch,0.41439,Split A
+L24-0417,01,-6,-21,1,Idsat,488.87,Split A
 ```
 
 Column mapping is automatic. A manual column picker / unit editor is not in this
@@ -148,23 +174,28 @@ signatures and realistic bin failures.
 
 ```powershell
 $env:STDF_DEMO="$env:TEMP\pystdf\pystdf-main\data\demofile.stdf"
+$env:STDF_DEMO_Z="$env:TEMP\pystdf\pystdf-main\data\demofile.stdf.Z"
 cargo test --manifest-path src-tauri\Cargo.toml --lib
 ```
 
-The suite covers the reference STDF file (1,619 dice, 74 tests), wide/long CSV
-import, semicolon + decimal-comma CSV, and the full query pipeline
-(box/map/Pareto/histogram/trend).
+The suite covers the reference STDF file (1,619 dice, 74 tests), the compressed
+`.Z` fixture, wide/long CSV import, semicolon + decimal-comma CSV, text `Split`
+columns, the full query pipeline (box/map/Pareto/histogram/trend/scatter), custom
+label columns and box block colours. There are 11 Rust tests.
 
-Visual smoke tests (browser demo, requires `npm run dev`):
+Visual and desktop smoke tests (browser demo, requires `npm run dev`):
 
 ```powershell
-node tools\shoot.mjs    # screenshots of every plot in light/dark mode
-node tools\flow.mjs     # JPG save, report builder, template save, bin map
-node tools\desktop.mjs  # real app via WebView2 CDP: STDF import, clipboard,
-                        # every chart tab and a 4-plot batch report on disk
+node tools\shoot.mjs       # screenshots of every plot in light/dark mode
+node tools\flow.mjs        # JPG save, report builder, template save, bin map
+node tools\desktop.mjs     # real app via WebView2 CDP: STDF import, clipboard,
+                           # every chart tab and a 4-plot batch report on disk
+node tools\desktop-v2.mjs  # v0.2: .Z import, custom labels, scatter modes,
+                           # box blocks, dark modal, clipboard, report and CSV
+                           # re-import with an Excel-added Split column
 ```
 
-The desktop test expects the release build and the Galaxy Semiconductor STDF
+The desktop tests expect the release build and the Galaxy Semiconductor STDF
 samples under `%TEMP%\pystdf\pystdf-main\data` (see the test command above).
 
 ## Current limitations / next steps
@@ -174,7 +205,11 @@ samples under `%TEMP%\pystdf\pystdf-main\data` (see the test command above).
 - Filters cover lot, wafer, bin, pass dice and statistical outliers. Date, site,
   die X/Y range and edge exclusion are not exposed yet (`edgeExclusion` exists in
   the plot spec but is unused).
-- Group/colour is by lot or wafer; site-level grouping is not parsed yet.
+- Group/colour is by lot, wafer or a custom label column; site-level grouping is
+  not parsed yet.
+- Custom labels are session data, not written back to the STDF file. They are
+  included in templates, CSV exports and `report.json`. Text metadata columns
+  from CSV are imported as wafer-level labels; per-die metadata is not supported.
 - Templates store test/wafer indices, so they are directly reusable across lots
   from the same test program. A dataset with a different test order may need
   plot adjustments after loading a template.

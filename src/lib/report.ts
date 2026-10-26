@@ -157,14 +157,17 @@ export async function generateReport(opts: {
     const mapOpts: MapOptions = {
       theme,
       palette: spec.palette,
-      mode: spec.mapMode,
+      mode: "value",
       lsl: spec.showLimits ? (spec.lsl ?? md.lsl) : null,
       usl: spec.showLimits ? (spec.usl ?? md.usl) : null,
       binNames,
       presentation: spec.presentation,
     };
+    const scope = md.isMean
+      ? `All wafers (mean) · ${md.waferCount} wafer${md.waferCount === 1 ? "" : "s"}`
+      : `${md.lotName} · Wafer ${md.wafer?.name ?? "?"}`;
     const subtitle =
-      `${md.lotName} · Wafer ${md.wafer?.name ?? "?"}` +
+      scope +
       (md.test ? ` · ${testLabelWithUnits(md.test)}` : "") +
       ` · Yield ${md.yieldPct.toFixed(2)}%`;
     return renderMapImage(md, mapOpts, 2400, 1500, title, subtitle, "jpeg");
@@ -231,16 +234,19 @@ export async function generateReport(opts: {
               if (item.filters.lots.length && !item.filters.lots.includes(w.lot)) return false;
               return true;
             })
-        : [{ index: spec.mapWafer ?? 0, w: info.wafers[spec.mapWafer ?? 0] }];
-      for (const { index } of candidates) {
+            .map(({ index }) => index)
+        : [spec.mapWafer];
+      for (const index of candidates) {
         const md = await api.waferMap({
           wafer: index,
           test: spec.test,
-          mode: spec.mapMode,
+          mode: "value",
           filter: item.filters,
         });
-        if (!md.wafer || md.dice.length === 0) continue;
-        const suffix = `${md.lotName} / ${md.wafer.name}`;
+        if (md.dice.length === 0) continue;
+        const suffix = md.isMean
+          ? `All wafers (mean) · ${md.waferCount} wafer${md.waferCount === 1 ? "" : "s"}`
+          : `${md.lotName} / ${md.wafer?.name ?? "?"}`;
         const title = spec.splitPlots ? `${spec.title} · ${suffix}` : spec.title;
         await addImage(
           title,

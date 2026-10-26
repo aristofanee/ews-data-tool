@@ -87,6 +87,10 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
         { k: "Fail", v: fmtInt(d.fail) },
         { k: "Dice", v: fmtInt(d.pass + d.fail) },
       ];
+      if (d.isMean) {
+        out.unshift({ k: "Scope", v: `All wafers (mean of ${fmtInt(d.waferCount)})` });
+      }
+      if (d.excluded > 0) out.push({ k: "Excluded", v: fmtInt(d.excluded), tone: "warn" });
       return out;
     }
     case "binmap": {
@@ -202,12 +206,66 @@ function buildFigure(
   }
 }
 
-function FacetChart({ figure, label }: { figure: Figure; label: string }) {
-  const ref = useRef<HTMLDivElement>(null);
+/**
+ * Split views can contain dozens of facets. Building and mounting every
+ * Plotly chart up front made the scatter split feel frozen, so facets are
+ * created only when they approach the visible part of the scroll area.
+ */
+function LazyFacetChart({
+  data,
+  spec,
+  theme,
+  facet,
+}: {
+  data: PlotData;
+  spec: PlotSpec;
+  theme: Theme;
+  facet: Facet;
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const plotRef = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+    const root = el.closest(".facet-grid");
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setVisible(true);
+          io.disconnect();
+        }
+      },
+      { root: root instanceof Element ? root : null, rootMargin: "320px" }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  // The facet label is already shown above the plot; do not repeat the title
+  // inside the plot area.
+  const figure = useMemo(
+    () => (visible ? buildFigure(data, spec, theme, undefined, facet) : null),
+    [visible, data, spec, theme, facet]
+  );
+
   return (
     <div className="facet-card">
-      <div className="facet-label">{label}</div>
-      <PlotlyChart figure={figure} hostRef={ref} />
+      <div className="facet-label">{facet.label}</div>
+      <div className="facet-chart-body" ref={wrapRef}>
+        {!figure && (
+          <div className="facet-loading">
+            <div className="spinner" />
+            <span>Preparing…</span>
+          </div>
+        )}
+        {figure && <PlotlyChart figure={figure} hostRef={plotRef} />}
+      </div>
     </div>
   );
 }
@@ -267,20 +325,14 @@ export function ChartPanel() {
   useEffect(() => setTitleDraft(spec.title), [spec.title]);
 
   const facets = useMemo<Facet[]>(() => (data ? facetsFor(data, spec) : []), [data, spec]);
-  const facetFigures = useMemo(
-    () =>
-      data
-        ? facets.map((facet) => ({
-            facet,
-            figure: buildFigure(data, spec, theme, `${spec.title} · ${facet.label}`, facet),
-          }))
-        : [],
-    [data, facets, spec, theme]
-  );
+  const splitActive = facets.length > 1;
+  // Do not build the hidden full-size figure while a split view is active.
+  // With tens of thousands of scatter points that construction is pure waste.
   const figure = useMemo<Figure | null>(
-    () => (data ? buildFigure(data, spec, theme) : null),
-    [data, spec, theme]
+    () => (data && !splitActive ? buildFigure(data, spec, theme) : null),
+    [data, spec, theme, splitActive]
   );
+  const mapSpec = useMemo(() => ({ ...spec, mapMode: "value" as const }), [spec]);
 
   if (!info) return <EmptyState />;
 
@@ -288,7 +340,6 @@ export function ChartPanel() {
   const isMap = spec.type === "map";
   const isBinMap = spec.type === "binmap";
   const mapSplitActive = isMap && spec.splitPlots;
-  const splitActive = facets.length > 1 && facetFigures.some((f) => f.figure);
 
   const commitTitle = () => {
     const t = titleDraft.trim();
@@ -306,9 +357,14 @@ export function ChartPanel() {
       } else if (isBinMap) {
         url = binMapApi.current?.toDataURL("png", "light", 2400, 1500) ?? null;
       } else if (data) {
-        const fig = splitActive
-          ? facetFigures[0]?.figure
-          : buildFigure(data, spec, "light", spec.title);
+        const first = splitActive ? facets[0] : undefined;
+        const fig = buildFigure(
+          data,
+          spec,
+          "light",
+          first ? `${spec.title} · ${first.label}` : spec.title,
+          first
+        );
         if (fig) url = await renderExportFigure(fig, "png");
       }
       if (!url) throw new Error("The chart is not ready yet.");
@@ -362,7 +418,15 @@ export function ChartPanel() {
         const folder = await api.pickFolder();
         if (!folder) return;
         let count = 0;
-        for (const { facet, figure: facetFigure } of facetFigures) {
+        for (const facet of facets) {
+          if (!data) break;
+          const facetFigure = buildFigure(
+            data,
+            spec,
+            "light",
+            `${spec.title} · ${facet.label}`,
+            facet
+          );
           if (!facetFigure) continue;
           const url = await renderExportFigure(facetFigure, "jpeg");
           const base = folder.replace(/[\\/]+$/, "");
@@ -472,17 +536,24 @@ export function ChartPanel() {
               onReady={(apiRef) => (mapFacetApi.current = apiRef)}
             />
           ) : data?.kind === "map" ? (
-            <WaferMapView data={data.data} spec={spec} onReady={(apiRef) => (mapApi.current = apiRef)} />
+            <WaferMapView
+              data={data.data}
+              spec={mapSpec}
+              onReady={(apiRef) => (mapApi.current = apiRef)}
+            />
           ) : data?.kind === "binmap" ? (
             <BinMapView data={data.data} spec={spec} onReady={(apiRef) => (binMapApi.current = apiRef)} />
-          ) : splitActive ? (
+          ) : splitActive && data ? (
             <div className="facet-grid">
-              {facetFigures.map(
-                ({ facet, figure: facetFigure }) =>
-                  facetFigure && (
-                    <FacetChart key={facet.label} figure={facetFigure} label={facet.label} />
-                  )
-              )}
+              {facets.map((facet) => (
+                <LazyFacetChart
+                  key={facet.key ?? facet.label}
+                  data={data}
+                  spec={spec}
+                  theme={theme}
+                  facet={facet}
+                />
+              ))}
             </div>
           ) : figure ? (
             <PlotlyChart figure={figure} hostRef={plotRef} />

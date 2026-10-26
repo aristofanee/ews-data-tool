@@ -60,8 +60,14 @@ function subtitleFor(it: ReportItem, info: DatasetInfo): string {
   const test = s.test !== null ? info.tests[s.test] : null;
   const parts: string[] = [];
   if (s.type === "map") {
-    const w = info.wafers[s.mapWafer ?? 0];
-    parts.push(`Wafer ${w?.name ?? "?"}`);
+    if (s.splitPlots) {
+      parts.push("Split by wafer");
+    } else if (s.mapWafer === null) {
+      parts.push("All wafers (mean)");
+    } else {
+      const w = info.wafers[s.mapWafer];
+      parts.push(`Wafer ${w?.name ?? "?"}`);
+    }
   }
   if (s.type === "scatter") {
     const x = s.scatterX !== null ? info.tests[s.scatterX] : null;

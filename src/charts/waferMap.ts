@@ -1,5 +1,5 @@
 import type { BinOverviewWafer, MapDie, MapResponse } from "../types";
-import { fmt } from "../lib/format";
+import { fmtMap } from "../lib/format";
 import type { Theme } from "../lib/theme";
 import { binColor, paletteColor } from "../lib/theme";
 
@@ -89,6 +89,13 @@ export class WaferMapRenderer {
   private scale = 1;
   private colorCache = new Map<number, string>();
   private colorPalette = "";
+  /**
+   * Static map layer. Hovering only blits this cached bitmap and draws the
+   * highlight, so pointer movement stays cheap even for 50k-die maps.
+   */
+  private baseCanvas: HTMLCanvasElement | null = null;
+  private baseCtx: CanvasRenderingContext2D | null = null;
+  private baseDirty = true;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -108,6 +115,7 @@ export class WaferMapRenderer {
     this.scale = 1;
     this.canvas.width = Math.round(rect.width * dpr);
     this.canvas.height = Math.round(rect.height * dpr);
+    this.baseDirty = true;
     return true;
   }
 
@@ -119,6 +127,7 @@ export class WaferMapRenderer {
     this.scale = scale;
     this.canvas.width = width;
     this.canvas.height = height;
+    this.baseDirty = true;
   }
 
   setData(data: MapResponse, opts: MapOptions): void {
@@ -129,12 +138,14 @@ export class WaferMapRenderer {
     this.byKey.clear();
     this.binCounts = null;
     for (const d of data.dice) this.byKey.set(`${d.x},${d.y}`, d);
+    this.baseDirty = true;
     if (prev !== next) this.resetView();
     this.draw();
   }
 
   setOptions(opts: MapOptions): void {
     this.opts = opts;
+    this.baseDirty = true;
     this.draw();
   }
 
@@ -143,13 +154,17 @@ export class WaferMapRenderer {
     this.panX = 0;
     this.panY = 0;
     this.hover = null;
+    this.baseDirty = true;
     this.draw();
   }
 
   setHover(die: MapDie | null): void {
-    if (this.hover === die) return;
+    // hitTest returns the same MapDie object while the pointer stays over one
+    // die. The React tooltip still follows the pointer, but the canvas only
+    // needs to be repainted when the highlighted die actually changes.
+    const sameDie = (this.hover ?? null) === die;
     this.hover = die;
-    this.draw();
+    if (!sameDie) this.draw();
   }
 
   getZoom(): number {
@@ -158,9 +173,11 @@ export class WaferMapRenderer {
 
   panBy(dx: number, dy: number): void {
     if (this.zoom <= 1) return;
+    this.hover = null;
     this.panX += dx;
     this.panY += dy;
     this.clampPan();
+    this.baseDirty = true;
     this.draw();
   }
 
@@ -170,6 +187,7 @@ export class WaferMapRenderer {
     const py = clientY - rect.top;
     const z2 = clamp(this.zoom * factor, 1, 8);
     if (Math.abs(z2 - this.zoom) < 1e-4) return;
+    this.hover = null;
     const wx = (px - this.cx - this.panX) / this.zoom;
     const wy = (py - this.cy - this.panY) / this.zoom;
     this.zoom = z2;
@@ -181,6 +199,7 @@ export class WaferMapRenderer {
       this.panY = py - this.cy - wy * z2;
       this.clampPan();
     }
+    this.baseDirty = true;
     this.draw();
   }
 
@@ -222,10 +241,35 @@ export class WaferMapRenderer {
 
   draw(): void {
     if (!this.data || !this.opts) return;
-    const { ctx, dpr } = this;
     const w = this.w / this.scale;
     const h = this.h / this.scale;
     if (w < 2 || h < 2) return;
+    if (this.baseDirty || !this.baseCanvas) this.renderBase();
+    if (!this.baseCanvas) return;
+    const ctx = this.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.drawImage(this.baseCanvas, 0, 0);
+    this.drawHover();
+  }
+
+  private renderBase(): void {
+    if (!this.data || !this.opts) return;
+    const w = this.w / this.scale;
+    const h = this.h / this.scale;
+    if (w < 2 || h < 2) return;
+    if (!this.baseCanvas) {
+      this.baseCanvas = document.createElement("canvas");
+      this.baseCtx = this.baseCanvas.getContext("2d");
+    }
+    const base = this.baseCanvas;
+    const ctx = this.baseCtx;
+    if (!base || !ctx) return;
+    if (base.width !== this.canvas.width || base.height !== this.canvas.height) {
+      base.width = this.canvas.width;
+      base.height = this.canvas.height;
+    }
+    const { dpr } = this;
     const t = mapColors(this.opts.theme);
     const data = this.data;
     const mode = this.opts.mode;
@@ -357,8 +401,8 @@ export class WaferMapRenderer {
     ctx.save();
     // Clip the dice to a plain circle. Clipping every fillRect through the
     // notch path below makes Skia fall back to a slow per-rect mask and can
-    // turn a 50k-die hover redraw into seconds. The notch is cut out again
-    // after the dice (and hover highlight) have been drawn.
+    // turn a 50k-die redraw into seconds. The notch is cut out again after the
+    // dice have been drawn.
     ctx.beginPath();
     ctx.arc(0, 0, R, 0, Math.PI * 2);
     ctx.clip();
@@ -400,27 +444,8 @@ export class WaferMapRenderer {
     }
     ctx.restore();
 
-    // Hover highlight
-    if (this.hover) {
-      const hw = Math.max(cellW, (pres ? 6 : 4) / this.zoom);
-      const hh = Math.max(cellH, (pres ? 6 : 4) / this.zoom);
-      const hx = (this.hover.x - centerX) * cellW;
-      const hy = -(this.hover.y - centerY) * cellH;
-      ctx.lineWidth = (pres ? 3 : 2) / this.zoom;
-      ctx.strokeStyle = this.opts.theme === "dark" ? "#ffffff" : "#0f172a";
-      ctx.strokeRect(hx - hw / 2, hy - hh / 2, hw, hh);
-      ctx.lineWidth = (pres ? 1.6 : 1) / this.zoom;
-      ctx.strokeStyle = "#f5b301";
-      ctx.strokeRect(
-        hx - hw / 2 - (pres ? 2.5 : 1.5) / this.zoom,
-        hy - hh / 2 - (pres ? 2.5 : 1.5) / this.zoom,
-        hw + (pres ? 5 : 3) / this.zoom,
-        hh + (pres ? 5 : 3) / this.zoom
-      );
-    }
-
-    // Cut the flat/notch back out of the dice and hover layer. The wafer fill
-    // already has the notch; the plain circle clip above let dice paint over it.
+    // Cut the flat/notch back out of the dice. The wafer fill already has the
+    // notch; the plain circle clip above let dice paint over it.
     if (this.data?.wafer?.flat) {
       ctx.beginPath();
       this.traceNotchCutout(ctx, R);
@@ -440,6 +465,7 @@ export class WaferMapRenderer {
 
     if (showLegend && mode === "value") {
       this.drawColorbar(
+        ctx,
         t,
         barX,
         pad + 8,
@@ -450,7 +476,10 @@ export class WaferMapRenderer {
         pres
       );
     } else if (showLegend) {
-      this.drawBinLegend(t, barX, pad + 10, cbarW - 14, pres);
+      // Keep the bin counts off the canvas edge. The bin legend uses the full
+      // reserved width, unlike the colour bar whose labels sit inside it.
+      const legendRightPad = pres ? 24 : 20;
+      this.drawBinLegend(ctx, t, barX, pad + 10, cbarW - 14 - legendRightPad, pres);
     }
 
     // Zoom hint
@@ -461,6 +490,54 @@ export class WaferMapRenderer {
       ctx.textBaseline = "top";
       ctx.fillText(`${this.zoom.toFixed(1)}×  ·  double-click to reset`, pad, 4);
     }
+    this.baseDirty = false;
+  }
+
+  private drawHover(): void {
+    if (!this.hover || !this.data || !this.opts) return;
+    const ctx = this.ctx;
+    const { dpr } = this;
+    const t = mapColors(this.opts.theme);
+    const pres = this.opts.presentation === true;
+    const R = this.radiusPx;
+    const cellW = this.cellW;
+    const cellH = this.cellH;
+
+    ctx.setTransform(dpr * this.scale, 0, 0, dpr * this.scale, 0, 0);
+    ctx.save();
+    ctx.translate(this.cx + this.panX, this.cy + this.panY);
+    ctx.scale(this.zoom, this.zoom);
+
+    const hw = Math.max(cellW, (pres ? 6 : 4) / this.zoom);
+    const hh = Math.max(cellH, (pres ? 6 : 4) / this.zoom);
+    const hx = (this.hover.x - this.dieCx) * cellW;
+    const hy = -(this.hover.y - this.dieCy) * cellH;
+    ctx.lineWidth = (pres ? 3 : 2) / this.zoom;
+    ctx.strokeStyle = this.opts.theme === "dark" ? "#ffffff" : "#0f172a";
+    ctx.strokeRect(hx - hw / 2, hy - hh / 2, hw, hh);
+    ctx.lineWidth = (pres ? 1.6 : 1) / this.zoom;
+    ctx.strokeStyle = "#f5b301";
+    ctx.strokeRect(
+      hx - hw / 2 - (pres ? 2.5 : 1.5) / this.zoom,
+      hy - hh / 2 - (pres ? 2.5 : 1.5) / this.zoom,
+      hw + (pres ? 5 : 3) / this.zoom,
+      hh + (pres ? 5 : 3) / this.zoom
+    );
+
+    // The highlight is painted above the cached dice layer, so restore the
+    // notch and outline just as the base render does.
+    if (this.data.wafer?.flat) {
+      ctx.beginPath();
+      this.traceNotchCutout(ctx, R);
+      ctx.fillStyle = t.bg;
+      ctx.fill();
+    }
+    ctx.beginPath();
+    this.traceWaferPath(ctx, R);
+    ctx.lineWidth = (pres ? 2.6 : 1.5) / this.zoom;
+    ctx.strokeStyle = t.outline;
+    ctx.stroke();
+    ctx.restore();
   }
 
   /** Build a circle with a real notch/flat cut out of its outline. */
@@ -515,6 +592,7 @@ export class WaferMapRenderer {
   }
 
   private drawColorbar(
+    ctx: CanvasRenderingContext2D,
     t: MapColors,
     x: number,
     y: number,
@@ -524,7 +602,6 @@ export class WaferMapRenderer {
     hi: number,
     pres = false
   ): void {
-    const ctx = this.ctx;
     const k = pres ? 1.55 : 1;
     const barH = Math.max(80, height - (pres ? 40 : 26));
     const barY = y + (pres ? 34 : 22);
@@ -559,7 +636,7 @@ export class WaferMapRenderer {
       ctx.stroke();
       ctx.fillStyle = t.text;
       ctx.textAlign = "left";
-      ctx.fillText(fmt(v, 3), x + width + 7 * k, yy);
+      ctx.fillText(fmtMap(v), x + width + 7 * k, yy);
     }
 
     const mark = (v: number, label: string) => {
@@ -585,13 +662,13 @@ export class WaferMapRenderer {
   }
 
   private drawBinLegend(
+    ctx: CanvasRenderingContext2D,
     t: MapColors,
     x: number,
     y: number,
     width: number,
     pres = false
   ): void {
-    const ctx = this.ctx;
     const k = pres ? 1.55 : 1;
     if (!this.binCounts) {
       const counts = new Map<number, number>();
@@ -756,6 +833,9 @@ export function renderBinOverviewImage(
       pass: w.pass,
       fail: w.fail,
       yieldPct: w.yieldPct,
+      isMean: false,
+      waferCount: 1,
+      excluded: 0,
     };
     renderer.setData(data, { ...opts, mode: "bin", showLegend: false, presentation: false });
     renderer.draw();

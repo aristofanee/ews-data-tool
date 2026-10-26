@@ -142,7 +142,7 @@ export async function boxPlot(req: {
 }
 
 export async function waferMap(req: {
-  wafer: number;
+  wafer: number | null;
   test: number | null;
   mode: "value" | "bin";
   filter: Filter;

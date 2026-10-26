@@ -136,6 +136,24 @@ export const IconChevronDown = (p: IconProps) => (
   </Svg>
 );
 
+export const IconChevronLeft = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M15 18l-6-6 6-6" />
+  </Svg>
+);
+
+export const IconChevronRight = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9 18l6-6-6-6" />
+  </Svg>
+);
+
+export const IconArrowLeft = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M19 12H5M11 18l-6-6 6-6" />
+  </Svg>
+);
+
 export const IconTrash = (p: IconProps) => (
   <Svg {...p}>
     <path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14" />

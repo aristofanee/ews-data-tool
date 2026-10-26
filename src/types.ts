@@ -133,6 +133,12 @@ export interface MapResponse {
   pass: number;
   fail: number;
   yieldPct: number;
+  /** True for the all-wafer mean map. */
+  isMean: boolean;
+  /** Number of wafers that contributed to the map. */
+  waferCount: number;
+  /** Dice removed by the statistical/outlier filter. */
+  excluded: number;
 }
 
 export interface ParetoBar {

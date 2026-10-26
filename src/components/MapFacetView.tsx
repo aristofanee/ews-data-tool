@@ -6,6 +6,7 @@ import type { Theme } from "../lib/theme";
 import { renderMapImage, type MapOptions } from "../charts/waferMap";
 import { testLabelWithUnits } from "../lib/format";
 import { WaferMapView } from "./WaferMapView";
+import { MapDetailView } from "./MapDetailView";
 
 export interface MapFacetExportApi {
   toDataURLs: (
@@ -23,9 +24,9 @@ interface Props {
 }
 
 /**
- * A map split is one value map per wafer. Each facet is a full interactive
- * canvas (hover, zoom, pan), not a thumbnail, so the split view keeps the same
- * detail as the single map tab.
+ * A map split is one value map per wafer. The mosaic tiles are static
+ * previews (no legend, hover or zoom) so the grid scrolls normally; clicking
+ * one opens the same full-size detail view used by the Bin map mosaic.
  */
 export function MapFacetView({ spec, filter, onReady }: Props) {
   const info = useStore((s) => s.info);
@@ -33,6 +34,7 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
   const [maps, setMaps] = useState<MapResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
 
   const candidates = useMemo(() => {
     if (!info) return [];
@@ -56,7 +58,7 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
           const md = await api.waferMap({
             wafer: index,
             test: spec.test,
-            mode: spec.mapMode,
+            mode: "value",
             filter,
           });
           if (!md.wafer || md.dice.length === 0) continue;
@@ -76,7 +78,11 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
     return () => {
       alive = false;
     };
-  }, [candidates, spec.test, spec.mapMode, filter]);
+  }, [candidates, spec.test, filter]);
+
+  useEffect(() => {
+    if (selected !== null && selected >= maps.length) setSelected(null);
+  }, [maps.length, selected]);
 
   const binNames = useMemo(() => {
     const out: Record<number, string> = {};
@@ -105,7 +111,7 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
           const opts: MapOptions = {
             theme: themeOverride ?? themeRef.current,
             palette: sp.palette,
-            mode: sp.mapMode,
+            mode: "value",
             lsl: sp.showLimits ? (sp.lsl ?? md.lsl) : null,
             usl: sp.showLimits ? (sp.usl ?? md.usl) : null,
             binNames: binNamesRef.current,
@@ -129,19 +135,36 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
   if (loading) return <div className="chart-placeholder">Loading {candidates.length} wafer maps…</div>;
   if (maps.length === 0) return <div className="chart-placeholder">No wafers match the current filters.</div>;
 
+  if (selected !== null && maps[selected]) {
+    return (
+      <MapDetailView
+        maps={maps}
+        index={selected}
+        spec={spec}
+        mode="value"
+        onIndex={setSelected}
+        onBack={() => setSelected(null)}
+      />
+    );
+  }
+
   return (
     <div className="facet-grid map-facets">
-      {maps.map((md) => {
+      {maps.map((md, i) => {
         const label = `${md.lotName} / ${md.wafer?.name ?? "?"}`;
         return (
           <div className="facet-card" key={label}>
             <div className="facet-label">
               {label} · {md.yieldPct.toFixed(1)}%
             </div>
-            <WaferMapView
-              data={md}
-              spec={{ ...spec, title: `${spec.title} · ${label}` }}
-            />
+            <div className="facet-map">
+              <WaferMapView
+                data={md}
+                spec={{ ...spec, mapMode: "value", title: `${spec.title} · ${label}` }}
+                preview
+                onOpen={() => setSelected(i)}
+              />
+            </div>
           </div>
         );
       })}

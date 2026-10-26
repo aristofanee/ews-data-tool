@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { BinOverviewResponse, BinOverviewWafer, MapResponse, PlotSpec } from "../types";
-import { renderBinOverviewImage, WaferMapRenderer, type MapOptions } from "../charts/waferMap";
+import {
+  renderBinOverviewImage,
+  renderMapImage,
+  WaferMapRenderer,
+  type MapOptions,
+} from "../charts/waferMap";
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
 import { fmtInt } from "../lib/format";
-import { WaferMapView } from "./WaferMapView";
+import { MapDetailView } from "./MapDetailView";
 
 export interface BinMapExportApi {
   toDataURL: (
@@ -34,6 +39,9 @@ function asMap(w: BinOverviewWafer): MapResponse {
     pass: w.pass,
     fail: w.fail,
     yieldPct: w.yieldPct,
+    isMean: false,
+    waferCount: 1,
+    excluded: 0,
   };
 }
 
@@ -87,7 +95,13 @@ function BinThumb({
 export function BinMapView({ data, spec, onReady }: Props) {
   const theme = useStore((s) => s.theme);
   const info = useStore((s) => s.info);
-  const [selected, setSelected] = useState<BinOverviewWafer | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
+
+  const maps = useMemo(() => data.wafers.map(asMap), [data.wafers]);
+
+  useEffect(() => {
+    if (selected !== null && selected >= maps.length) setSelected(null);
+  }, [maps.length, selected]);
 
   const binNames = useMemo(() => {
     const map: Record<number, string> = {};
@@ -110,12 +124,12 @@ export function BinMapView({ data, spec, onReady }: Props) {
   );
 
   const groups = useMemo(() => {
-    const out = new Map<string, BinOverviewWafer[]>();
-    for (const w of data.wafers) {
+    const out = new Map<string, { w: BinOverviewWafer; index: number }[]>();
+    data.wafers.forEach((w, index) => {
       const list = out.get(w.lotName) ?? [];
-      list.push(w);
+      list.push({ w, index });
       out.set(w.lotName, list);
-    }
+    });
     return [...out.entries()];
   }, [data.wafers]);
 
@@ -127,71 +141,73 @@ export function BinMapView({ data, spec, onReady }: Props) {
   specRef.current = spec;
   const optsRef = useRef(opts);
   optsRef.current = opts;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const mapsRef = useRef(maps);
+  mapsRef.current = maps;
 
   useEffect(() => {
     readyRef.current?.({
       toDataURL: (format = "jpeg", themeOverride, width = 2400, height = 1500) => {
         const d = dataRef.current;
         const sp = specRef.current;
+        const o = themeOverride ? { ...optsRef.current, theme: themeOverride } : optsRef.current;
+        const idx = selectedRef.current;
+        if (idx !== null && mapsRef.current[idx]) {
+          const md = mapsRef.current[idx];
+          const subtitle = `${md.lotName} · Wafer ${md.wafer?.name ?? "?"} · Yield ${md.yieldPct.toFixed(2)}%`;
+          return renderMapImage(
+            md,
+            { ...o, mode: "bin" },
+            width,
+            height,
+            sp.title,
+            subtitle,
+            format
+          );
+        }
         const totalPass = d.wafers.reduce((n, w) => n + w.pass, 0);
         const totalFail = d.wafers.reduce((n, w) => n + w.fail, 0);
         const tested = totalPass + totalFail;
         const yieldPct = tested ? (totalPass * 100) / tested : 0;
         const subtitle = `${d.wafers.length} wafers · Yield ${yieldPct.toFixed(2)}%`;
-        const o = themeOverride ? { ...optsRef.current, theme: themeOverride } : optsRef.current;
         return renderBinOverviewImage(d.wafers, o, width, height, sp.title, subtitle, format);
       },
     });
     return () => readyRef.current?.(null);
   }, []);
 
-  return (
-    <>
-      <div className="binmap-wrap">
-        {groups.map(([lot, wafers]) => (
-          <section className="binmap-group" key={lot}>
-            {groups.length > 1 && <h4 className="binmap-lot">{lot}</h4>}
-            <div className="binmap-grid">
-              {wafers.map((w) => (
-                <BinThumb
-                  key={`${w.wafer.lot}-${w.wafer.name}`}
-                  wafer={w}
-                  opts={opts}
-                  onOpen={() => setSelected(w)}
-                />
-              ))}
-            </div>
-          </section>
-        ))}
-        {groups.length === 0 && <div className="chart-placeholder">No wafers match the current filters.</div>}
-      </div>
+  if (selected !== null && maps[selected]) {
+    return (
+      <MapDetailView
+        maps={maps}
+        index={selected}
+        spec={spec}
+        mode="bin"
+        onIndex={setSelected}
+        onBack={() => setSelected(null)}
+      />
+    );
+  }
 
-      {selected && (
-        <div className="modal-backdrop" onClick={() => setSelected(null)}>
-          <div className="modal binmap-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-head">
-              <div>
-                <div className="modal-title">
-                  {selected.lotName} / {selected.wafer.name}
-                </div>
-                <div className="modal-sub">
-                  Bin map · Yield {selected.yieldPct.toFixed(2)}% · {fmtInt(selected.pass)} pass ·{" "}
-                  {fmtInt(selected.fail)} fail
-                </div>
-              </div>
-              <button className="btn icon" onClick={() => setSelected(null)} title="Close">
-                ×
-              </button>
-            </div>
-            <div className="binmap-modal-body">
-              <WaferMapView
-                data={asMap(selected)}
-                spec={{ ...spec, type: "map", mapMode: "bin", title: `${spec.title} · ${selected.wafer.name}` }}
+  return (
+    <div className="binmap-wrap">
+      {groups.map(([lot, wafers]) => (
+        <section className="binmap-group" key={lot}>
+          {groups.length > 1 && <h4 className="binmap-lot">{lot}</h4>}
+          <div className="binmap-grid">
+            {wafers.map(({ w, index }) => (
+              <BinThumb
+                key={`${w.wafer.lot}-${w.wafer.name}`}
+                wafer={w}
+                opts={opts}
+                onOpen={() => setSelected(index)}
               />
-            </div>
+            ))}
           </div>
-        </div>
-      )}
-    </>
+        </section>
+      ))}
+      {groups.length === 0 && <div className="chart-placeholder">No wafers match the current filters.</div>}
+    </div>
   );
 }

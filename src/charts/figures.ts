@@ -190,6 +190,18 @@ interface LimitLines {
   annotations: any[];
 }
 
+/**
+ * Spec and control limits frequently come from the same STDF value but via
+ * different f32 fields. They can differ by a few ULPs, which is invisible on
+ * screen but used to draw two overlapping lines. Treat them as identical when
+ * they are within 1 ppm of each other.
+ */
+function sameLimit(a: number | null, b: number | null): boolean {
+  if (a === null || b === null || !Number.isFinite(a) || !Number.isFinite(b)) return false;
+  const scale = Math.max(1, Math.abs(a), Math.abs(b));
+  return Math.abs(a - b) <= 1e-6 * scale;
+}
+
 /** LSL/USL (red dashed) and control limits (yellow dotted) on a cartesian axis. */
 export function limitLines(
   t: ChartTheme,
@@ -203,6 +215,10 @@ export function limitLines(
   const shapes: any[] = [];
   const annotations: any[] = [];
   const add = (v: number, label: string, color: string, dash: "dash" | "dot") => {
+    // Plotly draws axis gridlines over "below" shapes. That cuts a horizontal
+    // limit line down the middle, so each dash looks like two parallel lines.
+    // Draw the limit above the gridline instead; the line is thin and dashed,
+    // so it still leaves the data readable.
     shapes.push({
       type: "line",
       xref: "paper",
@@ -212,7 +228,7 @@ export function limitLines(
       y0: v,
       y1: v,
       line: { color, width: style.line, dash },
-      layer: "below",
+      layer: "above",
     });
     annotations.push({
       xref: "paper",
@@ -224,25 +240,15 @@ export function limitLines(
       text: `${label} ${fmt(v)}`,
       showarrow: false,
       font: { size: style.annotation, color, family: CHART_FONT },
-      bgcolor: t.paper,
-      borderpad: Math.max(2, Math.round(style.annotation * 0.2)),
-      opacity: 0.95,
+      opacity: 1,
     });
   };
   if (lsl !== null && Number.isFinite(lsl)) add(lsl, "LSL", t.red, "dash");
   if (usl !== null && Number.isFinite(usl)) add(usl, "USL", t.red, "dash");
-  if (
-    loLimit !== null &&
-    Number.isFinite(loLimit) &&
-    (lsl === null || Math.abs(loLimit - lsl) > 1e-12)
-  ) {
+  if (loLimit !== null && Number.isFinite(loLimit) && !sameLimit(loLimit, lsl)) {
     add(loLimit, "LCL", t.yellow, "dot");
   }
-  if (
-    hiLimit !== null &&
-    Number.isFinite(hiLimit) &&
-    (usl === null || Math.abs(hiLimit - usl) > 1e-12)
-  ) {
+  if (hiLimit !== null && Number.isFinite(hiLimit) && !sameLimit(hiLimit, usl)) {
     add(hiLimit, "UCL", t.yellow, "dot");
   }
   return { shapes, annotations };
@@ -266,6 +272,8 @@ export function limitLinesX(
     dash: "dash" | "dot",
     side: "left" | "right"
   ) => {
+    // See limitLines(): draw above the gridlines so a vertical gridline
+    // cannot split each dash into two parallel lines.
     shapes.push({
       type: "line",
       xref: "x",
@@ -275,7 +283,7 @@ export function limitLinesX(
       y0: 0,
       y1: 1,
       line: { color, width: style.line, dash },
-      layer: "below",
+      layer: "above",
     });
     annotations.push({
       xref: "x",
@@ -289,25 +297,15 @@ export function limitLinesX(
       text: `${label} ${fmt(v)}`,
       showarrow: false,
       font: { size: style.annotation, color, family: CHART_FONT },
-      bgcolor: t.paper,
-      borderpad: Math.max(2, Math.round(style.annotation * 0.2)),
-      opacity: 0.95,
+      opacity: 1,
     });
   };
   if (lsl !== null && Number.isFinite(lsl)) add(lsl, "LSL", t.red, "dash", "left");
   if (usl !== null && Number.isFinite(usl)) add(usl, "USL", t.red, "dash", "right");
-  if (
-    loLimit !== null &&
-    Number.isFinite(loLimit) &&
-    (lsl === null || Math.abs(loLimit - lsl) > 1e-12)
-  ) {
+  if (loLimit !== null && Number.isFinite(loLimit) && !sameLimit(loLimit, lsl)) {
     add(loLimit, "LCL", t.yellow, "dot", "left");
   }
-  if (
-    hiLimit !== null &&
-    Number.isFinite(hiLimit) &&
-    (usl === null || Math.abs(hiLimit - usl) > 1e-12)
-  ) {
+  if (hiLimit !== null && Number.isFinite(hiLimit) && !sameLimit(hiLimit, usl)) {
     add(hiLimit, "UCL", t.yellow, "dot", "right");
   }
   return { shapes, annotations };
@@ -401,10 +399,16 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
           customdata: cd,
           showlegend: false,
           marker: {
+            // Outliers use a thin orthogonal cross; ordinary "All" points
+            // stay as small dots so dense boxes remain readable.
+            symbol: mode === "outliers" ? "cross-thin" : "circle",
             size: mode === "all" ? style.point : style.marker,
             color: line,
             opacity: ALPHA_POINT,
-            line: { width: 0 },
+            line: {
+              width: mode === "outliers" ? Math.max(0.8, style.line * 0.25) : 0,
+              color: line,
+            },
           },
           hovertemplate:
             `<b>%{y:.5~g}${units ? " " + units : ""}</b><br>` +
@@ -480,10 +484,6 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
 /* Pareto                                                              */
 /* ------------------------------------------------------------------ */
 
-function withYield(title: string, yieldPct: number): string {
-  return /yield/i.test(title) ? title : `${title} · Yield ${yieldPct.toFixed(1)}%`;
-}
-
 export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
@@ -526,7 +526,7 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
       cliponaxis: false,
     });
 
-    const layout = baseLayout(t, withYield(opts.title ?? "Fail Pareto", data.yieldPct), spec.presentation);
+    const layout = baseLayout(t, opts.title, spec.presentation);
     layout.margin = {
       ...layout.margin,
       l: style.margin.l,
@@ -614,7 +614,7 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
       "bin %{customdata[1]} · %{customdata[2]}<extra></extra>",
   });
 
-  const layout = baseLayout(t, withYield(opts.title ?? "Fail Pareto", data.yieldPct), spec.presentation);
+  const layout = baseLayout(t, opts.title, spec.presentation);
   layout.margin = {
     ...layout.margin,
     l: style.margin.l,
@@ -1034,10 +1034,13 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
     }
   }
 
-  // Least-squares line through every visible point. It is appended last and
-  // drawn in a high-contrast colour so the markers cannot hide it.
+  // Least-squares line through every visible point. Plotly draws WebGL
+  // traces in their own canvas layer, so a normal line trace can end up under
+  // the markers even when it is added last. A layout shape with
+  // layer:"above" is composited over both SVG and WebGL traces.
   const allPoints = series.flatMap((s) => s.points);
   const annotations: any[] = [];
+  let fitShape: any = null;
   if (spec.scatterFit && allPoints.length >= 2) {
     let sx = 0;
     let sy = 0;
@@ -1061,15 +1064,17 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
       const lo = Math.min(...xs);
       const hi = Math.max(...xs);
       if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) {
-        traces.push({
-          type: "scatter",
-          mode: "lines",
-          x: [lo, hi],
-          y: [intercept + slope * lo, intercept + slope * hi],
+        fitShape = {
+          type: "line",
+          xref: "x",
+          yref: "y",
+          x0: lo,
+          y0: intercept + slope * lo,
+          x1: hi,
+          y1: intercept + slope * hi,
           line: { color: t.red, width: Math.max(2.5, style.line * 2.2) },
-          hoverinfo: "skip",
-          showlegend: false,
-        });
+          layer: "above",
+        };
         if (data.r !== null && Number.isFinite(data.r)) {
           annotations.push({
             xref: "paper",
@@ -1147,6 +1152,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
       tracegroupgap: 4,
     };
   }
+  if (fitShape) layout.shapes = [...(layout.shapes ?? []), fitShape];
   if (annotations.length) layout.annotations = annotations;
   return { data: traces, layout };
 }

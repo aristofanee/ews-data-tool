@@ -1,7 +1,7 @@
 use crate::model::*;
 use crate::stats::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -304,7 +304,9 @@ fn block_for(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MapRequest {
-    pub wafer: u16,
+    /// `None` means the mean map across every selected wafer.
+    #[serde(default)]
+    pub wafer: Option<u16>,
     pub test: Option<usize>,
     pub mode: MapMode,
     #[serde(default)]
@@ -335,6 +337,12 @@ pub struct MapResponse {
     pub pass: usize,
     pub fail: usize,
     pub yield_pct: f32,
+    /// True for the all-wafer mean map.
+    pub is_mean: bool,
+    /// Number of wafers that contributed to the map.
+    pub wafer_count: usize,
+    /// Dice removed by the statistical/outlier filter.
+    pub excluded: usize,
 }
 
 #[derive(Default)]
@@ -352,24 +360,112 @@ fn majority(map: &HashMap<u16, usize>) -> u16 {
         .unwrap_or(0)
 }
 
-/// Aggregate one wafer by coordinate. Repeated coordinates (for example after
-/// merging several files or retests) become one die whose value is the mean of
-/// all finite values and whose bin is the majority bin. Value maps omit
-/// coordinates that have no measurement at all.
+/// Build a row mask for the selected test's statistical/outlier filter.
+/// The ordinary lot/wafer/bin filters are applied first. `per_wafer` decides
+/// whether each wafer gets its own limits or the whole selection is pooled.
+fn stat_keep_rows(
+    ds: &Dataset,
+    test: usize,
+    filter: &Filter,
+    wafer_scope: Option<u16>,
+) -> Option<(Vec<bool>, usize)> {
+    let sf = filter.stat.as_ref()?;
+    let col = ds.cols.get(test)?;
+    let mask = ds.base_mask(filter);
+    let mut keep = vec![true; ds.rows];
+    let mut groups: HashMap<u16, Vec<usize>> = HashMap::new();
+    let mut excluded = 0usize;
+
+    // For a single-wafer map with a pooled (not per-wafer) filter, the limits
+    // must still be computed over every selected wafer. Only per-wafer limits
+    // restrict the input rows to the wafer currently being displayed.
+    let restrict_to_scope = if sf.per_wafer { wafer_scope } else { None };
+    for r in 0..ds.rows {
+        if !mask[r] {
+            continue;
+        }
+        if let Some(w) = restrict_to_scope {
+            if ds.wafer_of_row[r] != w {
+                continue;
+            }
+        }
+        let v = col.get(r).copied().unwrap_or(f32::NAN);
+        if !v.is_finite() {
+            // Missing measurements are already omitted from a value map; do
+            // not report them as outliers.
+            keep[r] = false;
+            continue;
+        }
+        groups.entry(ds.wafer_of_row[r]).or_default().push(r);
+    }
+
+    let count_excluded = |r: usize| {
+        wafer_scope
+            .map(|w| ds.wafer_of_row[r] == w)
+            .unwrap_or(true)
+    };
+
+    if sf.per_wafer {
+        for idxs in groups.values() {
+            let vals: Vec<f32> = idxs.iter().map(|r| col[*r]).collect();
+            let allowed = keep_mask(&vals, sf);
+            for (j, r) in idxs.iter().enumerate() {
+                if !allowed[j] {
+                    keep[*r] = false;
+                    if count_excluded(*r) {
+                        excluded += 1;
+                    }
+                }
+            }
+        }
+    } else {
+        let idxs: Vec<usize> = groups.values().flatten().copied().collect();
+        let vals: Vec<f32> = idxs.iter().map(|r| col[*r]).collect();
+        let allowed = keep_mask(&vals, sf);
+        for (j, r) in idxs.iter().enumerate() {
+            if !allowed[j] {
+                keep[*r] = false;
+                if count_excluded(*r) {
+                    excluded += 1;
+                }
+            }
+        }
+    }
+    Some((keep, excluded))
+}
+
+/// Aggregate by coordinate. Repeated coordinates (for example after merging
+/// several files or retests) become one die whose value is the mean of all
+/// finite values and whose bin is the majority bin. With `wafer = None` the
+/// same aggregation runs across every wafer selected by the filter, producing
+/// the all-wafer mean map. Value maps omit coordinates with no measurement.
 fn aggregate_map(
     ds: &Dataset,
-    wafer: u16,
+    wafer: Option<u16>,
     test: Option<usize>,
     mode: MapMode,
     filter: &Filter,
-) -> (Vec<MapDie>, usize, usize, f32, f32) {
+    keep_rows: Option<&[bool]>,
+) -> (Vec<MapDie>, usize, usize, f32, f32, usize) {
     let mask = ds.base_mask(filter);
     let col = test.and_then(|t| ds.cols.get(t));
     let mut by_coord: HashMap<(i16, i16), MapAcc> = HashMap::new();
+    let mut used_wafers: HashSet<u16> = HashSet::new();
     for r in 0..ds.rows {
-        if ds.wafer_of_row[r] != wafer || !mask[r] {
+        if let Some(w) = wafer {
+            if ds.wafer_of_row[r] != w {
+                continue;
+            }
+        }
+        if !mask[r] {
             continue;
         }
+        if let Some(keep) = keep_rows {
+            if !keep.get(r).copied().unwrap_or(false) {
+                continue;
+            }
+        }
+        used_wafers.insert(ds.wafer_of_row[r]);
         let acc = by_coord.entry((ds.x[r], ds.y[r])).or_default();
         *acc.hbin_counts.entry(ds.hbin[r]).or_insert(0) += 1;
         *acc.sbin_counts.entry(ds.sbin[r]).or_insert(0) += 1;
@@ -420,38 +516,68 @@ fn aggregate_map(
         vmin = f32::NAN;
         vmax = f32::NAN;
     }
-    (dice, pass, fail, vmin, vmax)
+    (dice, pass, fail, vmin, vmax, used_wafers.len())
 }
 
 pub fn wafer_map(ds: &Dataset, req: &MapRequest) -> MapResponse {
-    let w = ds.wafers.get(req.wafer as usize).cloned();
     let test = req.test.and_then(|t| ds.tests.get(t).cloned());
-    if w.is_none() {
-        return MapResponse {
-            wafer: None,
-            lot_name: String::new(),
-            dice: Vec::new(),
-            test,
-            lsl: None,
-            usl: None,
-            vmin: f32::NAN,
-            vmax: f32::NAN,
-            pass: 0,
-            fail: 0,
-            yield_pct: 0.0,
-        };
-    }
-    let (dice, pass, fail, vmin, vmax) =
-        aggregate_map(ds, req.wafer, req.test, req.mode, &req.filter);
+    let keep = if req.mode == MapMode::Value {
+        req.test
+            .and_then(|t| stat_keep_rows(ds, t, &req.filter, req.wafer))
+    } else {
+        None
+    };
+    let excluded = keep.as_ref().map(|(_, n)| *n).unwrap_or(0);
+    let keep_ref = keep.as_ref().map(|(mask, _)| mask.as_slice());
+    let (dice, pass, fail, vmin, vmax, wafer_count) =
+        aggregate_map(ds, req.wafer, req.test, req.mode, &req.filter, keep_ref);
+
+    let is_mean = req.wafer.is_none();
     let tested = pass + fail;
     let lsl = test.as_ref().and_then(|t| t.lo_spec);
     let usl = test.as_ref().and_then(|t| t.hi_spec);
+
+    let (wafer, lot_name) = if let Some(wi) = req.wafer {
+        match ds.wafers.get(wi as usize) {
+            Some(w) => (Some(w.clone()), ds.lot_name(w.lot).to_string()),
+            None => (None, String::new()),
+        }
+    } else {
+        // Reuse the first selected wafer's physical geometry (die size,
+        // diameter, notch) for the synthetic mean-map wafer.
+        let first = ds
+            .wafers
+            .iter()
+            .enumerate()
+            .find(|(i, w)| {
+                (req.filter.wafers.is_empty() || req.filter.wafers.contains(&(*i as u16)))
+                    && (req.filter.lots.is_empty() || req.filter.lots.contains(&w.lot))
+            })
+            .map(|(_, w)| w.clone());
+        let mut wf = first;
+        if let Some(w) = wf.as_mut() {
+            w.name = "All wafers (mean)".to_string();
+            w.dice = dice.len();
+            if !dice.is_empty() {
+                w.x_min = dice.iter().map(|d| d.x).min().unwrap_or(w.x_min);
+                w.x_max = dice.iter().map(|d| d.x).max().unwrap_or(w.x_max);
+                w.y_min = dice.iter().map(|d| d.y).min().unwrap_or(w.y_min);
+                w.y_max = dice.iter().map(|d| d.y).max().unwrap_or(w.y_max);
+            }
+        }
+        (
+            wf,
+            if dice.is_empty() {
+                String::new()
+            } else {
+                "All wafers".to_string()
+            },
+        )
+    };
+
     MapResponse {
-        lot_name: w
-            .as_ref()
-            .map(|w| ds.lot_name(w.lot).to_string())
-            .unwrap_or_default(),
-        wafer: w,
+        wafer,
+        lot_name,
         dice,
         test,
         lsl,
@@ -465,6 +591,9 @@ pub fn wafer_map(ds: &Dataset, req: &MapRequest) -> MapResponse {
         } else {
             0.0
         },
+        is_mean,
+        wafer_count,
+        excluded,
     }
 }
 
@@ -497,8 +626,8 @@ pub struct BinOverviewResponse {
 pub fn bin_overview(ds: &Dataset, req: &BinOverviewRequest) -> BinOverviewResponse {
     let mut wafers = Vec::new();
     for (wi, w) in ds.wafers.iter().enumerate() {
-        let (dice, pass, fail, _, _) =
-            aggregate_map(ds, wi as u16, None, MapMode::Bin, &req.filter);
+        let (dice, pass, fail, _, _, _) =
+            aggregate_map(ds, Some(wi as u16), None, MapMode::Bin, &req.filter, None);
         if dice.is_empty() {
             continue;
         }
@@ -820,31 +949,6 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
             pass: false,
         });
     }
-    // The pass bin is always part of the global overview, so the percentages
-    // are against every tested die rather than only failures.
-    let mut pass_bars: Vec<(u16, usize)> = counts
-        .iter()
-        .filter(|(code, _)| is_pass(**code))
-        .map(|(code, count)| (*code, *count))
-        .collect();
-    pass_bars.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    for (code, count) in pass_bars {
-        bars.push(ParetoBar {
-            code,
-            name: match req.category {
-                BinCategory::Hard => ds.bin_name(true, code),
-                BinCategory::Soft => ds.bin_name(false, code),
-            },
-            count,
-            pct: if total > 0 {
-                count as f32 * 100.0 / total as f32
-            } else {
-                0.0
-            },
-            pass: true,
-        });
-    }
-
     ParetoResponse {
         mode: ParetoMode::Global,
         bars,
@@ -1428,6 +1532,7 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{StatFilter, StatKind, TestInfo, WaferInfo};
     use crate::stdf::import_stdf;
 
     fn demo_dataset() -> Option<Dataset> {
@@ -1466,7 +1571,7 @@ mod tests {
         let mp = wafer_map(
             &ds,
             &MapRequest {
-                wafer: 0,
+                wafer: Some(0),
                 test: Some(test),
                 mode: MapMode::Value,
                 filter: filter.clone(),
@@ -1475,6 +1580,21 @@ mod tests {
         assert!(!mp.dice.is_empty(), "map dice");
         assert_eq!(mp.pass + mp.fail, mp.dice.len(), "map pass+fail");
         assert!(mp.pass > 0, "map pass count");
+        assert!(!mp.is_mean, "single wafer map is not the mean map");
+
+        let all = wafer_map(
+            &ds,
+            &MapRequest {
+                wafer: None,
+                test: Some(test),
+                mode: MapMode::Value,
+                filter: filter.clone(),
+            },
+        );
+        assert!(all.is_mean, "all-wafer map is the mean map");
+        assert!(all.wafer_count >= 1, "all-wafer map has wafers");
+        assert!(!all.dice.is_empty(), "all-wafer map dice");
+        assert_eq!(all.pass + all.fail, all.dice.len(), "all-wafer pass+fail");
 
         let pa = pareto(
             &ds,
@@ -1486,7 +1606,7 @@ mod tests {
             },
         );
         assert!(!pa.bars.is_empty(), "pareto bars");
-        assert!(pa.bars.iter().any(|b| b.pass), "pareto includes pass");
+        assert!(pa.bars.iter().all(|b| !b.pass), "pareto excludes pass bins");
         assert!(pa.bars.iter().all(|b| !b.name.is_empty()), "pareto names");
         assert_eq!(pa.mode, ParetoMode::Global);
         assert!(pa.yield_pct >= 0.0 && pa.yield_pct <= 100.0);
@@ -1609,5 +1729,107 @@ mod tests {
             !ds2.custom_cols.iter().any(|c| c.name == "Empty"),
             "empty custom column cleanup"
         );
+    }
+
+    #[test]
+    fn pooled_outlier_limits_span_selected_wafers_for_single_map() {
+        let mut ds = Dataset::new();
+        ds.lots = vec!["L".to_string()];
+        ds.wafers = vec![
+            WaferInfo {
+                lot: 0,
+                name: "W1".to_string(),
+                dice: 5,
+                x_min: 0,
+                x_max: 4,
+                y_min: 0,
+                y_max: 0,
+                diameter_mm: None,
+                die_w_mm: None,
+                die_h_mm: None,
+                center_x: None,
+                center_y: None,
+                flat: None,
+            },
+            WaferInfo {
+                lot: 0,
+                name: "W2".to_string(),
+                dice: 5,
+                x_min: 0,
+                x_max: 4,
+                y_min: 0,
+                y_max: 0,
+                diameter_mm: None,
+                die_w_mm: None,
+                die_h_mm: None,
+                center_x: None,
+                center_y: None,
+                flat: None,
+            },
+        ];
+        ds.rows = 10;
+        ds.lot_of_row = vec![0; 10];
+        ds.wafer_of_row = vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1];
+        ds.x = vec![0, 1, 2, 3, 4, 0, 1, 2, 3, 4];
+        ds.y = vec![0; 10];
+        ds.hbin = vec![1; 10];
+        ds.sbin = vec![1; 10];
+        let mut test = TestInfo::new("V");
+        test.count = 10;
+        ds.tests = vec![test];
+        ds.cols = vec![vec![0.0, 0.0, 0.0, 0.0, 100.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0]];
+
+        let filter = Filter {
+            stat: Some(StatFilter {
+                kind: StatKind::Sigma,
+                k: 1.0,
+                per_wafer: false,
+            }),
+            ..Filter::default()
+        };
+        let pooled = wafer_map(
+            &ds,
+            &MapRequest {
+                wafer: Some(0),
+                test: Some(0),
+                mode: MapMode::Value,
+                filter: filter.clone(),
+            },
+        );
+        assert_eq!(
+            pooled.dice.len(),
+            5,
+            "pooled limits must use both selected wafers"
+        );
+        assert_eq!(pooled.excluded, 0, "no wafer-0 die is a pooled outlier");
+
+        let mut per_wafer_filter = filter.clone();
+        per_wafer_filter.stat.as_mut().unwrap().per_wafer = true;
+        let per_wafer = wafer_map(
+            &ds,
+            &MapRequest {
+                wafer: Some(0),
+                test: Some(0),
+                mode: MapMode::Value,
+                filter: per_wafer_filter,
+            },
+        );
+        assert_eq!(per_wafer.dice.len(), 4, "wafer-0 limits drop the 100 value");
+        assert_eq!(per_wafer.excluded, 1);
+
+        let mean = wafer_map(
+            &ds,
+            &MapRequest {
+                wafer: None,
+                test: Some(0),
+                mode: MapMode::Value,
+                filter,
+            },
+        );
+        assert!(mean.is_mean);
+        assert_eq!(mean.wafer_count, 2);
+        assert_eq!(mean.dice.len(), 5, "one mean die per coordinate");
+        let at_zero = mean.dice.iter().find(|d| d.x == 0).unwrap();
+        assert!((at_zero.v - 500.0).abs() < 1e-3, "mean of 0 and 1000");
     }
 }

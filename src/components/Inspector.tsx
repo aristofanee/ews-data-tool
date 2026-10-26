@@ -209,9 +209,12 @@ export function Inspector() {
           <Row label="Wafer">
             <select
               className="input"
-              value={spec.mapWafer ?? 0}
-              onChange={(e) => patch({ mapWafer: Number(e.target.value) })}
+              value={spec.mapWafer === null ? "" : String(spec.mapWafer)}
+              onChange={(e) =>
+                patch({ mapWafer: e.target.value === "" ? null : Number(e.target.value) })
+              }
             >
+              <option value="">All wafers (mean)</option>
               {info.lots.map((lot, li) => (
                 <optgroup key={li} label={lot}>
                   {info.wafers.map((w, wi) =>
@@ -231,39 +234,28 @@ export function Inspector() {
             onChange={(v) => patch({ splitPlots: v })}
           />
           <div className="hint">
-            Split maps show every wafer matching the filters and export as a report cluster. The
-            Wafer selector is used when the split is off.
+            The default map averages every wafer matching the filters die by die. Split maps show
+            one full map per wafer and export as a report cluster. The Wafer selector is used when
+            the split is off.
           </div>
-          <Row label="Colour">
-            <Seg
-              value={spec.mapMode}
-              options={[
-                { v: "value", label: "Value" },
-                { v: "bin", label: "Bin" },
-              ]}
-              onChange={(v) => patch({ mapMode: v })}
-            />
-          </Row>
-          {spec.mapMode === "value" && (
-            <>
-              <div className="field">
-                <span className="field-label">Palette</span>
-              </div>
-              <select
-                className="input"
-                value={spec.palette}
-                onChange={(e) => patch({ palette: e.target.value })}
-              >
-                {PALETTES.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-              <div className="palette-preview" style={{ background: paletteGradient(spec.palette) }} />
-            </>
-          )}
-          <div className="hint">Hover a die for its value, bin and coordinates. Scroll to zoom.</div>
+          <div className="field">
+            <span className="field-label">Palette</span>
+          </div>
+          <select
+            className="input"
+            value={spec.palette}
+            onChange={(e) => patch({ palette: e.target.value })}
+          >
+            {PALETTES.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+          <div className="palette-preview" style={{ background: paletteGradient(spec.palette) }} />
+          <div className="hint">
+            Hover a die for its value, bin and coordinates. Pinch or scroll to zoom.
+          </div>
         </Section>
       )}
 
@@ -313,7 +305,7 @@ export function Inspector() {
             </select>
           </Row>
           <div className="hint">
-            Global mode includes the pass bin and shows percentages of all tested dice. Grouped
+            Global mode shows the failing bins only, with percentages of all tested dice. Grouped
             mode stacks non-pass bins and puts good-bin yield on a secondary axis.
           </div>
         </Section>

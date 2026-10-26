@@ -172,7 +172,7 @@ export const useStore = create<AppState>((set, get) => ({
       let spec: PlotSpec = {
         ...prev.spec,
         test,
-        mapWafer: wafer !== null && wafer < info.wafers.length ? wafer : 0,
+        mapWafer: wafer !== null && wafer < info.wafers.length ? wafer : null,
       };
       const hasColumn = (name: string) => info.customColumns.some((c) => c.name === name);
       if (spec.blockCol && spec.blockCol !== "__wafer" && !hasColumn(spec.blockCol)) {
@@ -223,7 +223,8 @@ export const useStore = create<AppState>((set, get) => ({
       return;
     }
     const test = s.info?.tests[s.spec.test ?? -1] ?? null;
-    set({ spec: { ...s.spec, type, title: autoTitle(test, type) } });
+    const mapMode = type === "map" ? ("value" as const) : s.spec.mapMode;
+    set({ spec: { ...s.spec, type, mapMode, title: autoTitle(test, type) } });
   },
   patchSpec: (p) => {
     const s = get();

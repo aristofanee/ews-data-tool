@@ -18,6 +18,16 @@ export function fmtInt(v: number | null | undefined): string {
   return Math.round(v).toLocaleString("en-US");
 }
 
+/**
+ * Map values are often integer measurements (device number, step count, ...).
+ * Avoid the misleading "21.000" while keeping fractional means readable.
+ */
+export function fmtMap(v: number | null | undefined, digits = 4): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "–";
+  if (Number.isInteger(v)) return fmtInt(v);
+  return fmt(v, digits);
+}
+
 export function pct(v: number, digits = 2): string {
   return `${v.toFixed(digits)}%`;
 }

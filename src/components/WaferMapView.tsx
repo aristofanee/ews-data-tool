@@ -3,7 +3,7 @@ import type { MapResponse, PlotSpec } from "../types";
 import { renderMapImage, WaferMapRenderer, type MapHit, type MapOptions } from "../charts/waferMap";
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
-import { fmt, fmtInt, tidyName } from "../lib/format";
+import { fmtInt, fmtMap, tidyName } from "../lib/format";
 
 export interface MapExportApi {
   toDataURL: (
@@ -18,9 +18,16 @@ interface Props {
   data: MapResponse;
   spec: PlotSpec;
   onReady?: (api: MapExportApi | null) => void;
+  /** When set, a click that is not a pan opens the enlarged map. */
+  onOpen?: () => void;
+  /**
+   * Mosaic thumbnail mode: no legend, hover or zoom. Wheel/trackpad gestures
+   * fall through to the scroll container, and a click opens the detail view.
+   */
+  preview?: boolean;
 }
 
-export function WaferMapView({ data, spec, onReady }: Props) {
+export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: Props) {
   const theme = useStore((s) => s.theme);
   const info = useStore((s) => s.info);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -44,7 +51,8 @@ export function WaferMapView({ data, spec, onReady }: Props) {
       lsl: spec.showLimits ? (spec.lsl ?? data.lsl) : null,
       usl: spec.showLimits ? (spec.usl ?? data.usl) : null,
       binNames,
-      presentation: spec.presentation,
+      presentation: preview ? false : spec.presentation,
+      showLegend: preview ? false : undefined,
     }),
     [
       theme,
@@ -54,6 +62,7 @@ export function WaferMapView({ data, spec, onReady }: Props) {
       spec.lsl,
       spec.usl,
       spec.presentation,
+      preview,
       data.lsl,
       data.usl,
       binNames,
@@ -68,6 +77,8 @@ export function WaferMapView({ data, spec, onReady }: Props) {
   specRef.current = spec;
   const readyRef = useRef(onReady);
   readyRef.current = onReady;
+  const previewRef = useRef(preview);
+  previewRef.current = preview;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -84,8 +95,20 @@ export function WaferMapView({ data, spec, onReady }: Props) {
     ro.observe(wrap);
 
     const onWheel = (e: WheelEvent) => {
+      // In a mosaic preview the wheel belongs to the scroll container. Do not
+      // preventDefault here or the page cannot scroll past the thumbnails.
+      // A ctrl+wheel pinch is still swallowed so it cannot browser-zoom the
+      // whole app while the pointer happens to be over a thumbnail.
+      if (previewRef.current) {
+        if (e.ctrlKey) e.preventDefault();
+        return;
+      }
       e.preventDefault();
-      r.zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.18 : 1 / 1.18);
+      // Chromium/WebView2 reports trackpad pinch gestures as wheel events
+      // with ctrlKey set. Use a continuous exponential factor so both a pinch
+      // and a high-resolution wheel feel smooth instead of jumping 18%.
+      const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025));
+      r.zoomAt(e.clientX, e.clientY, Math.min(2, Math.max(0.5, factor)));
       setZoom(r.getZoom());
       setHover(null);
     };
@@ -96,10 +119,11 @@ export function WaferMapView({ data, spec, onReady }: Props) {
         const d = dataRef.current;
         const sp = specRef.current;
         const test = d.test ? tidyName(d.test.name) : "";
+        const scope = d.isMean
+          ? `All wafers (mean) · ${d.waferCount} wafer${d.waferCount === 1 ? "" : "s"}`
+          : `${d.lotName} · Wafer ${d.wafer?.name ?? "?"}`;
         const subtitle =
-          `${d.lotName} · Wafer ${d.wafer?.name ?? "?"}` +
-          (test ? ` · ${test}` : "") +
-          ` · Yield ${d.yieldPct.toFixed(2)}%`;
+          scope + (test ? ` · ${test}` : "") + ` · Yield ${d.yieldPct.toFixed(2)}%`;
         const opts = themeOverride
           ? { ...optsRef.current, theme: themeOverride }
           : optsRef.current;
@@ -138,14 +162,17 @@ export function WaferMapView({ data, spec, onReady }: Props) {
       const dy = e.clientY - drag.y;
       if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
       if (drag.moved) {
-        r.panBy(dx, dy);
-        drag.x = e.clientX;
-        drag.y = e.clientY;
-        setZoom(r.getZoom());
-        setHover(null);
+        if (!preview) {
+          r.panBy(dx, dy);
+          drag.x = e.clientX;
+          drag.y = e.clientY;
+          setZoom(r.getZoom());
+          setHover(null);
+        }
         return;
       }
     }
+    if (preview) return;
     const hit = r.hitTest(e.clientX, e.clientY);
     r.setHover(hit?.die ?? null);
     setHover(hit);
@@ -156,6 +183,12 @@ export function WaferMapView({ data, spec, onReady }: Props) {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
+  const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const moved = dragRef.current?.moved ?? false;
+    endDrag(e);
+    if (!moved && onOpen) onOpen();
+  };
+
   const onLeave = () => {
     dragRef.current = null;
     rendererRef.current?.setHover(null);
@@ -163,6 +196,7 @@ export function WaferMapView({ data, spec, onReady }: Props) {
   };
 
   const onDoubleClick = () => {
+    if (preview) return;
     rendererRef.current?.resetView();
     setZoom(1);
     setHover(null);
@@ -190,10 +224,10 @@ export function WaferMapView({ data, spec, onReady }: Props) {
     <div className="map-wrap" ref={wrapRef}>
       <canvas
         ref={canvasRef}
-        className="map-canvas"
+        className={`map-canvas${preview ? " preview" : ""}`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
-        onPointerUp={endDrag}
+        onPointerUp={onPointerUp}
         onPointerCancel={endDrag}
         onPointerLeave={onLeave}
         onDoubleClick={onDoubleClick}
@@ -211,7 +245,7 @@ export function WaferMapView({ data, spec, onReady }: Props) {
           </div>
           {spec.mapMode === "value" ? (
             <div className="map-tip-value">
-              {fmt(hover.die.v)} <span>{units}</span>
+              {fmtMap(hover.die.v)} <span>{units}</span>
             </div>
           ) : (
             <div className="map-tip-value">
@@ -226,11 +260,14 @@ export function WaferMapView({ data, spec, onReady }: Props) {
           {outOfSpec && <div className="map-tip-flag">Out of spec</div>}
         </div>
       )}
-      <div className="map-hint">
-        Scroll to zoom · drag to pan · double-click to reset
-        {emptyCount > 0 ? ` · ${fmtInt(emptyCount)} dice without data` : ""}
-        {zoom > 1.01 ? ` · ${zoom.toFixed(1)}×` : ""}
-      </div>
+      {!preview && (
+        <div className="map-hint">
+          Pinch or scroll to zoom · drag to pan · double-click to reset
+          {data.isMean ? ` · mean of ${fmtInt(data.waferCount)} wafers` : ""}
+          {emptyCount > 0 ? ` · ${fmtInt(emptyCount)} dice without data` : ""}
+          {zoom > 1.01 ? ` · ${zoom.toFixed(1)}×` : ""}
+        </div>
+      )}
     </div>
   );
 }

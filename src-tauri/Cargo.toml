@@ -1,6 +1,6 @@
 [package]
 name = "ews-data-tool"
-version = "0.3.2"
+version = "0.3.3"
 description = "EWS Data Tool - wafer sort data exploration and reporting"
 edition = "2021"
 rust-version = "1.85"

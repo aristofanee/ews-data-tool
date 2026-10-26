@@ -97,20 +97,34 @@ try {
     await page.waitForTimeout(1000);
   };
 
-  // Bin map tab and enlarged modal.
+  // Bin map tab and the shared full-size map detail view.
   await tab("Bin map");
   await page.waitForSelector(".binmap-tile", { timeout: 60000 });
   out.binMapTiles = await page.locator(".binmap-tile").count();
   await page.screenshot({ path: `${shotDir}\\v3-01-binmap.png` });
   await page.locator(".binmap-open").first().click();
-  await page.waitForSelector(".binmap-modal", { timeout: 30000 });
-  out.binMapModal = await page.locator(".binmap-modal").isVisible();
-  await page.screenshot({ path: `${shotDir}\\v3-02-binmap-modal.png` });
-  await page.locator(".binmap-modal .modal-head button[title=Close]").click();
-  await page.waitForSelector(".binmap-modal", { state: "detached" });
+  await page.waitForSelector(".map-detail", { timeout: 30000 });
+  out.binMapDetail = await page.locator(".map-detail-title").innerText();
+  out.binMapStats = await page.locator(".map-detail-stats").innerText();
+  await page.screenshot({ path: `${shotDir}\\v3-02-binmap-detail.png` });
+  const binDetailFirst = out.binMapDetail;
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(250);
+  out.binMapNext = await page.locator(".map-detail-title").innerText();
+  await page.keyboard.press("ArrowLeft");
+  await page.waitForTimeout(250);
+  out.binMapBackToFirst = (await page.locator(".map-detail-title").innerText()) === binDetailFirst;
+  await page.locator(".map-detail-back").click();
+  await page.waitForSelector(".binmap-tile", { timeout: 30000 });
 
-  // Split value maps.
+  // Wafer map defaults to the all-wafer mean, then split value maps.
   await tab("Wafer map");
+  await page.waitForSelector(".map-wrap", { timeout: 60000 });
+  out.meanMapHint = await page.locator(".map-hint").innerText();
+  out.meanMapScope = await page
+    .locator(".stats .stat", { hasText: "Scope" })
+    .innerText()
+    .catch(() => null);
   const mapSection = page.locator(".insp-section", { hasText: "Wafer map" });
   await mapSection
     .locator("label.check-row", { hasText: "Split into one map per wafer" })
@@ -119,6 +133,11 @@ try {
   await page.waitForSelector(".map-facets .facet-card", { timeout: 60000 });
   out.mapFacets = await page.locator(".map-facets .facet-card").count();
   await page.screenshot({ path: `${shotDir}\\v3-03-map-split.png` });
+  await page.locator(".map-facets .facet-map canvas").first().click();
+  await page.waitForSelector(".map-detail", { timeout: 30000 });
+  out.mapSplitDetail = await page.locator(".map-detail-title").innerText();
+  await page.locator(".map-detail-back").click();
+  await page.waitForSelector(".map-facets .facet-card", { timeout: 30000 });
 
   // Add split maps to the report and generate a cluster.
   await page.locator('button[title="Add this plot to the report"]').click();

@@ -584,19 +584,23 @@ export async function boxPlot(req: {
 }
 
 export async function waferMap(req: {
-  wafer: number;
+  wafer: number | null;
   test: number | null;
   mode: "value" | "bin";
   filter: Filter;
 }): Promise<MapResponse> {
   const ds = dataset();
-  const w = ds.wafers.find((x) => x.index === req.wafer);
-  if (!w) {
+  const selected =
+    req.wafer !== null
+      ? ds.wafers.filter((w) => w.index === req.wafer && waferAllowed(w, req.filter))
+      : ds.wafers.filter((w) => waferAllowed(w, req.filter));
+  const isMean = req.wafer === null;
+  if (selected.length === 0) {
     return delay({
       wafer: null,
       lotName: "",
       dice: [],
-      test: null,
+      test: req.test !== null ? ds.tests[req.test] : null,
       lsl: null,
       usl: null,
       vmin: NaN,
@@ -604,15 +608,102 @@ export async function waferMap(req: {
       pass: 0,
       fail: 0,
       yieldPct: 0,
+      isMean,
+      waferCount: 0,
+      excluded: 0,
     });
   }
+
+  const test = req.test !== null ? ds.tests[req.test] : null;
+  const colOf = (w: MockWafer) => (req.test !== null ? w.cols[req.test] : undefined);
+  const rowW: MockWafer[] = [];
+  const rowI: number[] = [];
+  for (const w of selected) {
+    for (let i = 0; i < w.x.length; i++) {
+      if (binAllowed(w, i, req.filter)) {
+        rowW.push(w);
+        rowI.push(i);
+      }
+    }
+  }
+
+  const rowKeep = rowW.map(() => true);
+  let excluded = 0;
+  if (req.mode === "value" && req.filter.stat && req.test !== null) {
+    const sf = req.filter.stat;
+    const valuesFor = (idxs: number[]) => {
+      const vals: number[] = [];
+      for (const j of idxs) {
+        const v = colOf(rowW[j])?.[rowI[j]] ?? NaN;
+        if (Number.isFinite(v)) vals.push(v);
+      }
+      return vals;
+    };
+    if (sf.perWafer) {
+      for (const w of selected) {
+        const idxs = rowW.map((rw, j) => (rw === w ? j : -1)).filter((j) => j >= 0);
+        const allowed = keepMask(valuesFor(idxs), sf.kind, sf.k);
+        let k = 0;
+        for (const j of idxs) {
+          const v = colOf(rowW[j])?.[rowI[j]] ?? NaN;
+          if (!Number.isFinite(v)) {
+            rowKeep[j] = false;
+            continue;
+          }
+          if (!allowed[k++]) {
+            rowKeep[j] = false;
+            excluded++;
+          }
+        }
+      }
+    } else {
+      // Pooled limits are computed over every selected wafer, even when the
+      // map request itself is for a single wafer.
+      const pool =
+        req.wafer === null
+          ? selected
+          : ds.wafers.filter((w) => waferAllowed(w, req.filter));
+      const poolVals: number[] = [];
+      const poolKeys: string[] = [];
+      for (const w of pool) {
+        const col = colOf(w);
+        if (!col) continue;
+        for (let i = 0; i < w.x.length; i++) {
+          if (!binAllowed(w, i, req.filter)) continue;
+          const v = col[i];
+          if (Number.isFinite(v)) {
+            poolVals.push(v);
+            poolKeys.push(`${w.index}:${i}`);
+          }
+        }
+      }
+      const allowed = keepMask(poolVals, sf.kind, sf.k);
+      const allowedKeys = new Set<string>();
+      allowed.forEach((ok, i) => {
+        if (ok) allowedKeys.add(poolKeys[i]);
+      });
+      for (let j = 0; j < rowW.length; j++) {
+        const v = colOf(rowW[j])?.[rowI[j]] ?? NaN;
+        if (!Number.isFinite(v)) {
+          rowKeep[j] = false;
+          continue;
+        }
+        if (!allowedKeys.has(`${rowW[j].index}:${rowI[j]}`)) {
+          rowKeep[j] = false;
+          excluded++;
+        }
+      }
+    }
+  }
+
   const byCoord = new Map<
     string,
     { x: number; y: number; sum: number; n: number; hb: Map<number, number>; sb: Map<number, number> }
   >();
-  const col = req.test !== null ? w.cols[req.test] : undefined;
-  for (let i = 0; i < w.x.length; i++) {
-    if (!binAllowed(w, i, req.filter)) continue;
+  for (let j = 0; j < rowW.length; j++) {
+    if (!rowKeep[j]) continue;
+    const w = rowW[j];
+    const i = rowI[j];
     const key = `${w.x[i]},${w.y[i]}`;
     let acc = byCoord.get(key);
     if (!acc) {
@@ -621,12 +712,13 @@ export async function waferMap(req: {
     }
     acc.hb.set(w.hbin[i], (acc.hb.get(w.hbin[i]) ?? 0) + 1);
     acc.sb.set(w.sbin[i], (acc.sb.get(w.sbin[i]) ?? 0) + 1);
-    const v = col ? col[i] : NaN;
+    const v = colOf(w)?.[i] ?? NaN;
     if (req.mode === "value" && Number.isFinite(v)) {
       acc.sum += v;
       acc.n++;
     }
   }
+
   const majority = (m: Map<number, number>) =>
     [...m.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0;
   const dice = [...byCoord.values()]
@@ -651,10 +743,24 @@ export async function waferMap(req: {
     if (d.hbin === 1) pass++;
     else fail++;
   }
-  const test = req.test !== null ? ds.tests[req.test] : null;
+
+  const first = selected[0];
+  const baseWafer = ds.info.wafers[first.index];
+  const wafer = isMean
+    ? {
+        ...baseWafer,
+        name: "All wafers (mean)",
+        dice: dice.length,
+        xMin: dice.length ? Math.min(...dice.map((d) => d.x)) : baseWafer.xMin,
+        xMax: dice.length ? Math.max(...dice.map((d) => d.x)) : baseWafer.xMax,
+        yMin: dice.length ? Math.min(...dice.map((d) => d.y)) : baseWafer.yMin,
+        yMax: dice.length ? Math.max(...dice.map((d) => d.y)) : baseWafer.yMax,
+      }
+    : baseWafer;
+
   return delay({
-    wafer: ds.info.wafers[w.index],
-    lotName: ds.lots[w.lot],
+    wafer,
+    lotName: isMean ? "All wafers" : ds.lots[first.lot],
     dice,
     test,
     lsl: test?.loSpec ?? null,
@@ -664,6 +770,9 @@ export async function waferMap(req: {
     pass,
     fail,
     yieldPct: pass + fail > 0 ? (pass * 100) / (pass + fail) : 0,
+    isMean,
+    waferCount: selected.length,
+    excluded,
   });
 }
 
@@ -840,17 +949,6 @@ export async function pareto(req: {
       count: others,
       pct: total ? (others * 100) / total : 0,
       pass: false,
-    });
-  }
-  for (const [code, count] of [...counts.entries()]
-    .filter(([code]) => passOf(code))
-    .sort((a, b) => b[1] - a[1] || a[0] - b[0])) {
-    bars.push({
-      code,
-      name: nameOf(code),
-      count,
-      pct: total ? (count * 100) / total : 0,
-      pass: true,
     });
   }
   return delay({

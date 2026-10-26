@@ -81,9 +81,9 @@ export function usePlotData(): PlotDataState {
             result = {
               kind: "map",
               data: await api.waferMap({
-                wafer: spec.mapWafer ?? 0,
+                wafer: spec.mapWafer,
                 test: spec.test,
-                mode: spec.mapMode,
+                mode: "value",
                 filter: filters,
               }),
             };

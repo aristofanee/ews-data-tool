@@ -11,7 +11,7 @@ import { CsvMappingDialog } from "./components/CsvMappingDialog";
 import { StatusBar, ErrorBanner, ProgressOverlay, Toast } from "./components/StatusBar";
 import type { PlotType } from "./types";
 
-const PLOT_KEYS: PlotType[] = ["box", "map", "binmap", "pareto", "hist", "trend", "scatter"];
+const PLOT_KEYS: PlotType[] = ["box", "map", "hist", "scatter", "trend", "binmap", "pareto"];
 
 export default function App() {
   const theme = useStore((s) => s.theme);

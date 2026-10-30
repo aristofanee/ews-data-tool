@@ -1,5 +1,5 @@
 import Plotly from "plotly.js-dist-min";
-import type { BinOverviewWafer, DatasetInfo, MapResponse, ReportItem } from "../types";
+import type { DatasetInfo, MapResponse, ReportItem } from "../types";
 import type { Theme } from "./theme";
 import * as api from "./api";
 import { EXPORT_CONFIG } from "../charts/plotlyTheme";
@@ -11,8 +11,14 @@ import {
   figureTrend,
   type Figure,
 } from "../charts/figures";
-import { renderBinOverviewImage, renderMapImage, type MapOptions } from "../charts/waferMap";
+import {
+  mapColorLimits,
+  renderBinOverviewImage,
+  renderMapImage,
+  type MapOptions,
+} from "../charts/waferMap";
 import { safeName, testLabel, testLabelWithUnits, tidyName } from "./format";
+import { dataGroups } from "./grouping";
 import { useStore } from "../store";
 
 export interface ReportResult {
@@ -135,8 +141,15 @@ export async function generateReport(opts: {
   const theme: Theme = "light";
   const entries: { file: string; title: string; subtitle: string; cluster?: string }[] = [];
   const files: string[] = [];
-  const binNames: Record<number, string> = {};
-  for (const b of info.hbins) binNames[b.code] = b.name;
+  const binNamesFor = (category: "hard" | "soft") => {
+    const out: Record<number, string> = {};
+    for (const b of category === "soft" ? info.sbins : info.hbins) out[b.code] = b.name;
+    return out;
+  };
+  const binPassFor = (category: "hard" | "soft") =>
+    (category === "soft" ? info.sbins : info.hbins)
+      .filter((b) => b.pass)
+      .map((b) => b.code);
   let imageNo = 0;
 
   const addImage = async (
@@ -154,13 +167,18 @@ export async function generateReport(opts: {
   };
 
   const mapImage = (md: MapResponse, title: string, spec: ReportItem["spec"]): string => {
+    const limits = mapColorLimits(spec, md);
     const mapOpts: MapOptions = {
       theme,
       palette: spec.palette,
       mode: "value",
       lsl: spec.showLimits ? (spec.lsl ?? md.lsl) : null,
       usl: spec.showLimits ? (spec.usl ?? md.usl) : null,
-      binNames,
+      binNames: binNamesFor(spec.binCategory),
+      binCategory: spec.binCategory,
+      binPass: binPassFor(spec.binCategory),
+      vmin: limits.vmin,
+      vmax: limits.vmax,
       presentation: spec.presentation,
     };
     const scope = md.isMean
@@ -181,78 +199,98 @@ export async function generateReport(opts: {
     const test = spec.test !== null ? info.tests[spec.test] : null;
 
     if (spec.type === "binmap") {
-      const d = await api.binOverview({ filter: item.filters });
+      const d = await api.binOverview({ filter: item.filters, category: spec.binCategory });
       const base: MapOptions = {
         theme,
         palette: spec.palette,
         mode: "bin",
         lsl: null,
         usl: null,
-        binNames,
+        binNames: binNamesFor(spec.binCategory),
+        binCategory: spec.binCategory,
+        binPass: binPassFor(spec.binCategory),
         presentation: spec.presentation,
       };
-      if (spec.splitPlots) {
-        const lots = new Map<string, BinOverviewWafer[]>();
-        for (const w of d.wafers) {
-          const list = lots.get(w.lotName) ?? [];
-          list.push(w);
-          lots.set(w.lotName, list);
-        }
-        for (const [lot, wafers] of lots) {
-          const title = `${spec.title} · ${lot}`;
-          const pass = wafers.reduce((n, w) => n + w.pass, 0);
-          const fail = wafers.reduce((n, w) => n + w.fail, 0);
-          const tested = pass + fail;
-          const subtitle = `${wafers.length} wafers · Yield ${tested ? ((pass * 100) / tested).toFixed(2) : "0.00"}%`;
-          await addImage(
-            title,
-            subtitle,
-            renderBinOverviewImage(wafers, base, 2400, 1500, title, subtitle, "jpeg"),
-            spec.title
-          );
-        }
-      } else {
-        const pass = d.wafers.reduce((n, w) => n + w.pass, 0);
-        const fail = d.wafers.reduce((n, w) => n + w.fail, 0);
-        const tested = pass + fail;
-        const subtitle = `${d.wafers.length} wafers · Yield ${tested ? ((pass * 100) / tested).toFixed(2) : "0.00"}%`;
-        await addImage(
-          spec.title,
-          subtitle,
-          renderBinOverviewImage(d.wafers, base, 2400, 1500, spec.title, subtitle, "jpeg")
-        );
-      }
+      const pass = d.wafers.reduce((n, w) => n + w.pass, 0);
+      const fail = d.wafers.reduce((n, w) => n + w.fail, 0);
+      const tested = pass + fail;
+      const subtitle = `${d.wafers.length} wafers · ${spec.binCategory === "soft" ? "SBIN" : "HBIN"} · Yield ${tested ? ((pass * 100) / tested).toFixed(2) : "0.00"}%`;
+      await addImage(
+        spec.title,
+        subtitle,
+        renderBinOverviewImage(d.wafers, base, 2400, 1500, spec.title, subtitle, "jpeg")
+      );
       continue;
     }
 
     if (spec.type === "map") {
-      const candidates = spec.splitPlots
-        ? info.wafers
-            .map((w, index) => ({ w, index }))
-            .filter(({ w, index }) => {
-              if (item.filters.wafers.length && !item.filters.wafers.includes(index)) return false;
-              if (item.filters.lots.length && !item.filters.lots.includes(w.lot)) return false;
-              return true;
-            })
-            .map(({ index }) => index)
-        : [spec.mapWafer];
-      for (const index of candidates) {
-        const md = await api.waferMap({
+      const candidates = info.wafers
+        .map((w, index) => ({ w, index }))
+        .filter(({ w, index }) => {
+          if (item.filters.wafers.length && !item.filters.wafers.includes(index)) return false;
+          if (item.filters.lots.length && !item.filters.lots.includes(w.lot)) return false;
+          return true;
+        });
+      const category = spec.groupBy || "none";
+      type Group = { label: string; wafer: number | null; filter: typeof item.filters };
+      let groups: Group[] = [];
+      if (category === "none") {
+        groups = [{ label: "All wafers (mean)", wafer: null, filter: item.filters }];
+      } else if (category === "wafer") {
+        groups = candidates.map(({ w, index }) => ({
+          label: `${info.lots[w.lot] ?? `Lot ${w.lot}`} / ${w.name}`,
           wafer: index,
+          filter: item.filters,
+        }));
+      } else if (category === "lot") {
+        const byLot = new Map<number, number[]>();
+        for (const { w, index } of candidates) {
+          const list = byLot.get(w.lot) ?? [];
+          list.push(index);
+          byLot.set(w.lot, list);
+        }
+        groups = [...byLot.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([lot, indices]) => ({
+            label: info.lots[lot] ?? `Lot ${lot}`,
+            wafer: null,
+            filter: { ...item.filters, lots: [lot], wafers: indices },
+          }));
+      } else {
+        const col = info.customColumns.find((c) => c.name === category);
+        const byCode = new Map<number, number[]>();
+        if (col) {
+          for (const { index } of candidates) {
+            const code = col.waferValues[index] ?? 0;
+            const list = byCode.get(code) ?? [];
+            list.push(index);
+            byCode.set(code, list);
+          }
+        }
+        groups = [...byCode.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([code, indices]) => ({
+            label: col?.categories[code] || "Unassigned",
+            wafer: null,
+            filter: { ...item.filters, wafers: indices },
+          }));
+      }
+      for (const group of groups) {
+        const md = await api.waferMap({
+          lsl: spec.lsl,
+          usl: spec.usl,
+          wafer: group.wafer,
           test: spec.test,
           mode: "value",
-          filter: item.filters,
+          filter: group.filter,
         });
         if (md.dice.length === 0) continue;
-        const suffix = md.isMean
-          ? `All wafers (mean) · ${md.waferCount} wafer${md.waferCount === 1 ? "" : "s"}`
-          : `${md.lotName} / ${md.wafer?.name ?? "?"}`;
-        const title = spec.splitPlots ? `${spec.title} · ${suffix}` : spec.title;
+        const title = groups.length > 1 ? `${spec.title} · ${group.label}` : spec.title;
         await addImage(
           title,
-          `${suffix} · Yield ${md.yieldPct.toFixed(2)}%`,
+          `${group.label} · Yield ${md.yieldPct.toFixed(2)}%`,
           mapImage(md, title, spec),
-          spec.splitPlots ? spec.title : undefined
+          groups.length > 1 ? spec.title : undefined
         );
       }
       continue;
@@ -267,13 +305,13 @@ export async function generateReport(opts: {
         if (spec.test === null) continue;
         const d = await api.boxPlot({
           test: spec.test,
+          xAxis: spec.xAxis,
           groupBy: spec.groupBy,
           filter: item.filters,
-          blockCol: spec.blockCol || undefined,
         });
-        const baseSubtitle = `${testLabelWithUnits(test)} · ${d.summary.n.toLocaleString("en-US")} dice · ${spec.groupBy === "wafer" ? "by wafer" : "by lot"}`;
-        if (spec.splitPlots) {
-          const blocks = [...new Set(d.groups.map((g) => g.block))];
+        const baseSubtitle = `${testLabelWithUnits(test)} · ${d.summary.n.toLocaleString("en-US")} dice · X ${spec.xAxis}${spec.groupBy !== "none" ? ` · group ${spec.groupBy}` : ""}`;
+        if (spec.splitPlots && spec.groupBy !== "none") {
+          const blocks = [...new Set(d.groups.map((g) => g.groupLabel).filter(Boolean))];
           for (const block of blocks) {
             const title = `${spec.title} · ${block}`;
             fig = figureBox(d, { theme, spec, title, facetLabel: block });
@@ -291,31 +329,78 @@ export async function generateReport(opts: {
         break;
       }
       case "pareto": {
+        // X axis reproduces the old grouped-column Pareto; Group by creates
+        // one separate global Pareto per lot/wafer/custom group.
+        const xGroup = spec.xAxis === "none" ? null : spec.xAxis;
+        if (spec.groupBy !== "none") {
+          const groups = dataGroups(info, item.filters, spec.groupBy);
+          for (const group of groups) {
+            const d = await api.pareto({
+              category: spec.binCategory,
+              filter: group.filter,
+              top: spec.top,
+              groupBy: xGroup,
+            });
+            if (d.total === 0) continue;
+            const title = `${spec.title} · ${group.label}`;
+            fig = figurePareto(d, { theme, spec, title });
+            const detail =
+              d.mode === "global"
+                ? `${d.failTotal.toLocaleString("en-US")} failures`
+                : `${d.groups.length} ${d.groupLabel} groups`;
+            await addImage(
+              title,
+              `${group.label} · ${detail} · yield ${d.yieldPct.toFixed(2)}%`,
+              await renderFigure(fig, 2400, 1500),
+              spec.title
+            );
+          }
+          continue;
+        }
         const d = await api.pareto({
           category: spec.binCategory,
           filter: item.filters,
           top: spec.top,
-          groupBy: spec.paretoGroup === "none" ? null : spec.paretoGroup,
+          groupBy: xGroup,
         });
         fig = figurePareto(d, { theme, spec, title: spec.title });
         subtitle =
           d.mode === "global"
-            ? `${d.failTotal.toLocaleString("en-US")} failures · ${spec.binCategory} bins · yield ${d.yieldPct.toFixed(2)}%`
+            ? `${d.failTotal.toLocaleString("en-US")} failures · ${spec.binCategory === "soft" ? "SBIN" : "HBIN"} · yield ${d.yieldPct.toFixed(2)}%`
             : `${d.groups.length} ${d.groupLabel} groups · yield ${d.yieldPct.toFixed(2)}%`;
         break;
       }
       case "hist": {
         if (spec.test === null) continue;
-        const d = await api.histogram({ test: spec.test, filter: item.filters, bins: spec.bins });
+        const d = await api.histogram({
+          test: spec.test,
+          filter: item.filters,
+          bins: spec.bins,
+          groupBy: spec.groupBy,
+        });
+        const baseSubtitle = `${testLabelWithUnits(test)} · ${d.summary.n.toLocaleString("en-US")} dice`;
+        if (spec.splitPlots && spec.groupBy !== "none" && d.groups.length > 1) {
+          for (const g of d.groups) {
+            const title = `${spec.title} · ${g.label}`;
+            fig = figureHist(d, { theme, spec, title, facetLabel: g.label });
+            await addImage(
+              title,
+              `${baseSubtitle} · ${g.label}`,
+              await renderFigure(fig, 2400, 1500),
+              spec.title
+            );
+          }
+          continue;
+        }
         fig = figureHist(d, { theme, spec, title: spec.title });
-        subtitle = `${testLabelWithUnits(test)} · ${d.summary.n.toLocaleString("en-US")} dice`;
+        subtitle = baseSubtitle;
         break;
       }
       case "trend": {
         if (spec.test === null) continue;
-        const d = await api.trend({ test: spec.test, by: spec.groupBy, filter: item.filters });
+        const d = await api.trend({ test: spec.test, by: spec.xAxis, filter: item.filters });
         fig = figureTrend(d, { theme, spec, title: spec.title });
-        subtitle = `${testLabelWithUnits(test)} · ${d.points.length} points`;
+        subtitle = `${testLabelWithUnits(test)} · X ${spec.xAxis} · ${d.points.length} points`;
         break;
       }
       case "scatter": {
@@ -325,18 +410,17 @@ export async function generateReport(opts: {
           yTest: spec.scatterY,
           zMode: spec.scatterZMode,
           zTest: spec.scatterZTest,
-          zCol: spec.scatterZCol,
+          zCol: null,
+          groupBy: spec.groupBy === "none" ? null : spec.groupBy,
           filter: item.filters,
         });
-        const z =
-          d.zMode === "continuous"
-            ? ` · Z ${d.zColLabel}`
-            : d.zMode === "category"
-              ? ` · ${d.zColLabel}`
-              : "";
+        const zParts: string[] = [];
+        if (d.zMode === "continuous") zParts.push(`Z ${d.zColLabel}`);
+        if (d.groupLabel) zParts.push(d.groupLabel);
+        const z = zParts.length ? ` · ${zParts.join(" · ")}` : "";
         const r = d.r !== null && Number.isFinite(d.r) ? ` · r ${d.r.toFixed(3)}` : "";
         const baseSubtitle = `${testLabel(d.xTest)} vs ${testLabel(d.yTest)}${z} · ${d.total.toLocaleString("en-US")} dice${r}`;
-        if (spec.splitPlots && d.zMode === "category" && d.series.length > 1) {
+        if (spec.splitPlots && spec.groupBy !== "none" && d.series.length > 1) {
           for (const s of d.series) {
             const title = `${spec.title} · ${s.name}`;
             fig = figureScatter(d, { theme, spec, title, facetKey: s.key });

@@ -1,14 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { BinOverviewResponse, BinOverviewWafer, MapResponse, PlotSpec } from "../types";
 import {
   renderBinOverviewImage,
   renderMapImage,
-  WaferMapRenderer,
   type MapOptions,
 } from "../charts/waferMap";
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
-import { fmtInt } from "../lib/format";
+import { MapGallery, useMapSelection } from "./MapGallery";
 import { MapDetailView } from "./MapDetailView";
 
 export interface BinMapExportApi {
@@ -26,8 +25,11 @@ interface Props {
   onReady?: (api: BinMapExportApi | null) => void;
 }
 
+const binMaps = new WeakMap<BinOverviewWafer, MapResponse>();
 function asMap(w: BinOverviewWafer): MapResponse {
-  return {
+  const cached = binMaps.get(w);
+  if (cached) return cached;
+  const md: MapResponse = {
     wafer: w.wafer,
     lotName: w.lotName,
     dice: w.dice,
@@ -43,59 +45,16 @@ function asMap(w: BinOverviewWafer): MapResponse {
     waferCount: 1,
     excluded: 0,
   };
-}
-
-function BinThumb({
-  wafer,
-  opts,
-  onOpen,
-}: {
-  wafer: BinOverviewWafer;
-  opts: MapOptions;
-  onOpen: () => void;
-}) {
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const wrap = wrapRef.current;
-    if (!canvas || !wrap) return;
-    const renderer = new WaferMapRenderer(canvas);
-    const draw = () => {
-      renderer.resize();
-      renderer.setData(asMap(wafer), opts);
-    };
-    draw();
-    const ro = new ResizeObserver(draw);
-    ro.observe(wrap);
-    return () => ro.disconnect();
-  }, [wafer, opts]);
-
-  return (
-    <div className="binmap-tile">
-      <button className="binmap-open" onClick={onOpen} title={`Open ${wafer.lotName} / ${wafer.wafer.name}`}>
-        <div className="binmap-canvas-wrap" ref={wrapRef}>
-          <canvas ref={canvasRef} className="binmap-canvas" />
-        </div>
-        <div className="binmap-label">
-          <span className="binmap-name">
-            {wafer.lotName} / {wafer.wafer.name}
-          </span>
-          <span className="binmap-yield">{wafer.yieldPct.toFixed(1)}%</span>
-        </div>
-        <div className="binmap-meta">
-          {fmtInt(wafer.pass)} pass · {fmtInt(wafer.fail)} fail
-        </div>
-      </button>
-    </div>
-  );
+  binMaps.set(w, md);
+  return md;
 }
 
 export function BinMapView({ data, spec, onReady }: Props) {
   const theme = useStore((s) => s.theme);
   const info = useStore((s) => s.info);
-  const [selected, setSelected] = useState<number | null>(null);
+  const dataVersion = useStore((s) => s.dataVersion);
+  const filters = useStore((s) => s.filters);
+  const [selected, setSelected] = useMapSelection("bin", [dataVersion, filters, spec.test, spec.binCategory]);
 
   const maps = useMemo(() => data.wafers.map(asMap), [data.wafers]);
 
@@ -105,9 +64,19 @@ export function BinMapView({ data, spec, onReady }: Props) {
 
   const binNames = useMemo(() => {
     const map: Record<number, string> = {};
-    for (const b of info?.hbins ?? []) map[b.code] = b.name;
+    for (const b of info?.[spec.binCategory === "soft" ? "sbins" : "hbins"] ?? []) {
+      map[b.code] = b.name;
+    }
     return map;
-  }, [info]);
+  }, [info, spec.binCategory]);
+
+  const binPass = useMemo(
+    () =>
+      (info?.[spec.binCategory === "soft" ? "sbins" : "hbins"] ?? [])
+        .filter((b) => b.pass)
+        .map((b) => b.code),
+    [info, spec.binCategory]
+  );
 
   const opts = useMemo<MapOptions>(
     () => ({
@@ -117,21 +86,14 @@ export function BinMapView({ data, spec, onReady }: Props) {
       lsl: null,
       usl: null,
       binNames,
+      binCategory: spec.binCategory,
+      binPass,
       presentation: false,
       showLegend: false,
     }),
-    [theme, spec.palette, binNames]
+    [theme, spec.palette, binNames, binPass, spec.binCategory]
   );
 
-  const groups = useMemo(() => {
-    const out = new Map<string, { w: BinOverviewWafer; index: number }[]>();
-    data.wafers.forEach((w, index) => {
-      const list = out.get(w.lotName) ?? [];
-      list.push({ w, index });
-      out.set(w.lotName, list);
-    });
-    return [...out.entries()];
-  }, [data.wafers]);
 
   const readyRef = useRef(onReady);
   readyRef.current = onReady;
@@ -181,6 +143,7 @@ export function BinMapView({ data, spec, onReady }: Props) {
     return (
       <MapDetailView
         maps={maps}
+        labels={data.wafers.map((w) => `${w.lotName} / ${w.wafer.name}`)}
         index={selected}
         spec={spec}
         mode="bin"
@@ -190,24 +153,7 @@ export function BinMapView({ data, spec, onReady }: Props) {
     );
   }
 
-  return (
-    <div className="binmap-wrap">
-      {groups.map(([lot, wafers]) => (
-        <section className="binmap-group" key={lot}>
-          {groups.length > 1 && <h4 className="binmap-lot">{lot}</h4>}
-          <div className="binmap-grid">
-            {wafers.map(({ w, index }) => (
-              <BinThumb
-                key={`${w.wafer.lot}-${w.wafer.name}`}
-                wafer={w}
-                opts={opts}
-                onOpen={() => setSelected(index)}
-              />
-            ))}
-          </div>
-        </section>
-      ))}
-      {groups.length === 0 && <div className="chart-placeholder">No wafers match the current filters.</div>}
-    </div>
-  );
+  return <MapGallery entries={data.wafers.map((w, i) => ({ md: maps[i],
+    label: `${w.lotName} / ${w.wafer.name}`, lot: w.lotName }))}
+    spec={spec} mode="bin" onOpen={setSelected} />;
 }

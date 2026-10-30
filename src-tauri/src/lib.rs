@@ -1,10 +1,12 @@
 mod commands;
+mod archive;
 mod csv_io;
 mod dataset;
 mod model;
 mod query;
 mod stats;
 mod stdf;
+mod z_decode;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -25,6 +27,7 @@ pub fn run() {
             commands::restore_custom_columns,
             commands::box_plot,
             commands::wafer_map,
+            commands::wafer_maps,
             commands::bin_overview,
             commands::pareto,
             commands::histogram,

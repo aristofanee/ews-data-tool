@@ -7,6 +7,9 @@ dist/
 # Rust build output
 src-tauri/target/
 
+# Packaged local releases
+releases/
+
 # Logs and local environment
 *.log
 .env

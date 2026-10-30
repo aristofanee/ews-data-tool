@@ -17,12 +17,12 @@ export function StatusBar() {
       </div>
       <div className="status-mid">
         {info
-          ? `${fmtInt(info.rows)} dice · ${info.files.length} file${info.files.length === 1 ? "" : "s"} · ${info.memoryMb.toFixed(0)} MB in memory`
-          : "Open a file to begin"}
+          ? `${fmtInt(info.rows)} dice · ${info.files.length} file${info.files.length === 1 ? "" : "s"} · ${info.memoryMb.toFixed(0)} MB in memory${info.retestCount ? ` · ${fmtInt(info.retestCount)} earlier attempts replaced (latest kept)` : ""}`
+          : ""}
       </div>
       <div className="status-right">
         {!isTauri && <span className="demo-badge">browser demo</span>}
-        <span>v0.3.3</span>
+        <span>v0.4.0</span>
         <span className="meta-dot" />
         <span>offline</span>
       </div>

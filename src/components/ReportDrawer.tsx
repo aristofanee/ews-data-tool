@@ -32,6 +32,8 @@ function iconFor(type: ReportItem["spec"]["type"]) {
       return <IconBox {...p} />;
     case "map":
       return <IconMap {...p} />;
+    case "binmap":
+      return <IconMap {...p} />;
     case "pareto":
       return <IconPareto {...p} />;
     case "hist":
@@ -49,8 +51,7 @@ function summarizeFilters(f: Filter, info: DatasetInfo): string {
     parts.push(f.lots.map((l) => info.lots[l] ?? `L${l}`).join(", "));
   }
   if (f.wafers.length) parts.push(`${f.wafers.length} wafers`);
-  if (f.hbins.length) parts.push(`bins ${f.hbins.join(",")}`);
-  if (f.passOnly) parts.push("pass only");
+  if (f.hbins.length) parts.push(`HBIN ${f.hbins.join(",")}`);
   if (f.stat) parts.push(f.stat.kind === "sigma" ? `${f.stat.k}σ` : `IQR×${f.stat.k}`);
   return parts.length ? parts.join(" · ") : "all data";
 }
@@ -60,30 +61,26 @@ function subtitleFor(it: ReportItem, info: DatasetInfo): string {
   const test = s.test !== null ? info.tests[s.test] : null;
   const parts: string[] = [];
   if (s.type === "map") {
-    if (s.splitPlots) {
-      parts.push("Split by wafer");
-    } else if (s.mapWafer === null) {
-      parts.push("All wafers (mean)");
-    } else {
-      const w = info.wafers[s.mapWafer];
-      parts.push(`Wafer ${w?.name ?? "?"}`);
-    }
+    parts.push(s.groupBy === "none" ? "All wafers (mean)" : `Grouped by ${s.groupBy}`);
   }
   if (s.type === "scatter") {
     const x = s.scatterX !== null ? info.tests[s.scatterX] : null;
     const y = s.scatterY !== null ? info.tests[s.scatterY] : null;
     parts.push(`${x ? tidyName(x.name) : "X"} vs ${y ? tidyName(y.name) : "Y"}`);
-    if (s.scatterZMode === "continuous") {
+    if (s.groupBy !== "none") {
+      parts.push(`Grouped by ${s.groupBy}`);
+    } else if (s.scatterZMode === "continuous") {
       const z = s.scatterZTest !== null ? info.tests[s.scatterZTest] : null;
       if (z) parts.push(`Z ${tidyName(z.name)}`);
-    } else if (s.scatterZMode === "category") {
-      parts.push(`Z ${s.scatterZCol}`);
     }
   } else if (test) {
     const name = tidyName(test.name);
     parts.push(test.units ? `${name} [${test.units}]` : name);
   }
-  if (s.type === "box" || s.type === "trend") parts.push(s.groupBy === "wafer" ? "by wafer" : "by lot");
+  if (s.type === "box" || s.type === "trend") {
+    parts.push(`X ${s.xAxis}`);
+    if (s.type === "box" && s.groupBy !== "none") parts.push(`Group ${s.groupBy}`);
+  }
   parts.push(summarizeFilters(it.filters, info));
   return parts.join(" · ");
 }
@@ -139,24 +136,16 @@ export function ReportDrawer() {
       return;
     }
     const test = spec.test !== null ? info.tests[spec.test] : null;
-    const wafers = info.wafers
-      .map((w, i) => ({ w, i }))
-      .filter(
-        ({ w, i }) =>
-          (filters.lots.length === 0 || filters.lots.includes(w.lot)) &&
-          (filters.wafers.length === 0 || filters.wafers.includes(i))
-      );
-    if (wafers.length > 20 && !window.confirm(`Add ${wafers.length} wafer maps to the report?`)) return;
-    addReportItems(
-      wafers.map(({ w, i }) => ({
+    addReportItems([
+      {
         spec: {
           ...spec,
-          mapWafer: i,
-          title: `${test ? tidyName(test.name) : "Wafer"} · ${info.lots[w.lot]} / ${w.name}`,
+          groupBy: "wafer",
+          title: `${test ? tidyName(test.name) : "Wafer"} · all selected wafers`,
         },
         filters,
-      }))
-    );
+      },
+    ]);
   };
 
   const addAllTests = () => {
@@ -176,7 +165,12 @@ export function ReportDrawer() {
   };
 
   const editItem = (it: ReportItem) => {
-    useStore.setState({ spec: structuredClone(it.spec), filters: structuredClone(it.filters) });
+    const nextSpec = structuredClone(it.spec);
+    useStore.setState((s) => ({
+      spec: nextSpec,
+      specs: { ...s.specs, [nextSpec.type]: nextSpec },
+      filters: structuredClone(it.filters),
+    }));
     setOpen(false);
   };
 
@@ -277,9 +271,6 @@ export function ReportDrawer() {
                 <IconReport size={26} />
               </div>
               <b>No plots yet</b>
-              <span>
-                Add the current plot, or batch-add every wafer for a map. Then generate all JPGs in one click.
-              </span>
             </div>
           )}
           {report.map((it, i) => (
@@ -338,9 +329,6 @@ export function ReportDrawer() {
             <button className="btn primary wide" onClick={generate} disabled={!report.length}>
               <IconReport size={15} /> Generate {report.length || ""} JPG{report.length === 1 ? "" : "s"}
             </button>
-          </div>
-          <div className="hint">
-            Writes numbered JPGs, an <code>index.html</code> contact sheet and <code>report.json</code>.
           </div>
         </div>
       </aside>

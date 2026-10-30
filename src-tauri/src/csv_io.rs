@@ -264,6 +264,7 @@ pub struct CsvInspection {
 
 #[derive(Default)]
 struct Layout {
+    site: Option<usize>,
     lot: Option<usize>,
     wafer: Option<usize>,
     x: Option<usize>,
@@ -291,6 +292,7 @@ fn layout_from_headers(headers: &[String]) -> Layout {
             "y" | "ycoord" | "ycoordinate" | "diey" | "ydie" | "row" | "rowindex" => {
                 Some(&mut lay.y)
             }
+            "site" | "sitenum" | "sitenumber" | "testsite" => Some(&mut lay.site),
             "hbin" | "hardbin" | "hardbinno" | "hardbinnumber" => Some(&mut lay.hbin),
             "sbin" | "softbin" | "softbinno" | "bin" | "binnumber" | "binno" => {
                 Some(&mut lay.sbin)
@@ -660,6 +662,7 @@ pub fn import_csv_with_mapping(
         let vi = lay.value.unwrap();
         let mut test_ids: HashMap<String, u32> = HashMap::new();
         let mut row_keys: HashMap<(u32, u32, i16, i16, u32), usize> = HashMap::new();
+        let mut measured = std::collections::HashSet::new();
         let mut seq = 0i16;
         let meta_indices: Vec<usize> = (0..headers.len())
             .filter(|&i| {
@@ -669,6 +672,7 @@ pub fn import_csv_with_mapping(
                     && Some(i) != lay.y
                     && Some(i) != lay.hbin
                     && Some(i) != lay.sbin
+                    && Some(i) != lay.site
                     && Some(i) != lay.part
                     && Some(i) != lay.test
                     && Some(i) != lay.value
@@ -698,7 +702,7 @@ pub fn import_csv_with_mapping(
                     seq
                 });
             let key = (lot as u32, wafer as u32, x, y, part);
-            let row = *row_keys.entry(key).or_insert_with(|| {
+            let mut row = *row_keys.entry(key).or_insert_with(|| {
                 let r = imp.new_row(lot, wafer);
                 imp.x[r] = x;
                 imp.y[r] = y;
@@ -717,10 +721,23 @@ pub fn import_csv_with_mapping(
                 test_ids.insert(tname.to_string(), id);
                 id
             };
+            // In long CSV a repeated parameter for this die starts another
+            // attempt. A new row prevents a partial retest from inheriting
+            // measurements or bins from the preceding attempt.
+            if measured.contains(&(row, id)) {
+                row = imp.new_row(lot, wafer);
+                imp.x[row] = x;
+                imp.y[row] = y;
+                imp.hbin[row] = lay.hbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(1);
+                imp.sbin[row] = lay.sbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(1);
+                row_keys.insert(key, row);
+            }
+            measured.insert((row, id));
             let idx = imp.column((id, 0), row, parse_f32(rec.get(vi).unwrap_or("")));
             if imp.tests[idx].name.is_empty() {
                 imp.tests[idx].name = tname.to_string();
             }
+            imp.site[row] = lay.site.and_then(|i| rec.get(i)).and_then(parse_u32).and_then(|v| u8::try_from(v).ok());
             imp.records += 1;
             if imp.records % 200_000 == 0 {
                 progress(0.0, "Reading CSV...");
@@ -762,6 +779,7 @@ pub fn import_csv_with_mapping(
             || Some(i) == lay.y
             || Some(i) == lay.hbin
             || Some(i) == lay.sbin
+            || Some(i) == lay.site
             || Some(i) == lay.part
             || Some(i) == lay.test
             || Some(i) == lay.value
@@ -835,6 +853,7 @@ pub fn import_csv_with_mapping(
             meta[m].observe(wafer, rec.get(ci).unwrap_or(""));
         }
         let r = imp.new_row(lot, wafer);
+        imp.site[r] = lay.site.and_then(|i| rec.get(i)).and_then(parse_u32).and_then(|v| u8::try_from(v).ok());
         imp.x[r] = lay.x.and_then(|i| rec.get(i)).map(parse_i16).unwrap_or(0);
         imp.y[r] = lay.y.and_then(|i| rec.get(i)).map(parse_i16).unwrap_or(0);
         imp.hbin[r] = lay.hbin
@@ -870,6 +889,21 @@ pub fn import_csv_with_mapping(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_csv_partial_retest_keeps_latest_bins_without_old_measurements() {
+        let p = write_temp("long-retest", "Lot,Wafer,X,Y,HBIN,Test,Value\nL,W,1,2,2,A,10\nL,W,1,2,2,B,20\nL,W,1,2,1,A,30\n");
+        let imp = import_csv(&p, &mut |_, _| {}).unwrap();
+        let mut ds = crate::model::Dataset::new();
+        ds.merge(imp);
+        ds.resolve_retests();
+        assert_eq!(ds.rows, 1);
+        assert_eq!(ds.retest_count, 1);
+        assert_eq!(ds.hbin, vec![1]);
+        assert_eq!(ds.cols[0], vec![30.0]);
+        assert!(ds.cols[1][0].is_nan());
+        let _ = std::fs::remove_file(p);
+    }
 
     fn write_temp(name: &str, body: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("ews-csv-{}-{name}.csv", std::process::id()));

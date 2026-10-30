@@ -10,8 +10,8 @@ const FIELDS: { key: Key; label: string; required: boolean }[] = [
   { key: "wafer", label: "Wafer / OCR", required: true },
   { key: "x", label: "X coordinate", required: true },
   { key: "y", label: "Y coordinate", required: true },
-  { key: "hbin", label: "Hard bin", required: false },
-  { key: "sbin", label: "Soft bin", required: false },
+  { key: "hbin", label: "HBIN", required: false },
+  { key: "sbin", label: "SBIN", required: false },
 ];
 
 function baseName(path: string): string {
@@ -58,10 +58,6 @@ export function CsvMappingDialog() {
           </button>
         </div>
         <div className="modal-body">
-          <div className="hint">
-            Automatic detection could not find {inspection.missing.join(", ")}. Choose the
-            matching column for each key. Metadata rows and test columns are detected separately.
-          </div>
           {FIELDS.map((f) => (
             <label className="modal-field" key={f.key}>
               <span>

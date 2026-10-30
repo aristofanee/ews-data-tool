@@ -1,7 +1,8 @@
-import type { BinOverviewWafer, MapDie, MapResponse } from "../types";
+import type { BinOverviewWafer, MapDie, MapResponse, PlotSpec } from "../types";
 import { fmtMap } from "../lib/format";
+import { quantileSorted } from "../lib/stats";
 import type { Theme } from "../lib/theme";
-import { binColor, paletteColor } from "../lib/theme";
+import { binColor, binLabel, paletteColor } from "../lib/theme";
 
 export interface MapOptions {
   theme: Theme;
@@ -10,6 +11,12 @@ export interface MapOptions {
   lsl: number | null;
   usl: number | null;
   binNames?: Record<number, string>;
+  binCategory?: "hard" | "soft";
+  /** Codes that count as passing for the selected bin category. */
+  binPass?: number[];
+  /** Optional explicit colour-scale limits. */
+  vmin?: number;
+  vmax?: number;
   /** Larger map labels and legend for slide-sized output. */
   presentation?: boolean;
   /** Hide the colour/bin legend for small bin-overview thumbnails. */
@@ -20,6 +27,47 @@ export interface MapHit {
   die: MapDie;
   sx: number;
   sy: number;
+}
+
+/**
+ * Resolve the colour-scale limits for a value map. Auto leaves the range to
+ * the renderer; the other modes mirror the Limits section used by charts.
+ */
+export function mapColorLimits(
+  spec: PlotSpec,
+  data: MapResponse
+): { vmin?: number; vmax?: number } {
+  if (spec.limitMode === "auto") return {};
+  if (spec.limitMode === "manual") {
+    return {
+      vmin: spec.yMin ?? undefined,
+      vmax: spec.yMax ?? undefined,
+    };
+  }
+  const values = data.dice
+    .map((d) => d.v)
+    .filter((v) => Number.isFinite(v))
+    .sort((a, b) => a - b);
+  if (!values.length) return {};
+  const n = values.length;
+  const mean = values.reduce((a, b) => a + b, 0) / n;
+  const sd = Math.sqrt(values.reduce((a, b) => a + (b - mean) * (b - mean), 0) / n);
+  if (spec.limitMode === "sigma" && sd > 0) {
+    return { vmin: mean - spec.limitK * sd, vmax: mean + spec.limitK * sd };
+  }
+  if (spec.limitMode === "iqr") {
+    const q1 = quantileSorted(values, 0.25);
+    const q3 = quantileSorted(values, 0.75);
+    const iqr = q3 - q1;
+    if (iqr > 0) return { vmin: q1 - spec.limitK * iqr, vmax: q3 + spec.limitK * iqr };
+  }
+  if (spec.limitMode === "spec") {
+    return {
+      vmin: spec.lsl ?? data.lsl ?? undefined,
+      vmax: spec.usl ?? data.usl ?? undefined,
+    };
+  }
+  return {};
 }
 
 interface MapColors {
@@ -342,7 +390,7 @@ export class WaferMapRenderer {
           : pres
             ? 164
             : 108;
-    const pad = pres ? 20 : 14;
+    const pad = !showLegend ? 4 : pres ? 20 : 14;
     const availW = Math.max(40, w - cbarW - pad * 2);
     const availH = Math.max(40, h - pad * 2);
     const cx = pad + availW / 2;
@@ -353,16 +401,16 @@ export class WaferMapRenderer {
     let R: number;
     if (hasDieDims) {
       // WCR gives physical die dimensions. Use their true aspect ratio and the
-      // wafer diameter, and fit the larger of the wafer circle and the die
-      // grid into the available area.
+      // wafer diameter. The renderer clips to that circle, so coordinates
+      // outside it must not shrink the visible wafer and create blank space.
       const halfGridW = Math.max(Math.abs(minX - centerX), Math.abs(maxX - centerX) + 1) * dieWmm;
       const halfGridH = Math.max(Math.abs(minY - centerY), Math.abs(maxY - centerY) + 1) * dieHmm;
       const diameter = wf?.diameterMm && wf.diameterMm > 0 ? wf.diameterMm : null;
       const radiusMm = diameter
         ? diameter / 2
         : Math.max(halfGridW, halfGridH) + Math.max(dieWmm, dieHmm) * 0.5;
-      const worldW = Math.max(radiusMm * 2, halfGridW * 2, dieWmm * 2);
-      const worldH = Math.max(radiusMm * 2, halfGridH * 2, dieHmm * 2);
+      const worldW = diameter ?? Math.max(radiusMm * 2, halfGridW * 2, dieWmm * 2);
+      const worldH = diameter ?? Math.max(radiusMm * 2, halfGridH * 2, dieHmm * 2);
       const fit = Math.min(availW / worldW, availH / worldH);
       cellW = dieWmm * fit;
       cellH = dieHmm * fit;
@@ -409,8 +457,8 @@ export class WaferMapRenderer {
     const gap = Math.max(0.3, Math.min(cellW, cellH) * 0.055);
     const dw = Math.max(0.5, cellW - gap);
     const dh = Math.max(0.5, cellH - gap);
-    const lo = Number.isFinite(data.vmin) ? data.vmin : 0;
-    const hi = Number.isFinite(data.vmax) ? data.vmax : 1;
+    const lo = Number.isFinite(this.opts?.vmin) ? (this.opts!.vmin as number) : Number.isFinite(data.vmin) ? data.vmin : 0;
+    const hi = Number.isFinite(this.opts?.vmax) ? (this.opts!.vmax as number) : Number.isFinite(data.vmax) ? data.vmax : 1;
     const vspan = hi > lo ? hi - lo : 1;
     // Group dice by colour and fill one path per colour. Setting fillStyle and
     // calling fillRect 50k times is dramatically slower in WebView2 than
@@ -420,7 +468,11 @@ export class WaferMapRenderer {
     for (const d of data.dice) {
       let color: string;
       if (mode === "bin") {
-        color = binColor(d.hbin, d.hbin === 1);
+        const category = this.opts?.binCategory === "soft" ? d.sbin : d.hbin;
+        const pass = this.opts?.binPass
+          ? this.opts.binPass.includes(category)
+          : category === 1;
+        color = binColor(category, pass);
       } else if (!Number.isFinite(d.v)) {
         color = t.empty;
       } else {
@@ -482,14 +534,6 @@ export class WaferMapRenderer {
       this.drawBinLegend(ctx, t, barX, pad + 10, cbarW - 14 - legendRightPad, pres);
     }
 
-    // Zoom hint
-    if (this.zoom > 1.01) {
-      ctx.font = `${Math.round(10 * k)}px ${FONT}`;
-      ctx.fillStyle = t.muted;
-      ctx.textAlign = "left";
-      ctx.textBaseline = "top";
-      ctx.fillText(`${this.zoom.toFixed(1)}×  ·  double-click to reset`, pad, 4);
-    }
     this.baseDirty = false;
   }
 
@@ -670,42 +714,49 @@ export class WaferMapRenderer {
     pres = false
   ): void {
     const k = pres ? 1.55 : 1;
+    const soft = this.opts?.binCategory === "soft";
     if (!this.binCounts) {
       const counts = new Map<number, number>();
       for (const d of this.data?.dice ?? []) {
-        counts.set(d.hbin, (counts.get(d.hbin) ?? 0) + 1);
+        const code = soft ? d.sbin : d.hbin;
+        counts.set(code, (counts.get(code) ?? 0) + 1);
       }
       this.binCounts = counts;
     }
     const entries = [...this.binCounts.entries()].sort((a, b) => b[1] - a[1]);
-    const shown = entries.slice(0, 9);
-    const rest = entries.slice(9);
+    const shown = entries.slice(0, 12);
+    const rest = entries.slice(12);
 
     ctx.font = `600 ${Math.round(10 * k)}px ${FONT}`;
     ctx.fillStyle = t.muted;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
-    ctx.fillText("HARD BIN", x, y);
+    ctx.fillText(soft ? "SBIN" : "HBIN", x, y);
     let yy = y + 16 * k;
     ctx.font = `${Math.round(10 * k)}px ${FONT}`;
     for (const [code, count] of shown) {
-      const name = this.opts?.binNames?.[code] || (code === 1 ? "Pass" : `Bin ${code}`);
-      ctx.fillStyle = binColor(code, code === 1);
+      const pass = this.opts?.binPass
+        ? this.opts.binPass.includes(code)
+        : code === 1;
+      ctx.fillStyle = binColor(code, pass);
       ctx.fillRect(x, yy, 10 * k, 10 * k);
       ctx.fillStyle = t.text;
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
-      const label = `${code}  ${name}`;
-      const maxChars = Math.max(6, Math.floor((width - 46 * k) / (5.4 * k)));
-      ctx.fillText(
-        label.length > maxChars ? label.slice(0, maxChars - 1) + "…" : label,
-        x + 15 * k,
-        yy + 5 * k
-      );
+      const label = binLabel(soft ? "soft" : "hard", code, this.opts?.binNames?.[code]);
+      const maxWidth = width - 55 * k;
+      const lines: string[] = [];
+      let line = "";
+      for (const word of label.split(/\s+/)) {
+        if (line && ctx.measureText(`${line} ${word}`).width > maxWidth) { lines.push(line); line = word; }
+        else line = line ? `${line} ${word}` : word;
+      }
+      if (line) lines.push(line);
+      lines.forEach((text, i) => ctx.fillText(text, x + 15 * k, yy + 5 * k + i * 13 * k, maxWidth));
       ctx.fillStyle = t.muted;
       ctx.textAlign = "right";
       ctx.fillText(fmtCount(count), x + width, yy + 5 * k);
-      yy += 18 * k;
+      yy += Math.max(18, lines.length * 13 + 5) * k;
     }
     if (rest.length > 0) {
       const total = rest.reduce((a, [, c]) => a + c, 0);
@@ -846,7 +897,7 @@ export function renderBinOverviewImage(
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
     ctx.fillText(label, x + 2, y + Math.round(pres ? 20 : 15));
-    ctx.fillStyle = t.muted;
+    ctx.fillStyle = binColor(1);
     ctx.font = `${Math.round(pres ? 15 : 12)}px ${FONT}`;
     ctx.textAlign = "right";
     ctx.fillText(`${w.yieldPct.toFixed(1)}%`, x + cellW - 2, y + Math.round(pres ? 20 : 15));

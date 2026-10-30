@@ -42,6 +42,9 @@ export interface CustomColumn {
 }
 
 export interface DatasetInfo {
+  sites?: number[];
+  /** Earlier die attempts replaced by the latest imported attempt. */
+  retestCount?: number;
   files: string[];
   lots: string[];
   wafers: WaferInfo[];
@@ -60,11 +63,12 @@ export interface StatFilter {
 }
 
 export interface Filter {
+  /** Missing site metadata uses code 65535. */
+  sites?: number[];
   lots: number[];
   wafers: number[];
   hbins: number[];
   sbins: number[];
-  passOnly: boolean;
   stat: StatFilter | null;
 }
 
@@ -73,7 +77,6 @@ export const emptyFilter = (): Filter => ({
   wafers: [],
   hbins: [],
   sbins: [],
-  passOnly: false,
   stat: null,
 });
 
@@ -91,14 +94,16 @@ export interface Summary {
 }
 
 export interface BoxGroup {
-  key: number;
-  label: string;
+  summary: Summary;
+  positiveSummary: Summary;
+  xKey: number;
+  xLabel: string;
+  groupKey: number;
+  groupLabel: string;
   values: number[];
   xs: number[];
   ys: number[];
   n: number;
-  block: string;
-  blockCode: number;
 }
 
 export interface BoxResponse {
@@ -122,6 +127,9 @@ export interface MapDie {
 }
 
 export interface MapResponse {
+  testPass?: number;
+  testFail?: number;
+  testYieldPct?: number | null;
   wafer: WaferInfo | null;
   lotName: string;
   dice: MapDie[];
@@ -208,9 +216,16 @@ export interface CsvInspection {
   longFormat: boolean;
 }
 
+export interface HistGroup {
+  key: number;
+  label: string;
+  counts: number[];
+}
+
 export interface HistResponse {
   edges: number[];
   counts: number[];
+  groups: HistGroup[];
   summary: Summary;
   test: TestInfo;
   lsl: number | null;
@@ -234,7 +249,9 @@ export interface TrendResponse {
   usl: number | null;
 }
 
-export type ScatterZMode = "none" | "continuous" | "category";
+export type ScatterZMode = "none" | "continuous";
+export type ScatterColorMode = ScatterZMode | "category";
+export type LimitMode = "auto" | "manual" | "sigma" | "iqr" | "spec";
 
 export interface ScatterPoint {
   x: number;
@@ -259,9 +276,12 @@ export interface ScatterResponse {
   xTest: TestInfo;
   yTest: TestInfo;
   zTest: TestInfo | null;
-  zMode: ScatterZMode;
+  zMode: ScatterColorMode;
   zCol: string | null;
   zColLabel: string;
+  /** Category used to split the points into series, if any. */
+  groupBy: string | null;
+  groupLabel: string;
   zMin: number | null;
   zMax: number | null;
   total: number;
@@ -281,38 +301,42 @@ export interface PlotSpec {
   type: PlotType;
   test: number | null;
   title: string;
-  groupBy: "wafer" | "lot";
+  /**
+   * Box/trend category on the horizontal axis, or the Pareto grouping column.
+   * Pareto also accepts `none` for the global view.
+   */
+  xAxis: string;
+  /** Colour / grouping / split category. `none` means one default-coloured series. */
+  groupBy: string;
   logY: boolean;
   showPoints: ShowPoints;
   lsl: number | null;
   usl: number | null;
   showLimits: boolean;
-  /** Draw UCL/LCL (control limits) in addition to spec limits. */
-  showControlLimits: boolean;
-  mapWafer: number | null;
   mapMode: "value" | "bin";
   palette: string;
   edgeExclusion: number;
   binCategory: "hard" | "soft";
   top: number;
-  /** `none` for the global Pareto, otherwise lot, wafer or a custom column. */
-  paretoGroup: string;
   bins: number | null;
   showNormal: boolean;
   showBand: boolean;
+  /** Manual axis/colour-scale limits when limitMode is "manual". */
   yMin: number | null;
   yMax: number | null;
+  /** How the plot range is chosen. Auto keeps the data-driven default. */
+  limitMode: LimitMode;
+  /** k for the sigma / IQR range modes. */
+  limitK: number;
   /** Larger fonts, thicker lines and stronger markers for slide-sized charts. */
   presentation: boolean;
-  /** Lot by default; `__wafer` or a custom column name for box block/colour. */
-  blockCol: string;
   scatterX: number | null;
   scatterY: number | null;
+  /** Continuous value colouring; categorical colouring now uses groupBy. */
   scatterZMode: ScatterZMode;
   scatterZTest: number | null;
-  scatterZCol: string;
   scatterFit: boolean;
-  /** Render a grouped plot as one small chart per split/lot/wafer. */
+  /** Render a grouped plot as one small chart per group. */
   splitPlots: boolean;
 }
 
@@ -321,32 +345,30 @@ export const defaultSpec = (type: PlotType, test: number | null, title: string):
   type,
   test,
   title,
-  groupBy: "wafer",
+  xAxis: type === "pareto" ? "none" : "wafer",
+  groupBy: "none",
   logY: false,
   showPoints: "outliers",
   lsl: null,
   usl: null,
   showLimits: true,
-  showControlLimits: true,
-  mapWafer: null,
   mapMode: "value",
   palette: "brand",
   edgeExclusion: 0,
   binCategory: "hard",
   top: 20,
-  paretoGroup: "none",
   bins: null,
   showNormal: true,
   showBand: true,
   yMin: null,
   yMax: null,
+  limitMode: "auto",
+  limitK: 3,
   presentation: true,
-  blockCol: "",
   scatterX: null,
   scatterY: null,
   scatterZMode: "none",
   scatterZTest: null,
-  scatterZCol: "lot",
   scatterFit: true,
   splitPlots: false,
 });

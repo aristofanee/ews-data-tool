@@ -6,6 +6,8 @@ import { IconArrowLeft, IconChevronLeft, IconChevronRight } from "./Icons";
 
 interface Props {
   maps: MapResponse[];
+  /** Optional group labels (used by lot/custom map groupings). */
+  labels?: string[];
   index: number;
   spec: PlotSpec;
   mode: "value" | "bin";
@@ -19,7 +21,7 @@ interface Props {
  * mosaic. It is intentionally not a modal: the detail map gets the same full
  * chart body as the single Wafer map tab.
  */
-export function MapDetailView({ maps, index, spec, mode, onBack, onIndex, onReady }: Props) {
+export function MapDetailView({ maps, labels, index, spec, mode, onBack, onIndex, onReady }: Props) {
   const md = maps[index] ?? null;
   const mapSpec = useMemo(
     () => ({ ...spec, type: "map" as const, mapMode: mode }),
@@ -57,8 +59,13 @@ export function MapDetailView({ maps, index, spec, mode, onBack, onIndex, onRead
     );
   }
 
-  const name = md.wafer?.name || "?";
-  const scope = mode === "bin" ? "Hard bin map" : md.test ? testLabelWithUnits(md.test) : "Value map";
+  const name = labels?.[index] || md.wafer?.name || md.lotName || "?";
+  const scope =
+    mode === "bin"
+      ? `${spec.binCategory === "soft" ? "SBIN" : "HBIN"} map`
+      : md.test
+        ? testLabelWithUnits(md.test)
+        : "Value map";
 
   return (
     <div className="map-detail">
@@ -68,8 +75,12 @@ export function MapDetailView({ maps, index, spec, mode, onBack, onIndex, onRead
           All maps
         </button>
         <div className="map-detail-heading">
-          <div className="map-detail-title" title={`Wafer map - ${name}`}>
-            Wafer map - {name}
+          <div
+            className="map-detail-title"
+            title={`${mode === "bin" ? (spec.binCategory === "soft" ? "SBIN map" : "HBIN map") : "Wafer map"} - ${name}`}
+          >
+            {mode === "bin" ? (spec.binCategory === "soft" ? "SBIN map" : "HBIN map") : "Wafer map"} -{" "}
+            {name}
           </div>
           <div className="map-detail-sub">
             {md.lotName} · {scope}
@@ -77,15 +88,21 @@ export function MapDetailView({ maps, index, spec, mode, onBack, onIndex, onRead
         </div>
         <div className="map-detail-stats">
           <div className="map-detail-stat">
-            <span>Yield</span>
-            <b>{md.yieldPct.toFixed(2)}%</b>
+            <span>Wafer yield (HBIN 1)</span>
+            <b className="yield-value">{md.yieldPct.toFixed(2)}%</b>
           </div>
+          {mode === "value" && md.testYieldPct != null && (
+            <div className="map-detail-stat">
+              <span>Test yield (LSL/USL)</span>
+              <b className="yield-value">{md.testYieldPct.toFixed(2)}%</b>
+            </div>
+          )}
           <div className="map-detail-stat">
-            <span>Pass</span>
+            <span>Bin 1</span>
             <b>{fmtInt(md.pass)}</b>
           </div>
           <div className="map-detail-stat">
-            <span>Fail</span>
+            <span>Other bins</span>
             <b>{fmtInt(md.fail)}</b>
           </div>
           <div className="map-detail-stat">

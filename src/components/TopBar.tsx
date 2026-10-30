@@ -31,6 +31,8 @@ function BrandMark() {
 }
 
 export function TopBar() {
+  const presentation = useStore((s) => s.presentation);
+  const setPresentation = useStore((s) => s.setPresentation);
   const info = useStore((s) => s.info);
   const theme = useStore((s) => s.theme);
   const toggleTheme = useStore((s) => s.toggleTheme);
@@ -74,7 +76,11 @@ export function TopBar() {
       )}
 
       <div className="topbar-actions">
-        <button className="btn primary" onClick={() => open()} title="Open STDF or CSV files">
+        <label className="check-row global-presentation" title="Slide-sized fonts and markers for every plot and report">
+          <input type="checkbox" checked={presentation} onChange={(e) => setPresentation(e.target.checked)} />
+          Slide-sized fonts
+        </label>
+        <button className="btn primary" onClick={() => open()} title="Open STDF, .Z, ZIP or CSV files">
           <IconFolder size={15} /> Open data
         </button>
         <button

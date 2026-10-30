@@ -47,7 +47,7 @@ export function useOpenFiles() {
         );
         setInfo(info);
         setCsvPrompt(null);
-        notify(`Loaded ${fmtInt(info.rows)} dice · ${info.tests.length} tests · ${info.lots.length} lot${info.lots.length > 1 ? "s" : ""}`);
+        notify(`Loaded ${fmtInt(info.rows)} dice · ${info.tests.length} tests · ${info.lots.length} lot${info.lots.length > 1 ? "s" : ""}${info.retestCount ? ` · Retests: ${fmtInt(info.retestCount)} earlier attempts replaced; latest kept` : ""}`);
       } catch (e) {
         setError(String(e));
       } finally {
@@ -100,6 +100,7 @@ export function useSaveTemplate() {
         name,
         created: new Date().toISOString(),
         theme: s.theme,
+        presentation: s.presentation,
         filters: s.filters,
         plots,
         customColumns: s.info?.customColumns ?? [],
@@ -149,8 +150,7 @@ export function filtersSummary(): string {
   const parts: string[] = [];
   if (f.lots.length && info) parts.push(f.lots.map((l) => info.lots[l] ?? `L${l}`).join(", "));
   if (f.wafers.length) parts.push(`${f.wafers.length} wafers`);
-  if (f.passOnly) parts.push("pass only");
-  if (f.hbins.length) parts.push(`bins ${f.hbins.join(",")}`);
+  if (f.hbins.length) parts.push(`HBIN ${f.hbins.join(",")}`);
   if (f.stat) parts.push(`${f.stat.kind === "sigma" ? `${f.stat.k}σ` : `IQR×${f.stat.k}`}${f.stat.perWafer ? " /wafer" : ""}`);
   return parts.length ? parts.join(" · ") : "All data";
 }

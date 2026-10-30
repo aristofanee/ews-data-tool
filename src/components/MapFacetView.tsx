@@ -3,10 +3,17 @@ import type { Filter, MapResponse, PlotSpec } from "../types";
 import * as api from "../lib/api";
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
-import { renderMapImage, type MapOptions } from "../charts/waferMap";
+import {
+  mapColorLimits,
+  renderMapImage,
+  type MapOptions,
+} from "../charts/waferMap";
 import { testLabelWithUnits } from "../lib/format";
+import { dataGroups, type DataGroup } from "../lib/grouping";
 import { WaferMapView } from "./WaferMapView";
+import { MapGallery, useMapSelection } from "./MapGallery";
 import { MapDetailView } from "./MapDetailView";
+import { mapGeneration } from "../lib/mapCache";
 
 export interface MapFacetExportApi {
   toDataURLs: (
@@ -23,29 +30,31 @@ interface Props {
   onReady?: (api: MapFacetExportApi | null) => void;
 }
 
+interface Entry {
+  md: MapResponse;
+  label: string;
+}
+
 /**
- * A map split is one value map per wafer. The mosaic tiles are static
- * previews (no legend, hover or zoom) so the grid scrolls normally; clicking
- * one opens the same full-size detail view used by the Bin map mosaic.
+ * One value map per selected group. A single group renders as a full map;
+ * several groups render as a mosaic of clickable previews. The previews are
+ * static (no legend, hover or zoom) so the grid scrolls normally.
  */
 export function MapFacetView({ spec, filter, onReady }: Props) {
   const info = useStore((s) => s.info);
   const theme = useStore((s) => s.theme);
-  const [maps, setMaps] = useState<MapResponse[]>([]);
+  const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
+  const dataVersion = useStore((s) => s.dataVersion);
+  const requestKey = JSON.stringify([mapGeneration(), dataVersion, filter, spec.test, spec.groupBy, spec.lsl, spec.usl]);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const [selected, setSelected] = useMapSelection("value", [dataVersion, filter, spec.test, spec.groupBy, spec.lsl, spec.usl]);
 
-  const candidates = useMemo(() => {
-    if (!info) return [];
-    return info.wafers
-      .map((w, index) => ({ w, index }))
-      .filter(({ w, index }) => {
-        if (filter.wafers.length && !filter.wafers.includes(index)) return false;
-        if (filter.lots.length && !filter.lots.includes(w.lot)) return false;
-        return true;
-      });
-  }, [info, filter]);
+  const groups = useMemo<DataGroup[]>(
+    () => (info ? dataGroups(info, filter, spec.groupBy || "none") : []),
+    [info, filter, spec.groupBy]
+  );
 
   useEffect(() => {
     let alive = true;
@@ -53,19 +62,26 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
     setError(null);
     (async () => {
       try {
-        const out: MapResponse[] = [];
-        for (const { index } of candidates) {
-          const md = await api.waferMap({
-            wafer: index,
+        const out: Entry[] = [];
+        const batch = spec.groupBy === "wafer" ? await api.waferMaps({
+          wafer: null, test: spec.test, mode: "value", filter, lsl: spec.lsl, usl: spec.usl,
+        }) : null;
+        for (const group of groups) {
+          if (!alive) return;
+          const md = batch?.find((m) => m.wafer?.name === info?.wafers[group.wafer!]?.name && m.wafer?.lot === info?.wafers[group.wafer!]?.lot) ?? await api.waferMap({
+            lsl: spec.lsl,
+            usl: spec.usl,
+            wafer: group.wafer,
             test: spec.test,
             mode: "value",
-            filter,
+            filter: group.filter,
           });
-          if (!md.wafer || md.dice.length === 0) continue;
-          out.push(md);
+          if (md.dice.length === 0) continue;
+          out.push({ md, label: group.label });
         }
         if (alive) {
-          setMaps(out);
+          setEntries(out);
+          setLoadedKey(requestKey);
           setLoading(false);
         }
       } catch (e) {
@@ -78,36 +94,48 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
     return () => {
       alive = false;
     };
-  }, [candidates, spec.test, filter]);
+  }, [groups, spec.test, spec.lsl, spec.usl, requestKey]);
 
   useEffect(() => {
-    if (selected !== null && selected >= maps.length) setSelected(null);
-  }, [maps.length, selected]);
+    if (!loading && selected !== null && selected >= entries.length) setSelected(null);
+  }, [entries.length, selected, loading]);
 
   const binNames = useMemo(() => {
     const out: Record<number, string> = {};
-    for (const b of info?.hbins ?? []) out[b.code] = b.name;
+    for (const b of info?.[spec.binCategory === "soft" ? "sbins" : "hbins"] ?? []) {
+      out[b.code] = b.name;
+    }
     return out;
-  }, [info]);
+  }, [info, spec.binCategory]);
+
+  const binPass = useMemo(
+    () =>
+      (info?.[spec.binCategory === "soft" ? "sbins" : "hbins"] ?? [])
+        .filter((b) => b.pass)
+        .map((b) => b.code),
+    [info, spec.binCategory]
+  );
 
   const readyRef = useRef(onReady);
   readyRef.current = onReady;
-  const mapsRef = useRef(maps);
-  mapsRef.current = maps;
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
   const specRef = useRef(spec);
   specRef.current = spec;
   const themeRef = useRef(theme);
   themeRef.current = theme;
   const binNamesRef = useRef(binNames);
   binNamesRef.current = binNames;
+  const binPassRef = useRef(binPass);
+  binPassRef.current = binPass;
 
   useEffect(() => {
     readyRef.current?.({
       toDataURLs: (format = "jpeg", themeOverride, width = 2400, height = 1500) => {
         const sp = specRef.current;
-        return mapsRef.current.map((md) => {
-          const label = `${md.lotName} / ${md.wafer?.name ?? "?"}`;
+        return entriesRef.current.map(({ md, label }) => {
           const title = `${sp.title} · ${label}`;
+          const limits = mapColorLimits(sp, md);
           const opts: MapOptions = {
             theme: themeOverride ?? themeRef.current,
             palette: sp.palette,
@@ -115,6 +143,10 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
             lsl: sp.showLimits ? (sp.lsl ?? md.lsl) : null,
             usl: sp.showLimits ? (sp.usl ?? md.usl) : null,
             binNames: binNamesRef.current,
+            binCategory: sp.binCategory,
+            binPass: binPassRef.current,
+            vmin: limits.vmin,
+            vmax: limits.vmax,
             presentation: sp.presentation,
           };
           const subtitle =
@@ -132,13 +164,16 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
   }, []);
 
   if (error) return <div className="chart-placeholder">{error}</div>;
-  if (loading) return <div className="chart-placeholder">Loading {candidates.length} wafer maps…</div>;
-  if (maps.length === 0) return <div className="chart-placeholder">No wafers match the current filters.</div>;
+  if (loading || loadedKey !== requestKey) return <div className="chart-placeholder">Loading {groups.length} wafer maps…</div>;
+  if (entries.length === 0) return <div className="chart-placeholder">No wafers match the current filters.</div>;
 
-  if (selected !== null && maps[selected]) {
+  const labels = entries.map((e) => e.label);
+
+  if (selected !== null && entries[selected]) {
     return (
       <MapDetailView
-        maps={maps}
+        maps={entries.map((e) => e.md)}
+        labels={labels}
         index={selected}
         spec={spec}
         mode="value"
@@ -148,26 +183,17 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
     );
   }
 
-  return (
-    <div className="facet-grid map-facets">
-      {maps.map((md, i) => {
-        const label = `${md.lotName} / ${md.wafer?.name ?? "?"}`;
-        return (
-          <div className="facet-card" key={label}>
-            <div className="facet-label">
-              {label} · {md.yieldPct.toFixed(1)}%
-            </div>
-            <div className="facet-map">
-              <WaferMapView
-                data={md}
-                spec={{ ...spec, mapMode: "value", title: `${spec.title} · ${label}` }}
-                preview
-                onOpen={() => setSelected(i)}
-              />
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
+  if (entries.length === 1) {
+    const entry = entries[0];
+    return (
+      <WaferMapView
+        data={entry.md}
+        spec={{ ...spec, mapMode: "value", title: `${spec.title} · ${entry.label}` }}
+      />
+    );
+  }
+
+  return <MapGallery entries={entries.map(({ md, label }) => ({ md, label,
+    lot: !md.isMean ? md.lotName : spec.groupBy === "lot" ? label : "Grouped maps" }))}
+    spec={spec} mode="value" onOpen={setSelected} />;
 }

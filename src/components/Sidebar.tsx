@@ -15,6 +15,19 @@ import {
   IconX,
 } from "./Icons";
 
+function fuzzyMatch(text: string, needle: string): boolean {
+  if (!needle) return true;
+  const hay = text.toLowerCase();
+  if (hay.includes(needle)) return true;
+  let pos = 0;
+  for (const ch of needle) {
+    pos = hay.indexOf(ch, pos);
+    if (pos < 0) return false;
+    pos++;
+  }
+  return true;
+}
+
 function FilterPanel() {
   const info = useStore((s) => s.info);
   const filters = useStore((s) => s.filters);
@@ -54,7 +67,7 @@ function FilterPanel() {
   };
 
   const activeFilters =
-    filters.lots.length + filters.wafers.length + filters.hbins.length + (filters.passOnly ? 1 : 0) + (filters.stat ? 1 : 0);
+    filters.lots.length + filters.wafers.length + filters.hbins.length + (filters.stat ? 1 : 0);
 
   return (
     <div className="filter-panel">
@@ -132,7 +145,7 @@ function FilterPanel() {
 
       <div className="filter-block">
         <div className="filter-label">
-          Hard bin <span className="filter-count">{filters.hbins.length ? `${filters.hbins.length} selected` : "all"}</span>
+          HBIN <span className="filter-count">{filters.hbins.length ? `${filters.hbins.length} selected` : "all"}</span>
         </div>
         <div className="chip-wrap">
           {info.hbins.map((b) => (
@@ -149,15 +162,6 @@ function FilterPanel() {
           ))}
         </div>
       </div>
-
-      <label className="check-row">
-        <input
-          type="checkbox"
-          checked={filters.passOnly}
-          onChange={(e) => patch({ passOnly: e.target.checked })}
-        />
-        Pass dice only
-      </label>
 
       <div className="filter-block">
         <div className="filter-label">Outlier filter</div>
@@ -191,7 +195,6 @@ function FilterPanel() {
             </label>
           </div>
         )}
-        <div className="hint">Outliers are removed from every plot, and the count is shown above the chart.</div>
       </div>
     </div>
   );
@@ -332,8 +335,7 @@ function CustomColumnsPanel() {
     try {
       const updated = await api.removeCustomColumn(col.name);
       setInfo(updated, { keepFilters: true });
-      if (spec.blockCol === col.name) patchSpec({ blockCol: "" });
-      if (spec.scatterZCol === col.name) patchSpec({ scatterZCol: "lot" });
+      if (spec.groupBy === col.name) patchSpec({ groupBy: "none" });
       notify(`Deleted label column “${col.name}”.`);
     } catch (e) {
       setError(String(e));
@@ -353,9 +355,6 @@ function CustomColumnsPanel() {
         <button className="link-btn" onClick={openNew}>
           + Add column
         </button>
-      </div>
-      <div className="hint">
-        Label selected wafers, then colour box plots or scatter categories by that column.
       </div>
       {info.customColumns.length === 0 ? (
         <div className="empty-list">No custom columns yet.</div>
@@ -384,10 +383,6 @@ function CustomColumnsPanel() {
               <div>
                 <div className="modal-title">
                   {draft.editing ? "Edit label column" : "New label column"}
-                </div>
-                <div className="modal-sub">
-                  Select wafers, type a label, and stage as many labels as you need. Nothing is
-                  saved until you press Save labels.
                 </div>
               </div>
               <button className="btn icon ghost" onClick={() => setDraft(null)} title="Close">
@@ -478,10 +473,6 @@ function CustomColumnsPanel() {
                   );
                 })}
               </div>
-              <div className="hint">
-                Stage labels for several wafer groups in one session. Blank labels clear a wafer
-                when you save. Use the filter panel to narrow the list before opening this dialog.
-              </div>
             </div>
             <div className="modal-foot">
               <button className="btn" onClick={() => setDraft(null)}>
@@ -508,9 +499,14 @@ function TestList() {
   const rows = useMemo(() => {
     if (!info) return [];
     const needle = q.trim().toLowerCase();
+    const tokens = needle.split(/\s+/).filter(Boolean);
     return info.tests
       .map((t, i) => ({ t, i }))
-      .filter(({ t }) => !needle || tidyName(t.name).toLowerCase().includes(needle) || t.units.toLowerCase().includes(needle));
+      .filter(({ t }) => {
+        if (!tokens.length) return true;
+        const hay = `${tidyName(t.name)} ${t.units}`.toLowerCase();
+        return tokens.every((token) => fuzzyMatch(hay, token));
+      });
   }, [info, q]);
 
   useEffect(() => {

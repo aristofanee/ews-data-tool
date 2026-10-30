@@ -1,6 +1,6 @@
 [package]
 name = "ews-data-tool"
-version = "0.3.3"
+version = "0.4.0"
 description = "EWS Data Tool - wafer sort data exploration and reporting"
 edition = "2021"
 rust-version = "1.85"
@@ -25,6 +25,8 @@ base64 = "0.22"
 encoding_rs = "0.8"
 chrono = "0.4"
 newtua-lzw-z = "0.1"
+zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [profile.release]
 opt-level = 3

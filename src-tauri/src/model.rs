@@ -141,11 +141,12 @@ impl CustomColumn {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Filter {
+    /// Site codes; 65535 represents missing site metadata.
+    pub sites: Vec<u16>,
     pub lots: Vec<u16>,
     pub wafers: Vec<u16>,
     pub hbins: Vec<u16>,
     pub sbins: Vec<u16>,
-    pub pass_only: bool,
     pub stat: Option<StatFilter>,
 }
 
@@ -186,10 +187,12 @@ pub struct Dataset {
     pub y: Vec<i16>,
     pub hbin: Vec<u16>,
     pub sbin: Vec<u16>,
+    pub site: Vec<Option<u8>>,
     pub tests: Vec<TestInfo>,
     /// One column per test, same length as `rows`.
     pub cols: Vec<Vec<f32>>,
     pub rows: usize,
+    pub retest_count: usize,
     pub hbin_names: HashMap<u16, String>,
     pub sbin_names: HashMap<u16, String>,
     pub pass_hbin: Vec<bool>,
@@ -209,19 +212,17 @@ impl Dataset {
             y: Vec::new(),
             hbin: Vec::new(),
             sbin: Vec::new(),
+            site: Vec::new(),
             tests: Vec::new(),
             cols: Vec::new(),
             rows: 0,
+            retest_count: 0,
             hbin_names: HashMap::new(),
             sbin_names: HashMap::new(),
             pass_hbin: vec![false; 65536],
             pass_sbin: vec![false; 65536],
             custom_cols: Vec::new(),
         }
-    }
-
-    pub fn test_index(&self, name: &str) -> Option<usize> {
-        self.tests.iter().position(|t| t.name == name)
     }
 
     pub fn custom_column(&self, name: &str) -> Option<&CustomColumn> {
@@ -239,7 +240,7 @@ impl Dataset {
                     + c.wafer_values.capacity() * 2
             })
             .sum();
-        cols + self.rows * (2 + 2 + 2 + 2 + 2 + 2)
+        cols + self.rows * (2 + 2 + 2 + 2 + 2 + 2 + 2)
             + self.files.iter().map(|f| f.len()).sum::<usize>()
             + custom
     }
@@ -255,7 +256,7 @@ impl Dataset {
         if name.is_empty() {
             return Err("Enter a column name.".into());
         }
-        let reserved = ["lot", "wafer", "hbin", "sbin", "__wafer"];
+        let reserved = ["lot", "wafer", "hbin", "sbin", "site", "__wafer"];
         if reserved.iter().any(|r| r.eq_ignore_ascii_case(name)) {
             return Err(format!("“{name}” is a reserved column name."));
         }
@@ -354,7 +355,7 @@ impl Dataset {
                     && wafer_ok(self.wafer_of_row[r])
                     && hbin_ok(self.hbin[r])
                     && sbin_ok(self.sbin[r])
-                    && (!f.pass_only || self.is_pass(self.hbin[r]))
+                    && (f.sites.is_empty() || f.sites.contains(&self.site.get(r).copied().flatten().map(u16::from).unwrap_or(u16::MAX)))
             })
             .collect()
     }

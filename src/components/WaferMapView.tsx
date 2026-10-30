@@ -1,9 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MapResponse, PlotSpec } from "../types";
-import { renderMapImage, WaferMapRenderer, type MapHit, type MapOptions } from "../charts/waferMap";
+import {
+  mapColorLimits,
+  renderMapImage,
+  WaferMapRenderer,
+  type MapHit,
+  type MapOptions,
+} from "../charts/waferMap";
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
-import { fmtInt, fmtMap, tidyName } from "../lib/format";
+import { fmtMap, tidyName } from "../lib/format";
+import { binLabel } from "../lib/theme";
 
 export interface MapExportApi {
   toDataURL: (
@@ -34,14 +41,28 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<WaferMapRenderer | null>(null);
   const [hover, setHover] = useState<MapHit | null>(null);
-  const [zoom, setZoom] = useState(1);
   const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
 
   const binNames = useMemo(() => {
     const map: Record<number, string> = {};
-    for (const b of info?.hbins ?? []) map[b.code] = b.name;
+    for (const b of info?.[spec.binCategory === "soft" ? "sbins" : "hbins"] ?? []) {
+      map[b.code] = b.name;
+    }
     return map;
-  }, [info]);
+  }, [info, spec.binCategory]);
+
+  const binPass = useMemo(
+    () =>
+      (info?.[spec.binCategory === "soft" ? "sbins" : "hbins"] ?? [])
+        .filter((b) => b.pass)
+        .map((b) => b.code),
+    [info, spec.binCategory]
+  );
+
+  const limits = useMemo(
+    () => (spec.mapMode === "value" ? mapColorLimits(spec, data) : {}),
+    [spec, data]
+  );
 
   const opts = useMemo<MapOptions>(
     () => ({
@@ -51,6 +72,10 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
       lsl: spec.showLimits ? (spec.lsl ?? data.lsl) : null,
       usl: spec.showLimits ? (spec.usl ?? data.usl) : null,
       binNames,
+      binCategory: spec.binCategory,
+      binPass,
+      vmin: limits.vmin,
+      vmax: limits.vmax,
       presentation: preview ? false : spec.presentation,
       showLegend: preview ? false : undefined,
     }),
@@ -62,10 +87,12 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
       spec.lsl,
       spec.usl,
       spec.presentation,
+      spec.binCategory,
       preview,
-      data.lsl,
-      data.usl,
+      data,
       binNames,
+      binPass,
+      limits,
     ]
   );
 
@@ -109,7 +136,6 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
       // and a high-resolution wheel feel smooth instead of jumping 18%.
       const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025));
       r.zoomAt(e.clientX, e.clientY, Math.min(2, Math.max(0.5, factor)));
-      setZoom(r.getZoom());
       setHover(null);
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
@@ -144,7 +170,6 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
     if (!r) return;
     r.resize();
     r.setData(data, opts);
-    setZoom(r.getZoom());
   }, [data, opts]);
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -166,7 +191,6 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
           r.panBy(dx, dy);
           drag.x = e.clientX;
           drag.y = e.clientY;
-          setZoom(r.getZoom());
           setHover(null);
         }
         return;
@@ -198,17 +222,8 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
   const onDoubleClick = () => {
     if (preview) return;
     rendererRef.current?.resetView();
-    setZoom(1);
     setHover(null);
   };
-
-  const emptyCount = useMemo(
-    () =>
-      spec.mapMode === "value"
-        ? data.dice.reduce((n, d) => (Number.isFinite(d.v) ? n : n + 1), 0)
-        : 0,
-    [data, spec.mapMode]
-  );
 
   const units = data.test?.units ?? "";
   const outOfSpec =
@@ -249,25 +264,21 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
             </div>
           ) : (
             <div className="map-tip-value">
-              Bin {hover.die.hbin}
-              <span>{binNames[hover.die.hbin] ?? ""}</span>
+              {spec.binCategory === "soft" ? "SBIN" : "HBIN"}{" "}
+              {spec.binCategory === "soft" ? hover.die.sbin : hover.die.hbin}
+              <span>
+                {binNames[spec.binCategory === "soft" ? hover.die.sbin : hover.die.hbin] ?? ""}
+              </span>
             </div>
           )}
           <div className="map-tip-row">
-            HBIN {hover.die.hbin} · {binNames[hover.die.hbin] ?? "—"}
+            {binLabel("hard", hover.die.hbin, info?.hbins.find((b) => b.code === hover.die.hbin)?.name)}
           </div>
-          <div className="map-tip-row">SBIN {hover.die.sbin}</div>
+          <div className="map-tip-row">{binLabel("soft", hover.die.sbin, info?.sbins.find((b) => b.code === hover.die.sbin)?.name)}</div>
           {outOfSpec && <div className="map-tip-flag">Out of spec</div>}
         </div>
       )}
-      {!preview && (
-        <div className="map-hint">
-          Pinch or scroll to zoom · drag to pan · double-click to reset
-          {data.isMean ? ` · mean of ${fmtInt(data.waferCount)} wafers` : ""}
-          {emptyCount > 0 ? ` · ${fmtInt(emptyCount)} dice without data` : ""}
-          {zoom > 1.01 ? ` · ${zoom.toFixed(1)}×` : ""}
-        </div>
-      )}
+
     </div>
   );
 }

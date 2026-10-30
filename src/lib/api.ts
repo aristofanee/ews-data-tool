@@ -13,6 +13,7 @@ import type {
   TrendResponse,
 } from "../types";
 import * as mock from "./mock";
+import { cachedMap, cachedPlot, invalidateMaps } from "./mapCache";
 
 /** True when running inside the Tauri shell (real files, real dataset). */
 export const isTauri =
@@ -73,8 +74,10 @@ export async function openPaths(
   onProgress?: (pct: number, msg: string) => void,
   mapping?: CsvMapping | null
 ): Promise<DatasetInfo> {
-  if (!isTauri) return mock.openPaths(paths, onProgress);
-  return invoke<DatasetInfo>("open_paths", { paths, mapping: mapping ?? null });
+  invalidateMaps();
+  const info = !isTauri ? await mock.openPaths(paths, onProgress) : await invoke<DatasetInfo>("open_paths", { paths, mapping: mapping ?? null });
+  invalidateMaps();
+  return info;
 }
 
 export async function inspectCsv(path: string): Promise<CsvInspection> {
@@ -91,18 +94,24 @@ export async function addCustomColumn(
   name: string,
   assignments: { wafer: number; label: string }[]
 ): Promise<DatasetInfo> {
-  if (!isTauri) return mock.addCustomColumn(name, assignments);
-  return invoke<DatasetInfo>("add_custom_column", { name, assignments });
+  invalidateMaps();
+  const info = !isTauri ? await mock.addCustomColumn(name, assignments) : await invoke<DatasetInfo>("add_custom_column", { name, assignments });
+  invalidateMaps();
+  return info;
 }
 
 export async function removeCustomColumn(name: string): Promise<DatasetInfo> {
-  if (!isTauri) return mock.removeCustomColumn(name);
-  return invoke<DatasetInfo>("remove_custom_column", { name });
+  invalidateMaps();
+  const info = !isTauri ? await mock.removeCustomColumn(name) : await invoke<DatasetInfo>("remove_custom_column", { name });
+  invalidateMaps();
+  return info;
 }
 
 export async function restoreCustomColumns(columns: CustomColumn[]): Promise<DatasetInfo> {
-  if (!isTauri) return mock.restoreCustomColumns(columns);
-  return invoke<DatasetInfo>("restore_custom_columns", { columns });
+  invalidateMaps();
+  const info = !isTauri ? await mock.restoreCustomColumns(columns) : await invoke<DatasetInfo>("restore_custom_columns", { columns });
+  invalidateMaps();
+  return info;
 }
 
 export function onImportProgress(cb: (pct: number, msg: string) => void): () => void {
@@ -132,28 +141,41 @@ export function onImportProgress(cb: (pct: number, msg: string) => void): () => 
 
 export async function boxPlot(req: {
   test: number;
-  groupBy: "wafer" | "lot";
+  xAxis: string;
+  groupBy?: string | null;
   filter: Filter;
   maxPoints?: number;
-  blockCol?: string;
 }): Promise<BoxResponse> {
-  if (!isTauri) return mock.boxPlot(req);
-  return invoke<BoxResponse>("box_plot", { req });
+  return cachedPlot("box_plot", req, () => !isTauri ? mock.boxPlot(req) : invoke<BoxResponse>("box_plot", { req }), (d) => 1024 + d.groups.reduce((n, g) => n + g.values.length * 24 + 512, 0));
 }
 
 export async function waferMap(req: {
+  lsl?: number | null;
+  usl?: number | null;
   wafer: number | null;
   test: number | null;
   mode: "value" | "bin";
   filter: Filter;
 }): Promise<MapResponse> {
-  if (!isTauri) return mock.waferMap(req);
-  return invoke<MapResponse>("wafer_map", { req });
+  return cachedMap("map", req, () => !isTauri ? mock.waferMap(req) : invoke<MapResponse>("wafer_map", { req }), (d) => d.dice.length);
 }
 
-export async function binOverview(req: { filter: Filter }): Promise<BinOverviewResponse> {
-  if (!isTauri) return mock.binOverview(req);
-  return invoke<BinOverviewResponse>("bin_overview", { req });
+export async function waferMaps(req: Parameters<typeof waferMap>[0]): Promise<MapResponse[]> {
+  return cachedMap("waferMaps", req, async () => {
+    if (isTauri) return invoke<MapResponse[]>("wafer_maps", { req });
+    const info = mock.getDatasetInfo();
+    return Promise.all(info.wafers.flatMap((w, wafer) =>
+      (!req.filter.wafers.length || req.filter.wafers.includes(wafer)) &&
+      (!req.filter.lots.length || req.filter.lots.includes(w.lot))
+        ? [mock.waferMap({ ...req, wafer })] : []));
+  }, (maps) => maps.reduce((n, d) => n + d.dice.length, 0));
+}
+
+export async function binOverview(req: {
+  filter: Filter;
+  category: "hard" | "soft";
+}): Promise<BinOverviewResponse> {
+  return cachedMap("bins", req.filter, () => !isTauri ? mock.binOverview(req) : invoke<BinOverviewResponse>("bin_overview", { req }), (d) => d.wafers.reduce((n, w) => n + w.dice.length, 0));
 }
 
 export async function pareto(req: {
@@ -162,26 +184,24 @@ export async function pareto(req: {
   top?: number;
   groupBy?: string | null;
 }): Promise<ParetoResponse> {
-  if (!isTauri) return mock.pareto(req);
-  return invoke<ParetoResponse>("pareto", { req });
+  return cachedPlot("pareto", req, () => !isTauri ? mock.pareto(req) : invoke<ParetoResponse>("pareto", { req }), (d) => 1024 + d.bars.length * 128 + d.groups.length * 128 + d.series.reduce((n, s) => n + s.counts.length * 16 + 128, 0));
 }
 
 export async function histogram(req: {
   test: number;
   filter: Filter;
   bins?: number | null;
+  groupBy?: string | null;
 }): Promise<HistResponse> {
-  if (!isTauri) return mock.histogram(req);
-  return invoke<HistResponse>("histogram", { req });
+  return cachedPlot("histogram", req, () => !isTauri ? mock.histogram(req) : invoke<HistResponse>("histogram", { req }), (d) => 1024 + d.counts.length * 16 + d.groups.reduce((n, g) => n + g.counts.length * 8 + 128, 0));
 }
 
 export async function trend(req: {
   test: number;
-  by: "wafer" | "lot";
+  by: string;
   filter: Filter;
 }): Promise<TrendResponse> {
-  if (!isTauri) return mock.trend(req);
-  return invoke<TrendResponse>("trend", { req });
+  return cachedPlot("trend", req, () => !isTauri ? mock.trend(req) : invoke<TrendResponse>("trend", { req }), (d) => 1024 + d.points.length * 128);
 }
 
 export async function scatter(req: {
@@ -190,11 +210,11 @@ export async function scatter(req: {
   zMode: "none" | "continuous" | "category";
   zTest?: number | null;
   zCol?: string | null;
+  groupBy?: string | null;
   filter: Filter;
   maxPoints?: number;
 }): Promise<ScatterResponse> {
-  if (!isTauri) return mock.scatter(req);
-  return invoke<ScatterResponse>("scatter", { req });
+  return cachedPlot("scatter", req, () => !isTauri ? mock.scatter(req) : invoke<ScatterResponse>("scatter", { req }), (d) => 1024 + d.series.reduce((n, s) => n + s.points.length * 160 + 256, 0));
 }
 
 /* ------------------------------------------------------------------ */

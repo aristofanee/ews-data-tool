@@ -12,16 +12,23 @@ import {
   type Figure,
 } from "../charts/figures";
 import { PlotlyChart } from "./PlotlyChart";
+import { PlotPreviewGrid } from "./PlotPreviewGrid";
+import { usePlotSelection, usePlotViewKey } from "../lib/usePlotMemory";
 import { WaferMapView, type MapExportApi } from "./WaferMapView";
 import { BinMapView, type BinMapExportApi } from "./BinMapView";
 import { MapFacetView, type MapFacetExportApi } from "./MapFacetView";
+import { ParetoFacetView, type ParetoFacetExportApi } from "./ParetoFacetView";
 import { EmptyState } from "./EmptyState";
 import { EXPORT_CONFIG } from "../charts/plotlyTheme";
 import type { Theme } from "../lib/theme";
+import { binLabel } from "../lib/theme";
 import * as api from "../lib/api";
 import { fmt, fmtInt, safeName } from "../lib/format";
 import {
+  IconArrowLeft,
   IconBox,
+  IconChevronLeft,
+  IconChevronRight,
   IconCopy,
   IconHist,
   IconImage,
@@ -35,11 +42,11 @@ import {
 const TABS: { type: PlotType; label: string; Icon: ComponentType<{ size?: number }> }[] = [
   { type: "box", label: "Box plot", Icon: IconBox },
   { type: "map", label: "Wafer map", Icon: IconMap },
+  { type: "hist", label: "Histogram", Icon: IconHist },
+  { type: "scatter", label: "Scatter", Icon: IconScatter },
+  { type: "trend", label: "Trend", Icon: IconTrend },
   { type: "binmap", label: "Bin map", Icon: IconMap },
   { type: "pareto", label: "Pareto", Icon: IconPareto },
-  { type: "hist", label: "Histogram", Icon: IconHist },
-  { type: "trend", label: "Trend", Icon: IconTrend },
-  { type: "scatter", label: "Scatter", Icon: IconScatter },
 ];
 
 interface Stat {
@@ -58,6 +65,15 @@ function cpk(mean: number, sd: number, lsl: number | null, usl: number | null): 
   return { cp, cpk: k };
 }
 
+function categoryLabel(value: string): string {
+  if (value === "site") return "Site";
+  if (value === "wafer") return "Wafer ID (OCR)";
+  if (value === "lot") return "Lot";
+  if (value === "hbin") return "HBIN";
+  if (value === "sbin") return "SBIN";
+  return value;
+}
+
 function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
   switch (data.kind) {
     case "box": {
@@ -69,9 +85,10 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
         { k: "SD", v: fmt(s.sd) },
         { k: "Median", v: fmt(s.median) },
       ];
-      if (d.cp !== null) out.push({ k: "Cp", v: fmt(d.cp, 2) });
-      if (d.cpk !== null)
-        out.push({ k: "Cpk", v: fmt(d.cpk, 2), tone: d.cpk < 1.33 ? "warn" : d.cpk >= 1.67 ? "good" : undefined });
+      const capability = cpk(s.mean, s.sd, spec.lsl ?? d.test.loSpec, spec.usl ?? d.test.hiSpec);
+      if (capability.cp !== null) out.push({ k: "Cp", v: fmt(capability.cp, 2) });
+      if (capability.cpk !== null)
+        out.push({ k: "Cpk", v: fmt(capability.cpk, 2), tone: capability.cpk < 1.33 ? "warn" : capability.cpk >= 1.67 ? "good" : undefined });
       if (d.excluded > 0) out.push({ k: "Excluded", v: fmtInt(d.excluded), tone: "warn" });
       return out;
     }
@@ -79,15 +96,21 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
       const d = data.data;
       const out: Stat[] = [
         {
-          k: "Yield",
+          k: "Wafer yield (HBIN 1)",
           v: `${d.yieldPct.toFixed(2)}%`,
-          tone: d.yieldPct < 90 ? "bad" : d.yieldPct < 96 ? "warn" : "good",
+          tone: "good",
         },
-        { k: "Pass", v: fmtInt(d.pass) },
-        { k: "Fail", v: fmtInt(d.fail) },
-        { k: "Dice", v: fmtInt(d.pass + d.fail) },
+        { k: "Bin 1", v: fmtInt(d.pass) },
+        { k: "Other bins", v: fmtInt(d.fail) },
+        { k: "Tested dice", v: fmtInt(d.pass + d.fail) },
       ];
-      if (d.isMean) {
+      if (d.testYieldPct != null) {
+        out.push({ k: "Test yield (LSL/USL)", v: `${d.testYieldPct.toFixed(2)}%`, tone: "good" });
+        out.push({ k: "Considered dice", v: fmtInt((d.testPass ?? 0) + (d.testFail ?? 0)) });
+      }
+      if (spec.groupBy !== "none") {
+        out.unshift({ k: "View", v: `Grouped by ${categoryLabel(spec.groupBy)}` });
+      } else if (d.isMean) {
         out.unshift({ k: "Scope", v: `All wafers (mean of ${fmtInt(d.waferCount)})` });
       }
       if (d.excluded > 0) out.push({ k: "Excluded", v: fmtInt(d.excluded), tone: "warn" });
@@ -100,10 +123,11 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
       const tested = pass + fail;
       return [
         {
-          k: "Yield",
+          k: "Wafer yield (HBIN 1)",
           v: `${tested ? ((pass * 100) / tested).toFixed(2) : "0.00"}%`,
-          tone: tested && pass / tested < 0.9 ? "bad" : tested && pass / tested < 0.96 ? "warn" : "good",
+          tone: "good",
         },
+        { k: "Bin", v: spec.binCategory === "soft" ? "SBIN" : "HBIN" },
         { k: "Wafers", v: fmtInt(d.wafers.length) },
         { k: "Pass", v: fmtInt(pass) },
         { k: "Fail", v: fmtInt(fail) },
@@ -114,9 +138,24 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
       const top = d.bars[0];
       const out: Stat[] = [
         { k: "Failures", v: fmtInt(d.failTotal) },
-        { k: "Bin categories", v: fmtInt(d.bars.length) },
+        { k: "Bin", v: spec.binCategory === "soft" ? "SBIN" : "HBIN" },
+        {
+          k: "Bin categories",
+          v: fmtInt(d.mode === "global" ? d.bars.length : d.series.length),
+        },
+        {
+          k: "Yield",
+          v: `${d.yieldPct.toFixed(2)}%`,
+          tone: "good",
+        },
       ];
-      if (top) out.push({ k: "Top bin", v: `${top.name} · ${top.pct.toFixed(1)}%` });
+      if (top) out.push({ k: "Top bin", v: `${binLabel(spec.binCategory, top.code, top.name)} · ${top.pct.toFixed(1)}%` });
+      if (d.mode === "grouped") out.push({ k: "Groups", v: fmtInt(d.groups.length) });
+      if (spec.groupBy !== "none") {
+        out.unshift({ k: "View", v: `Split by ${categoryLabel(spec.groupBy)}` });
+      } else if (spec.xAxis !== "none") {
+        out.unshift({ k: "X axis", v: categoryLabel(spec.xAxis) });
+      }
       return out;
     }
     case "hist": {
@@ -144,8 +183,14 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
         { k: "Mean", v: fmt(avg) },
       ];
       if (means.length) {
-        out.push({ k: "Min", v: fmt(Math.min(...means)) });
-        out.push({ k: "Max", v: fmt(Math.max(...means)) });
+        let min = Infinity;
+        let max = -Infinity;
+        for (const v of means) {
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
+        out.push({ k: "Min", v: fmt(min) });
+        out.push({ k: "Max", v: fmt(max) });
       }
       return out;
     }
@@ -153,8 +198,8 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
       const d = data.data;
       const points = d.series.reduce((n, s) => n + s.points.length, 0);
       const out: Stat[] = [
-        { k: "Dice", v: fmtInt(d.total) },
-        { k: "Points", v: fmtInt(points) },
+        { k: "Considered dice", v: fmtInt(d.total) },
+        { k: "Displayed points", v: fmtInt(points) },
       ];
       if (d.r !== null && Number.isFinite(d.r)) {
         out.push({ k: "r", v: fmt(d.r, 3) });
@@ -172,12 +217,25 @@ interface Facet {
   label: string;
 }
 
+function dataMatchesSpec(data: PlotData | null, spec: PlotSpec): boolean {
+  return !!data && data.kind === spec.type;
+}
+
 function facetsFor(data: PlotData, spec: PlotSpec): Facet[] {
-  if (!spec.splitPlots) return [];
+  if (!spec.splitPlots || spec.groupBy === "none") return [];
   if (data.kind === "box") {
-    return [...new Set(data.data.groups.map((g) => g.block))].map((label) => ({ label }));
+    return [...new Set(data.data.groups.map((g) => g.groupLabel).filter(Boolean))].map(
+      (label) => ({ label })
+    );
   }
-  if (data.kind === "scatter" && data.data.zMode === "category") {
+  if (data.kind === "hist") {
+    return data.data.groups.map((g) => ({ key: g.key, label: g.label }));
+  }
+  if (
+    data.kind === "scatter" &&
+    data.data.series.length > 1 &&
+    (data.data.groupLabel !== "" || data.data.zMode === "category")
+  ) {
     return data.data.series.map((s) => ({ key: s.key, label: s.name }));
   }
   return [];
@@ -188,19 +246,44 @@ function buildFigure(
   spec: PlotSpec,
   theme: Theme,
   title?: string,
-  facet?: Facet
+  facet?: Facet,
+  preview = false
 ): Figure | null {
   switch (data.kind) {
     case "box":
-      return figureBox(data.data, { theme, spec, title, facetLabel: facet?.label });
+      return figureBox(data.data, {
+        theme,
+        spec,
+        title,
+        facetLabel: facet?.label,
+        preview,
+      });
     case "pareto":
-      return figurePareto(data.data, { theme, spec, title });
+      return figurePareto(data.data, {
+        theme,
+        spec,
+        title,
+        facetKey: facet?.key,
+        preview,
+      });
     case "hist":
-      return figureHist(data.data, { theme, spec, title });
+      return figureHist(data.data, {
+        theme,
+        spec,
+        title,
+        facetLabel: facet?.label,
+        preview,
+      });
     case "trend":
       return figureTrend(data.data, { theme, spec, title });
     case "scatter":
-      return figureScatter(data.data, { theme, spec, title, facetKey: facet?.key });
+      return figureScatter(data.data, {
+        theme,
+        spec,
+        title,
+        facetKey: facet?.key,
+        preview,
+      });
     default:
       return null;
   }
@@ -216,11 +299,15 @@ function LazyFacetChart({
   spec,
   theme,
   facet,
+  preview = false,
+  onOpen,
 }: {
   data: PlotData;
   spec: PlotSpec;
   theme: Theme;
   facet: Facet;
+  preview?: boolean;
+  onOpen?: () => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<HTMLDivElement>(null);
@@ -250,12 +337,23 @@ function LazyFacetChart({
   // The facet label is already shown above the plot; do not repeat the title
   // inside the plot area.
   const figure = useMemo(
-    () => (visible ? buildFigure(data, spec, theme, undefined, facet) : null),
-    [visible, data, spec, theme, facet]
+    () => (visible ? buildFigure(data, spec, theme, undefined, facet, preview) : null),
+    [visible, data, spec, theme, facet, preview]
   );
 
   return (
-    <div className="facet-card">
+    <div
+      className={"facet-card" + (preview ? " preview" : "")}
+      onClick={onOpen}
+      role={onOpen ? "button" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      onKeyDown={(e) => {
+        if (onOpen && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+    >
       <div className="facet-label">{facet.label}</div>
       <div className="facet-chart-body" ref={wrapRef}>
         {!figure && (
@@ -264,9 +362,132 @@ function LazyFacetChart({
             <span>Preparing…</span>
           </div>
         )}
-        {figure && <PlotlyChart figure={figure} hostRef={plotRef} />}
+        {figure && <PlotlyChart figure={figure} hostRef={plotRef} staticPlot={preview} />}
+        {preview && onOpen && (
+          <button
+            className="facet-open"
+            aria-label={`Open ${facet.label}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpen();
+            }}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+/** Mosaic of split-plot previews; clicking one opens the enlarged chart. */
+function SplitPlotView({
+  data,
+  spec,
+  theme,
+  facets,
+}: {
+  data: PlotData;
+  spec: PlotSpec;
+  theme: Theme;
+  facets: Facet[];
+}) {
+  const viewKey = usePlotViewKey(spec);
+  const [selected, setSelected] = usePlotSelection(`split:${spec.type}`, viewKey);
+  const facet = selected !== null ? facets[selected] : undefined;
+  const detail = useMemo(
+    () =>
+      data && facet
+        ? buildFigure(data, spec, theme, undefined, facet, false)
+        : null,
+    [data, spec, theme, facet]
+  );
+
+  useEffect(() => {
+    if (selected !== null && selected >= facets.length) setSelected(null);
+  }, [facets.length, selected]);
+
+  useEffect(() => {
+    if (selected === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName ?? "";
+      if (target?.isContentEditable || tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") {
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setSelected((i) => (i === null ? null : Math.max(0, i - 1)));
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        setSelected((i) => (i === null ? null : Math.min(facets.length - 1, i + 1)));
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setSelected(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected, facets.length]);
+
+  if (facet && selected !== null) {
+    return (
+      <div className="facet-detail">
+        <div className="facet-detail-head">
+          <button className="btn map-detail-back" onClick={() => setSelected(null)} title="Back to all plots">
+            <IconArrowLeft size={14} />
+            All plots
+          </button>
+          <div className="facet-detail-title">{facet.label}</div>
+          <div className="map-detail-nav">
+            <button
+              className="btn icon"
+              onClick={() => setSelected(Math.max(0, selected - 1))}
+              disabled={selected <= 0}
+              title="Previous plot (left arrow)"
+            >
+              <IconChevronLeft size={16} />
+            </button>
+            <span className="map-detail-count">
+              {selected + 1} / {facets.length}
+            </span>
+            <button
+              className="btn icon"
+              onClick={() => setSelected(Math.min(facets.length - 1, selected + 1))}
+              disabled={selected >= facets.length - 1}
+              title="Next plot (right arrow)"
+            >
+              <IconChevronRight size={16} />
+            </button>
+          </div>
+        </div>
+        <div className="facet-detail-body">
+          {detail ? (
+            <PlotlyChart key={facet.key ?? facet.label} figure={detail} cacheKey={`${viewKey}:${facet.key ?? facet.label}`} />
+          ) : (
+            <div className="chart-placeholder">
+              <div className="spinner" />
+              <span>Preparing plot…</span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <PlotPreviewGrid>
+      {facets.map((f, i) => (
+        <LazyFacetChart
+          key={f.key ?? f.label}
+          data={data}
+          spec={spec}
+          theme={theme}
+          facet={f}
+          preview
+          onOpen={() => setSelected(i)}
+        />
+      ))}
+    </PlotPreviewGrid>
   );
 }
 
@@ -307,6 +528,7 @@ async function renderExportFigure(
 export function ChartPanel() {
   const info = useStore((s) => s.info);
   const spec = useStore((s) => s.spec);
+  const viewKey = usePlotViewKey(spec);
   const theme = useStore((s) => s.theme);
   const filters = useStore((s) => s.filters);
   const setPlotType = useStore((s) => s.setPlotType);
@@ -319,27 +541,39 @@ export function ChartPanel() {
   const plotRef = useRef<HTMLDivElement>(null);
   const mapApi = useRef<MapExportApi | null>(null);
   const mapFacetApi = useRef<MapFacetExportApi | null>(null);
+  const paretoFacetApi = useRef<ParetoFacetExportApi | null>(null);
   const binMapApi = useRef<BinMapExportApi | null>(null);
   const [titleDraft, setTitleDraft] = useState(spec.title);
 
   useEffect(() => setTitleDraft(spec.title), [spec.title]);
 
-  const facets = useMemo<Facet[]>(() => (data ? facetsFor(data, spec) : []), [data, spec]);
-  const splitActive = facets.length > 1;
+  // While a new plot type is loading, usePlotData still exposes the previous
+  // response. Never render that stale kind: switching away from a wafer map
+  // used to flash the old map for a frame.
+  const currentData = dataMatchesSpec(data, spec) ? data : null;
+  const facets = useMemo<Facet[]>(
+    () => (currentData ? facetsFor(currentData, spec) : []),
+    [currentData, spec]
+  );
+  const splitActive = facets.length > 0;
+  const paretoSplitActive = spec.type === "pareto" && spec.groupBy !== "none";
   // Do not build the hidden full-size figure while a split view is active.
   // With tens of thousands of scatter points that construction is pure waste.
   const figure = useMemo<Figure | null>(
-    () => (data && !splitActive ? buildFigure(data, spec, theme) : null),
-    [data, spec, theme, splitActive]
+    () =>
+      currentData && !splitActive && !paretoSplitActive
+        ? buildFigure(currentData, spec, theme)
+        : null,
+    [currentData, spec, theme, splitActive, paretoSplitActive]
   );
   const mapSpec = useMemo(() => ({ ...spec, mapMode: "value" as const }), [spec]);
 
   if (!info) return <EmptyState />;
 
-  const stats = data ? statsFor(data, spec) : [];
+  const stats = currentData ? statsFor(currentData, spec) : [];
   const isMap = spec.type === "map";
   const isBinMap = spec.type === "binmap";
-  const mapSplitActive = isMap && spec.splitPlots;
+  const mapSplitActive = isMap && spec.groupBy !== "none";
 
   const commitTitle = () => {
     const t = titleDraft.trim();
@@ -356,10 +590,13 @@ export function ChartPanel() {
         url = mapApi.current?.toDataURL("png", "light", 2400, 1500) ?? null;
       } else if (isBinMap) {
         url = binMapApi.current?.toDataURL("png", "light", 2400, 1500) ?? null;
-      } else if (data) {
+      } else if (paretoSplitActive) {
+        const first = paretoFacetApi.current?.figures("light")[0];
+        if (first) url = await renderExportFigure(first.figure, "png");
+      } else if (currentData) {
         const first = splitActive ? facets[0] : undefined;
         const fig = buildFigure(
-          data,
+          currentData,
           spec,
           "light",
           first ? `${spec.title} · ${first.label}` : spec.title,
@@ -414,14 +651,27 @@ export function ChartPanel() {
         notify(`Saved ${images.length} split map${images.length === 1 ? "" : "s"}.`);
         return;
       }
+      if (paretoSplitActive) {
+        const folder = await api.pickFolder();
+        if (!folder) return;
+        const images = paretoFacetApi.current?.figures("light") ?? [];
+        const base = folder.replace(/[\\/]+$/, "");
+        for (const image of images) {
+          const url = await renderExportFigure(image.figure, "jpeg");
+          const file = `${safeName(spec.title)}_${safeName(image.label)}.jpg`;
+          await api.saveImage(`${base}\\${file}`, url);
+        }
+        notify(`Saved ${images.length} split Pareto${images.length === 1 ? "" : "s"}.`);
+        return;
+      }
       if (splitActive && !isMap && !isBinMap) {
         const folder = await api.pickFolder();
         if (!folder) return;
         let count = 0;
         for (const facet of facets) {
-          if (!data) break;
+          if (!currentData) break;
           const facetFigure = buildFigure(
-            data,
+            currentData,
             spec,
             "light",
             `${spec.title} · ${facet.label}`,
@@ -445,8 +695,8 @@ export function ChartPanel() {
         url = mapApi.current?.toDataURL("jpeg", "light", 2400, 1500) ?? null;
       } else if (isBinMap) {
         url = binMapApi.current?.toDataURL("jpeg", "light", 2400, 1500) ?? null;
-      } else if (data) {
-        const fig = buildFigure(data, spec, "light", spec.title);
+      } else if (currentData) {
+        const fig = buildFigure(currentData, spec, "light", spec.title);
         if (fig) url = await renderExportFigure(fig, "jpeg");
       }
       if (!url) throw new Error("The chart is not ready yet.");
@@ -511,12 +761,15 @@ export function ChartPanel() {
                 <span className={"stat-v" + (s.tone ? ` tone-${s.tone}` : "")}>{s.v}</span>
               </div>
             ))}
-            {(data?.kind === "box" || data?.kind === "scatter") && data.data.truncated && (
-              <div className="stat">
-                <span className="stat-k">Note</span>
-                <span className="stat-v tone-warn">large N · points sampled</span>
-              </div>
-            )}
+            {(currentData?.kind === "box" || currentData?.kind === "scatter") &&
+              currentData.data.truncated && (
+                <div className="stat" title={currentData.kind === "scatter"
+                  ? `Showing ${fmtInt(currentData.data.series.reduce((n, s) => n + s.points.length, 0))} of ${fmtInt(currentData.data.total)} considered X/Y measurements for responsiveness. Correlation uses all considered measurements; the fit line uses the displayed subset. No measurements are removed from the imported data.`
+                  : "Regular markers are sampled for responsiveness. Every outlier is retained, and box statistics use all considered measurements."}>
+                  <span className="stat-k">Rendering</span>
+                  <span className="stat-v tone-warn">{currentData.kind === "scatter" ? "Sampled display" : "Regular points sampled"}</span>
+                </div>
+              )}
             <div className="stats-spacer" />
             <span className="plot-kind">{PLOT_LABELS[spec.type]}</span>
           </div>
@@ -527,7 +780,6 @@ export function ChartPanel() {
             <div className="chart-error">
               <div className="chart-error-title">Could not build this plot</div>
               <div className="chart-error-msg">{error}</div>
-              <div className="hint">Try a different test, or reset the filters on the left.</div>
             </div>
           ) : mapSplitActive ? (
             <MapFacetView
@@ -535,35 +787,35 @@ export function ChartPanel() {
               filter={filters}
               onReady={(apiRef) => (mapFacetApi.current = apiRef)}
             />
-          ) : data?.kind === "map" ? (
+          ) : paretoSplitActive ? (
+            <ParetoFacetView
+              spec={spec}
+              filter={filters}
+              onReady={(apiRef) => (paretoFacetApi.current = apiRef)}
+            />
+          ) : currentData?.kind === "map" ? (
             <WaferMapView
-              data={data.data}
+              data={currentData.data}
               spec={mapSpec}
               onReady={(apiRef) => (mapApi.current = apiRef)}
             />
-          ) : data?.kind === "binmap" ? (
-            <BinMapView data={data.data} spec={spec} onReady={(apiRef) => (binMapApi.current = apiRef)} />
-          ) : splitActive && data ? (
-            <div className="facet-grid">
-              {facets.map((facet) => (
-                <LazyFacetChart
-                  key={facet.key ?? facet.label}
-                  data={data}
-                  spec={spec}
-                  theme={theme}
-                  facet={facet}
-                />
-              ))}
-            </div>
+          ) : currentData?.kind === "binmap" ? (
+            <BinMapView
+              data={currentData.data}
+              spec={spec}
+              onReady={(apiRef) => (binMapApi.current = apiRef)}
+            />
+          ) : splitActive && currentData ? (
+            <SplitPlotView data={currentData} spec={spec} theme={theme} facets={facets} />
           ) : figure ? (
-            <PlotlyChart figure={figure} hostRef={plotRef} />
+            <PlotlyChart figure={figure} hostRef={plotRef} cacheKey={viewKey} />
           ) : (
             <div className="chart-placeholder">
               <div className="spinner" />
               <span>Preparing plot…</span>
             </div>
           )}
-          {loading && data && <div className="chart-busy" />}
+          {loading && currentData && <div className="chart-busy" />}
         </div>
       </div>
     </>

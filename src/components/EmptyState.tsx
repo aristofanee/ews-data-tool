@@ -28,7 +28,11 @@ function WaferArt() {
             <stop offset="58%" stopColor="#1d4ed8" />
             <stop offset="100%" stopColor="#0b2a6b" />
           </radialGradient>
+          <clipPath id="homeWaferClip">
+            <path d="M -1.1 8.932 A 9 9 0 1 1 1.1 8.932 L 0 7.8 Z" />
+          </clipPath>
         </defs>
+        <g clipPath="url(#homeWaferClip)">
         <circle cx="0" cy="0" r="9" fill="url(#waferGrad)" />
         {cells.map((c, i) => (
           <rect
@@ -42,7 +46,7 @@ function WaferArt() {
             opacity={c.fail ? 1 : 0.55 + ((c.x * 3 + c.y * 5) % 7) * 0.045}
           />
         ))}
-        <path d="M -1.1 8.55 L 1.1 8.55 L 0 7.3 Z" fill="var(--bg)" />
+        </g>
       </svg>
       <div className="art-badge badge-yield">
         <span>Wafer 07</span>
@@ -66,18 +70,10 @@ export function EmptyState() {
           <div className="eyebrow">
             <span className="eyebrow-dot" /> Wafer-sort analytics · offline
           </div>
-          <h1>
-            From STDF to a report
-            <br />
-            in a few clicks.
-          </h1>
-          <p>
-            Open one lot or hundreds. Explore box plots, wafer maps and Pareto charts, then build a full
-            JPG report from a single template — no scripting.
-          </p>
+          <h1>EWS Data Tool</h1>
           <div className="empty-actions">
             <button className="btn primary lg" onClick={() => open()}>
-              <IconFolder size={17} /> Open STDF or CSV
+              <IconFolder size={17} /> Open STDF, ZIP or CSV
             </button>
             {!isTauri && (
               <button className="btn lg" onClick={() => open(["demo_L24-0417.stdf", "demo_L24-0421.stdf"])}>

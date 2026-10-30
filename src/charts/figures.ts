@@ -10,6 +10,7 @@ import type {
 import { axisTitle, fmt, fmtInt, testLabel, tidyName } from "../lib/format";
 import { normalPdf, quantileSorted } from "../lib/stats";
 import type { Theme } from "../lib/theme";
+import { binColor, binLabel } from "../lib/theme";
 import {
   baseLayout,
   categoricalColor,
@@ -24,6 +25,7 @@ import {
 export interface Figure {
   data: any[];
   layout: any;
+  rasterScatter?: boolean;
 }
 
 export interface FigureOpts {
@@ -33,6 +35,35 @@ export interface FigureOpts {
   /** Render only one split/block/category. */
   facetKey?: number;
   facetLabel?: string;
+  /** Mosaic thumbnail: no titles, tick labels or legend. */
+  preview?: boolean;
+}
+
+function categoryTitle(value: string): string {
+  return ({ wafer: "Wafer", lot: "Lot", site: "Site", hbin: "HBIN", sbin: "SBIN" } as Record<string, string>)[value] ?? value;
+}
+
+/** Small charts retain meaningful axes while using consistent compact type. */
+function previewFigure(data: any[], layout: any, preview: boolean, xTitle: string, yTitle: string): Figure {
+  if (!preview) return { data, layout };
+  const compact = (text: string, max = 36) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  layout.margin = { l: 62, r: layout.yaxis2 ? 54 : 24, t: 22, b: 62 };
+  layout.showlegend = false;
+  layout.font = { ...layout.font, size: 11 };
+  for (const [key, title] of [["xaxis", xTitle], ["yaxis", yTitle], ["yaxis2", "Yield [%]"]]) {
+    if (!layout[key]) continue;
+    layout[key] = { ...layout[key], showticklabels: true, automargin: true,
+      tickfont: { ...layout[key].tickfont, size: 10 }, nticks: 4,
+      title: { text: compact(title), font: { size: 11, color: key === "yaxis2" ? layout[key].tickfont?.color : layout.font.color, family: CHART_FONT }, standoff: 8 },
+    };
+  }
+  const axis = layout.xaxis;
+  if (axis.tickvals?.length > 8) {
+    const stride = Math.ceil(axis.tickvals.length / 8);
+    if (axis.ticktext) axis.ticktext = axis.ticktext.filter((_: unknown, i: number) => i % stride === 0);
+    axis.tickvals = axis.tickvals.filter((_: unknown, i: number) => i % stride === 0);
+  }
+  return { data, layout };
 }
 
 const ALPHA_POINT = 0.55;
@@ -123,102 +154,24 @@ function addLabelBlocks(
   return true;
 }
 
-interface Block {
-  start: number;
-  end: number;
-  name: string;
-  code: number;
-}
-
-/** Contiguous runs of the same custom block (split/lot) in a box chart. */
-function boxBlocks(groups: { block: string; blockCode: number }[]): Block[] {
-  const blocks: Block[] = [];
-  for (let i = 0; i < groups.length; i++) {
-    const name = groups[i].block || "Unassigned";
-    const code = groups[i].blockCode;
-    const last = blocks[blocks.length - 1];
-    if (last && last.name === name && last.code === code) last.end = i;
-    else blocks.push({ start: i, end: i, name, code });
-  }
-  return blocks;
-}
-
-function addBoxBlocks(
-  t: ChartTheme,
-  groups: { block: string; blockCode: number }[],
-  shapes: any[],
-  annotations: any[],
-  style: ChartStyle
-): boolean {
-  const blocks = boxBlocks(groups);
-  if (blocks.length < 2) return false;
-  for (const b of blocks) {
-    annotations.push({
-      xref: "x",
-      x: (b.start + b.end) / 2,
-      yref: "paper",
-      y: 1,
-      yanchor: "bottom",
-      yshift: Math.max(4, Math.round(style.annotation * 0.3)),
-      text: b.name,
-      showarrow: false,
-      font: {
-        size: style.annotation,
-        color: categoricalColor(t, b.code, b.name),
-        family: CHART_FONT,
-      },
-    });
-  }
-  for (let b = 1; b < blocks.length; b++) {
-    shapes.push({
-      type: "line",
-      xref: "x",
-      x0: blocks[b].start - 0.5,
-      x1: blocks[b].start - 0.5,
-      yref: "paper",
-      y0: 0,
-      y1: 1,
-      line: { color: t.axis, width: Math.max(1, style.line * 0.5), dash: "dot" },
-      layer: "below",
-    });
-  }
-  return true;
-}
-
 interface LimitLines {
   shapes: any[];
   annotations: any[];
 }
 
-/**
- * Spec and control limits frequently come from the same STDF value but via
- * different f32 fields. They can differ by a few ULPs, which is invisible on
- * screen but used to draw two overlapping lines. Treat them as identical when
- * they are within 1 ppm of each other.
- */
-function sameLimit(a: number | null, b: number | null): boolean {
-  if (a === null || b === null || !Number.isFinite(a) || !Number.isFinite(b)) return false;
-  const scale = Math.max(1, Math.abs(a), Math.abs(b));
-  return Math.abs(a - b) <= 1e-6 * scale;
-}
-
-/** LSL/USL (red dashed) and control limits (yellow dotted) on a cartesian axis. */
+/** LSL/USL (red dashed) on a cartesian axis. */
 export function limitLines(
   t: ChartTheme,
   lsl: number | null,
   usl: number | null,
-  loLimit: number | null,
-  hiLimit: number | null,
   yref = "y",
-  style: ChartStyle = chartStyle(false)
+  style: ChartStyle = chartStyle(false),
+  logY = false
 ): LimitLines {
   const shapes: any[] = [];
   const annotations: any[] = [];
-  const add = (v: number, label: string, color: string, dash: "dash" | "dot") => {
-    // Plotly draws axis gridlines over "below" shapes. That cuts a horizontal
-    // limit line down the middle, so each dash looks like two parallel lines.
-    // Draw the limit above the gridline instead; the line is thin and dashed,
-    // so it still leaves the data readable.
+  const add = (v: number, label: string, anchor: "bottom" | "top") => {
+    // Draw above gridlines so a gridline cannot split the dashes.
     shapes.push({
       type: "line",
       xref: "paper",
@@ -227,7 +180,7 @@ export function limitLines(
       yref,
       y0: v,
       y1: v,
-      line: { color, width: style.line, dash },
+      line: { color: t.red, width: style.line, dash: "dash" },
       layer: "above",
     });
     annotations.push({
@@ -235,45 +188,34 @@ export function limitLines(
       x: 0.996,
       xanchor: "right",
       yref,
-      y: v,
-      yshift: Math.round(style.annotation * 0.85),
+      // Plotly annotations use log10 coordinates on a log axis, unlike
+      // shapes, which use the raw data coordinate.
+      y: logY && yref === "y" && v > 0 ? Math.log10(v) : v,
+      yanchor: anchor,
+      yshift: 0,
       text: `${label} ${fmt(v)}`,
       showarrow: false,
-      font: { size: style.annotation, color, family: CHART_FONT },
+      font: { size: style.annotation, color: t.red, family: CHART_FONT },
+      bgcolor: t.paper,
+      borderpad: 1,
       opacity: 1,
     });
   };
-  if (lsl !== null && Number.isFinite(lsl)) add(lsl, "LSL", t.red, "dash");
-  if (usl !== null && Number.isFinite(usl)) add(usl, "USL", t.red, "dash");
-  if (loLimit !== null && Number.isFinite(loLimit) && !sameLimit(loLimit, lsl)) {
-    add(loLimit, "LCL", t.yellow, "dot");
-  }
-  if (hiLimit !== null && Number.isFinite(hiLimit) && !sameLimit(hiLimit, usl)) {
-    add(hiLimit, "UCL", t.yellow, "dot");
-  }
+  if (lsl !== null && Number.isFinite(lsl)) add(lsl, "LSL", "bottom");
+  if (usl !== null && Number.isFinite(usl)) add(usl, "USL", "top");
   return { shapes, annotations };
 }
 
-/** LSL/USL (red dashed) and control limits (yellow dotted) on a value x-axis. */
+/** LSL/USL (red dashed) on a value x-axis. */
 export function limitLinesX(
   t: ChartTheme,
   lsl: number | null,
   usl: number | null,
-  loLimit: number | null,
-  hiLimit: number | null,
   style: ChartStyle = chartStyle(false)
 ): LimitLines {
   const shapes: any[] = [];
   const annotations: any[] = [];
-  const add = (
-    v: number,
-    label: string,
-    color: string,
-    dash: "dash" | "dot",
-    side: "left" | "right"
-  ) => {
-    // See limitLines(): draw above the gridlines so a vertical gridline
-    // cannot split each dash into two parallel lines.
+  const add = (v: number, label: string, side: "left" | "right") => {
     shapes.push({
       type: "line",
       xref: "x",
@@ -282,7 +224,7 @@ export function limitLinesX(
       yref: "paper",
       y0: 0,
       y1: 1,
-      line: { color, width: style.line, dash },
+      line: { color: t.red, width: style.line, dash: "dash" },
       layer: "above",
     });
     annotations.push({
@@ -296,26 +238,74 @@ export function limitLinesX(
       yshift: Math.max(3, Math.round(style.annotation * 0.3)),
       text: `${label} ${fmt(v)}`,
       showarrow: false,
-      font: { size: style.annotation, color, family: CHART_FONT },
+      font: { size: style.annotation, color: t.red, family: CHART_FONT },
       opacity: 1,
     });
   };
-  if (lsl !== null && Number.isFinite(lsl)) add(lsl, "LSL", t.red, "dash", "left");
-  if (usl !== null && Number.isFinite(usl)) add(usl, "USL", t.red, "dash", "right");
-  if (loLimit !== null && Number.isFinite(loLimit) && !sameLimit(loLimit, lsl)) {
-    add(loLimit, "LCL", t.yellow, "dot", "left");
-  }
-  if (hiLimit !== null && Number.isFinite(hiLimit) && !sameLimit(hiLimit, usl)) {
-    add(hiLimit, "UCL", t.yellow, "dot", "right");
-  }
+  if (lsl !== null && Number.isFinite(lsl)) add(lsl, "LSL", "left");
+  if (usl !== null && Number.isFinite(usl)) add(usl, "USL", "right");
   return { shapes, annotations };
 }
 
-function applyYRange(layout: any, spec: PlotSpec, lo: number, hi: number) {
-  if (spec.yMin === null && spec.yMax === null) return;
-  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return;
-  const pad = (hi - lo) * 0.06 || Math.abs(hi || 1) * 0.05;
-  layout.yaxis.range = [spec.yMin ?? lo - pad, spec.yMax ?? hi + pad];
+interface AxisStats {
+  mean: number;
+  sd: number;
+  min: number;
+  max: number;
+  q1: number;
+  q3: number;
+}
+
+/** Resolve the inspector range mode into an explicit [lo, hi] pair. */
+export function limitRange(
+  spec: PlotSpec,
+  stats: AxisStats,
+  lsl: number | null,
+  usl: number | null,
+  fallbackLo: number,
+  fallbackHi: number
+): [number, number] | null {
+  const finite = (v: number) => Number.isFinite(v);
+  if (spec.limitMode === "manual") {
+    const lo = spec.yMin ?? fallbackLo;
+    const hi = spec.yMax ?? fallbackHi;
+    return finite(lo) && finite(hi) && hi > lo ? [lo, hi] : null;
+  }
+  if (spec.limitMode === "sigma" && finite(stats.mean) && finite(stats.sd) && stats.sd > 0) {
+    return [stats.mean - spec.limitK * stats.sd, stats.mean + spec.limitK * stats.sd];
+  }
+  if (spec.limitMode === "iqr" && finite(stats.q1) && finite(stats.q3)) {
+    const iqr = stats.q3 - stats.q1;
+    if (iqr > 0) return [stats.q1 - spec.limitK * iqr, stats.q3 + spec.limitK * iqr];
+  }
+  if (spec.limitMode === "spec") {
+    const lo = lsl ?? fallbackLo;
+    const hi = usl ?? fallbackHi;
+    if (finite(lo) && finite(hi) && hi > lo) return [lo, hi];
+  }
+  return null;
+}
+
+function applyAxisRange(
+  layout: any,
+  axis: "x" | "y",
+  spec: PlotSpec,
+  stats: AxisStats,
+  lsl: number | null,
+  usl: number | null,
+  fallbackLo: number,
+  fallbackHi: number
+) {
+  if (spec.limitMode === "auto") return;
+  const range = limitRange(spec, stats, lsl, usl, fallbackLo, fallbackHi);
+  if (!range) return;
+  if (spec.logY && axis === "y") {
+    if (range[0] <= 0 || range[1] <= 0) return;
+    // Plotly's log-axis range is expressed in log10 units, not data units.
+    layout[`${axis}axis`].range = [Math.log10(range[0]), Math.log10(range[1])];
+    return;
+  }
+  layout[`${axis}axis`].range = range;
 }
 
 /* ------------------------------------------------------------------ */
@@ -325,44 +315,59 @@ function applyYRange(layout: any, spec: PlotSpec, lo: number, hi: number) {
 export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
-  const style = chartStyle(spec.presentation);
+  const style = chartStyle(opts.preview ? false : spec.presentation);
   const units = data.test.units;
-  const groups =
-    opts.facetLabel === undefined
-      ? data.groups
-      : data.groups.filter((g) => g.block === opts.facetLabel);
+  const preview = opts.preview === true;
+  let groups = opts.facetLabel === undefined ? data.groups
+    : data.groups.filter((g) => g.groupLabel === opts.facetLabel);
+  const groupLabels = [...new Set(groups.map((g) => g.groupLabel).filter(Boolean))];
+  const hasGrouping = opts.facetLabel === undefined && groupLabels.length > 0;
+  // Group is the outer category. Each block contains its own contiguous X
+  // categories, rather than interleaving every group at each X value.
+  if (hasGrouping) groups = groupLabels.flatMap((label) => groups.filter((g) => g.groupLabel === label));
+  const xLabels = groups.map((g) => g.xLabel);
   const n = groups.length;
   const traces: any[] = [];
 
-  groups.forEach((g, i) => {
-    const line = categoricalColor(t, g.blockCode, g.block);
-    const fill = categoricalFill(t, g.blockCode, g.block);
+  for (const [xIndex, g] of groups.entries()) {
+    const xPos = xIndex;
+    const width = spec.presentation ? 0.62 : 0.54;
+    const useDefaultColor = opts.facetLabel !== undefined || !hasGrouping;
+    const line = useDefaultColor ? t.blue : categoricalColor(t, g.groupKey, g.groupLabel);
+    const fill = useDefaultColor ? t.blueFill : categoricalFill(t, g.groupKey, g.groupLabel);
     const idx: number[] = [];
     for (let k = 0; k < g.values.length; k++) {
       if (!spec.logY || g.values[k] > 0) idx.push(k);
     }
-    if (idx.length === 0) return;
+    const summary = spec.logY ? g.positiveSummary : g.summary;
+    if (summary.n === 0) continue;
     const ys = idx.map((k) => g.values[k]);
-    const xs = new Array(idx.length).fill(i);
+    const label = hasGrouping ? g.groupLabel : g.xLabel;
 
     traces.push({
       type: "box",
-      name: g.label,
-      x: xs,
-      y: ys,
+      name: label,
+      x: [xPos],
+      q1: [summary.q1],
+      median: [summary.median],
+      q3: [summary.q3],
+      lowerfence: [summary.whiskerLo],
+      upperfence: [summary.whiskerHi],
+      mean: [summary.mean],
+      sd: [summary.sd],
       showlegend: false,
-      // Ask Plotly to calculate outlier fences for the whiskers. The points
-      // themselves are drawn by the scatter trace below, so hide this copy.
-      boxpoints: "outliers",
+      legendgroup: label,
+      // Exact full-population statistics; only marker points are sampled.
+      boxpoints: false,
       boxmean: true,
-      width: spec.presentation ? 0.62 : 0.54,
+      width,
       whiskerwidth: 0.55,
       fillcolor: fill,
       line: { color: line, width: style.line },
       marker: { size: 0, opacity: 0, color: line },
       hoveron: "boxes",
       hovertemplate:
-        `<b>${g.label}</b><br>` +
+        `<b>${g.xLabel}${hasGrouping ? " · " + g.groupLabel : ""}</b><br>` +
         `median %{median:.5~g}<br>` +
         `q1 %{q1:.5~g} · q3 %{q3:.5~g}<br>` +
         `n ${g.n.toLocaleString("en-US")}<extra></extra>`,
@@ -372,35 +377,38 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
     if (mode !== "none") {
       let pick: number[] = [];
       if (mode === "outliers") {
-        const sorted = [...ys].sort((a, b) => a - b);
-        const q1 = quantileSorted(sorted, 0.25);
-        const q3 = quantileSorted(sorted, 0.75);
+        const q1 = summary.q1;
+        const q3 = summary.q3;
         const iqr = q3 - q1;
         const lo = q1 - 1.5 * iqr;
         const hi = q3 + 1.5 * iqr;
         for (let k = 0; k < ys.length; k++) {
           if (ys[k] < lo || ys[k] > hi) pick.push(k);
         }
-        if (pick.length > 4000) pick = pick.filter((_, j) => j % 2 === 0);
       } else {
         const stride = Math.max(1, Math.ceil(ys.length / 2500));
-        for (let k = 0; k < ys.length; k += stride) pick.push(k);
+        const lo = summary.q1 - 1.5 * (summary.q3 - summary.q1);
+        const hi = summary.q3 + 1.5 * (summary.q3 - summary.q1);
+        for (let k = 0; k < ys.length; k++) {
+          if (k % stride === 0 || ys[k] < lo || ys[k] > hi) pick.push(k);
+        }
       }
       if (pick.length > 0) {
-        const px = pick.map((k) => i + (pseudo(idx[k] + i * 977) - 0.5) * 0.42);
+        const px = pick.map(
+          (k) => xPos + (pseudo(idx[k] + xIndex * 977) - 0.5) * width * 0.72
+        );
         const py = pick.map((k) => ys[k]);
         const cd = pick.map((k) => [g.xs[idx[k]], g.ys[idx[k]]]);
         traces.push({
           type: mode === "all" ? "scattergl" : "scatter",
           mode: "markers",
-          name: g.label,
+          name: label,
           x: px,
           y: py,
           customdata: cd,
           showlegend: false,
+          legendgroup: label,
           marker: {
-            // Outliers use a thin orthogonal cross; ordinary "All" points
-            // stay as small dots so dense boxes remain readable.
             symbol: mode === "outliers" ? "cross-thin" : "circle",
             size: mode === "all" ? style.point : style.marker,
             color: line,
@@ -413,43 +421,67 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
           hovertemplate:
             `<b>%{y:.5~g}${units ? " " + units : ""}</b><br>` +
             `die (%{customdata[0]}, %{customdata[1]})<br>` +
-            `${g.label}<extra></extra>`,
+            `${g.xLabel}${hasGrouping ? " · " + g.groupLabel : ""}<extra></extra>`,
         });
       }
     }
-  });
+  }
 
-  const { shapes, annotations } = limitLines(
-    t,
-    spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null,
-    spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null,
-    spec.showControlLimits ? data.test.loLimit : null,
-    spec.showControlLimits ? data.test.hiLimit : null,
-    "y",
-    style
-  );
+  const lsl = spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null;
+  const usl = spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null;
+  const limits = preview
+    ? { shapes: [], annotations: [] }
+    : limitLines(t, lsl, usl, "y", style, spec.logY);
 
-  const labels = groups.map((g) => g.label);
-  const short = labels.map(shortTick);
-  const stride = n > (spec.presentation ? 30 : 40) ? 2 : 1;
-  const angle = n > (spec.presentation ? 10 : 12) && short.some((s) => s.length > 5) ? -45 : 0;
-  const ticks = tickSubset(labels, stride);
+  const short = xLabels.map(shortTick);
+  const stride = Math.max(1, Math.ceil(n / (spec.presentation ? 24 : 36)));
+  const angle =
+    !preview && n > (spec.presentation ? 10 : 12) && short.some((s) => s.length > 5)
+      ? -45
+      : 0;
+  const ticks = tickSubset(xLabels, stride);
 
-  const layout = baseLayout(t, opts.title, spec.presentation);
-  layout.margin = {
-    ...layout.margin,
-    l: style.margin.l,
-    r: style.margin.r,
-    b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.2) : 0),
-  };
+  const layout = baseLayout(t, preview ? "" : opts.title, spec.presentation);
+  layout.margin = preview
+    ? { l: 8, r: 8, t: 8, b: 8 }
+    : {
+        ...layout.margin,
+        l: style.margin.l,
+        r: style.margin.r,
+        b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.2) : 0),
+        t: layout.margin.t + (hasGrouping ? Math.round(style.annotation * (groupLabels.length > 8 ? 5 : 1.2)) : 0),
+      };
   layout.boxgap = 0.32;
-  layout.boxgroupgap = 0.12;
+  layout.boxgroupgap = 0;
+  layout.showlegend = false;
+  if (hasGrouping) {
+    let start = 0;
+    for (const label of groupLabels) {
+      const length = groups.filter((g) => g.groupLabel === label).length;
+      const heading = spec.groupBy === "wafer" ? shortTick(label) : label;
+      const dense = groupLabels.length > 8;
+      limits.annotations.push({ xref: "x", x: start + (length - 1) / 2,
+        yref: "paper", y: 1.02, xanchor: "center", yanchor: "bottom",
+        text: heading, textangle: dense && heading.length > 3 ? (groupLabels.length > 20 ? -75 : -55) : 0,
+        showarrow: false, font: { size: dense ? Math.min(11, style.annotation) : style.annotation, color: t.text, family: CHART_FONT } });
+      if (start > 0) limits.shapes.push({ type: "line", xref: "x", x0: start - 0.5, x1: start - 0.5,
+        yref: "paper", y0: 0, y1: 1, line: { color: t.axis, width: 1, dash: "dot" } });
+      start += length;
+    }
+  }
   layout.xaxis = {
     ...layout.xaxis,
+    title: preview
+      ? { text: "" }
+      : {
+          text: categoryTitle(spec.xAxis),
+          font: { size: style.axisTitle * 0.82, color: t.muted, family: CHART_FONT },
+        },
     tickmode: "array",
     tickvals: ticks,
     ticktext: ticks.map((i) => short[i]),
     tickangle: angle,
+    showticklabels: !preview,
     tickfont: {
       size: Math.round(style.tick * (n > (spec.presentation ? 28 : 20) ? 0.78 : 1)),
       color: t.muted,
@@ -461,23 +493,30 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
   };
   layout.yaxis = {
     ...layout.yaxis,
-    title: {
-      text: axisTitle(testLabel(data.test), units, style.axisTitle * 0.62),
-      font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
-    },
+    title: preview
+      ? { text: "" }
+      : {
+          text: axisTitle(testLabel(data.test), units, style.axisTitle * 0.62),
+          font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
+        },
+    showticklabels: !preview,
     type: spec.logY ? "log" : "linear",
   };
-  applyYRange(layout, spec, data.summary.min, data.summary.max);
-  if (addBoxBlocks(t, groups, shapes, annotations, style)) {
-    layout.margin.t = Math.max(
-      layout.margin.t,
-      style.margin.t + Math.round(style.annotation * 1.1)
+  if (!preview) {
+    applyAxisRange(
+      layout,
+      "y",
+      spec,
+      data.summary,
+      lsl,
+      usl,
+      data.summary.min,
+      data.summary.max
     );
   }
-  layout.shapes = shapes;
-  layout.annotations = annotations;
-
-  return { data: traces, layout };
+  layout.shapes = limits.shapes;
+  layout.annotations = limits.annotations;
+  return previewFigure(traces, layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${units ? ` [${units}]` : ""}`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -487,8 +526,39 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
 export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
-  const style = chartStyle(spec.presentation);
+  const style = chartStyle(opts.preview ? false : spec.presentation);
+  const preview = opts.preview === true;
   const traces: any[] = [];
+
+  // Split view: turn one grouped response into a global Pareto for a single
+  // group, using the same per-group failure counts the grouped chart uses.
+  const facetIndex = opts.facetKey;
+  if (facetIndex !== undefined && data.mode === "grouped") {
+    const group = data.groups[facetIndex];
+    if (!group) {
+      return { data: [], layout: baseLayout(t, preview ? "" : opts.title, spec.presentation) };
+    }
+    const bars = data.series
+      .map((s) => ({
+        code: s.code,
+        name: s.name,
+        count: s.counts[facetIndex] ?? 0,
+        pct: s.pcts[facetIndex] ?? 0,
+        pass: s.pass,
+      }))
+      .filter((b) => b.count > 0)
+      .sort((a, b) => b.count - a.count || a.code - b.code);
+    data = {
+      mode: "global",
+      bars,
+      groups: [],
+      series: [],
+      total: group.total,
+      failTotal: group.fail,
+      yieldPct: group.yieldPct,
+      groupLabel: data.groupLabel,
+    };
+  }
 
   if (data.mode === "grouped") {
     const groups = data.groups;
@@ -497,22 +567,22 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
     for (const s of data.series) {
       traces.push({
         type: "bar",
-        name: s.name,
+        name: binLabel(spec.binCategory, s.code, s.name),
         x: labels,
-        y: s.counts,
-        customdata: s.pcts,
+        y: s.pcts,
+        customdata: s.counts,
         marker: {
-          color: categoricalColor(t, s.code, s.name),
+          color: binColor(s.code),
           line: { width: 0 },
         },
         hovertemplate:
-          `<b>${s.name}</b><br>%{y} dice · %{customdata:.2f}% of group<extra></extra>`,
+          `<b>${binLabel(spec.binCategory, s.code, s.name)}</b><br>%{y:.2f}% of tested dice · %{customdata} dice<extra></extra>`,
       });
     }
     traces.push({
       type: "scatter",
       mode: "lines+markers",
-      name: "Good yield",
+      name: "Yield",
       x: labels,
       y: groups.map((g) => g.yieldPct),
       yaxis: "y2",
@@ -522,21 +592,23 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
         color: t.green,
         line: { color: t.paper, width: Math.max(1, style.line * 0.5) },
       },
-      hovertemplate: "Good yield %{y:.1f}%<extra></extra>",
+      hovertemplate: "Yield %{y:.1f}%<extra></extra>",
       cliponaxis: false,
     });
 
-    const layout = baseLayout(t, opts.title, spec.presentation);
-    layout.margin = {
-      ...layout.margin,
-      l: style.margin.l,
-      r: style.margin.r + Math.round(style.axisTitle * 1.4),
-      b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.0) : 0),
-      t: layout.margin.t + Math.round(style.annotation * 1.2),
-    };
+    const layout = baseLayout(t, preview ? "" : opts.title, spec.presentation);
+    layout.margin = preview
+      ? { l: 8, r: 8, t: 8, b: 8 }
+      : {
+          ...layout.margin,
+          l: style.margin.l,
+          r: Math.max(100, style.margin.r + Math.round(style.axisTitle * 1.4)),
+          b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.0) : 0),
+          t: layout.margin.t + Math.round(style.annotation * 1.2),
+        };
     layout.barmode = "stack";
     layout.bargap = 0.35;
-    layout.showlegend = data.series.length > 0;
+    layout.showlegend = data.series.length > 0 && !preview;
     layout.legend = {
       orientation: "h",
       x: 0,
@@ -550,94 +622,134 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
     };
     layout.xaxis = {
       ...layout.xaxis,
-      title: {
-        text: data.groupLabel || "Group",
-        font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
-      },
+      title: preview
+        ? { text: "" }
+        : {
+            text: data.groupLabel || "Group",
+            font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
+          },
       tickangle: angle,
+      showticklabels: !preview,
       tickfont: { size: Math.round(style.tick * 0.82), color: t.muted, family: CHART_FONT },
       showgrid: false,
       zeroline: false,
     };
+    const failPeak = Math.max(0, ...groups.map((_, i) => data.series.reduce((n, series) => n + (series.pcts[i] ?? 0), 0)));
+    const yields = groups.map((g) => g.yieldPct);
+    const minYield = yields.length ? Math.min(...yields) : 0;
+    const maxYield = yields.length ? Math.max(...yields) : 100;
+    const yieldPad = Math.max(1, (maxYield - minYield) * 0.15);
+    const yieldLo = Math.max(0, minYield - yieldPad), yieldHi = Math.min(100, maxYield + yieldPad);
+    const rawStep = (yieldHi - yieldLo) / 5;
+    const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+    const multiple = rawStep / magnitude;
+    const yieldStep = (multiple <= 1 ? 1 : multiple <= 2 ? 2 : multiple <= 5 ? 5 : 10) * magnitude;
     layout.yaxis = {
       ...layout.yaxis,
-      title: {
-        text: "Dice",
-        font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
-      },
+      title: preview
+        ? { text: "" }
+        : {
+            text: "Fail [%]",
+            font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
+          },
+      showticklabels: !preview,
+      range: [0, Math.min(100, Math.max(1, failPeak * 1.2))],
+      ticksuffix: "%",
       rangemode: "tozero",
     };
     layout.yaxis2 = {
       overlaying: "y",
       side: "right",
-      range: [0, 105],
-      tickmode: "array",
-      tickvals: [0, 20, 40, 60, 80, 100],
-      ticktext: ["0%", "20%", "40%", "60%", "80%", "100%"],
+      range: [Math.max(0, Math.floor(yieldLo / yieldStep) * yieldStep), Math.min(100, Math.ceil(yieldHi / yieldStep) * yieldStep)],
+      tickmode: "linear",
+      tick0: 0,
+      dtick: yieldStep,
+      tickformat: ".1f",
+      ticksuffix: "%",
       showgrid: false,
       zeroline: false,
       linecolor: t.axis,
       linewidth: style.axisLine,
       showline: true,
-      tickfont: { size: Math.round(style.tick * 0.82), color: t.muted, family: CHART_FONT },
-      title: {
-        text: "Good yield %",
-        font: { size: Math.round(style.axisTitle * 0.82), color: t.muted, family: CHART_FONT },
-        standoff: Math.round(style.axisTitle * 0.5),
-      },
+      showticklabels: !preview,
+      tickfont: { size: Math.round(style.tick * 0.82), color: t.green, family: CHART_FONT },
+      title: preview
+        ? { text: "" }
+        : {
+            text: "Yield [%]",
+            font: { size: Math.round(style.axisTitle * 0.82), color: t.green, family: CHART_FONT },
+            standoff: 18,
+          },
     };
-    return { data: traces, layout };
+    return previewFigure(traces, layout, preview, data.groupLabel || "Group", "Fail [%]");
   }
 
   const bars = data.bars;
-  const labels = bars.map((b) => b.name || `Bin ${b.code}`);
-  const counts = bars.map((b) => b.count);
+  const labels = bars.map((b) => binLabel(spec.binCategory, b.code, b.name));
+  const pcts = bars.map((b) => b.pct);
   const angle = labels.some((l) => l.length > 8) ? -38 : 0;
   traces.push({
     type: "bar",
     x: labels,
-    y: counts,
+    y: pcts,
     marker: {
-      color: bars.map((b) => (b.pass ? t.green : b.code === 0xffff ? t.gray : t.blue)),
+      // A global Pareto is one ranked list; categorical bin colours only add
+      // noise. The grouped view keeps its stacked bin colours.
+      color: t.blue,
       line: { width: 0 },
     },
     text:
-      bars.length <= (spec.presentation ? 14 : 22)
+      !preview && bars.length <= (spec.presentation ? 14 : 22)
         ? bars.map((b) => `${b.pct.toFixed(1)}%`)
         : undefined,
     textposition: "outside",
     cliponaxis: false,
     textfont: { size: Math.round(style.tick * 0.72), color: t.muted, family: CHART_FONT },
-    customdata: bars.map((b) => [b.pct, b.code, b.pass ? "pass" : "fail"]),
+    customdata: bars.map((b) => [b.count, b.code, b.pass ? "pass" : "fail"]),
     hovertemplate:
-      "<b>%{x}</b><br>%{y} dice · %{customdata[0]:.2f}%<br>" +
+      "<b>%{x}</b><br>%{y:.2f}% of tested dice · %{customdata[0]} dice<br>" +
       "bin %{customdata[1]} · %{customdata[2]}<extra></extra>",
   });
 
-  const layout = baseLayout(t, opts.title, spec.presentation);
-  layout.margin = {
-    ...layout.margin,
-    l: style.margin.l,
-    r: style.margin.r,
-    b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.0) : 0),
-  };
+  const layout = baseLayout(t, preview ? "" : opts.title, spec.presentation);
+  layout.margin = preview
+    ? { l: 8, r: 8, t: 8, b: 8 }
+    : {
+        ...layout.margin,
+        l: style.margin.l,
+        r: style.margin.r,
+        b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.0) : 0),
+      };
   layout.bargap = 0.42;
+  layout.showlegend = false;
   layout.xaxis = {
     ...layout.xaxis,
     tickangle: angle,
+    showticklabels: !preview,
     tickfont: { size: Math.round(style.tick * 0.82), color: t.muted, family: CHART_FONT },
     showgrid: false,
     zeroline: false,
   };
   layout.yaxis = {
     ...layout.yaxis,
-    title: {
-      text: "Dice",
-      font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
-    },
+    title: preview
+      ? { text: "" }
+      : {
+          text: "Fail [%]",
+          font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
+        },
+    showticklabels: !preview,
+    range: [0, Math.min(100, Math.max(1, ...pcts.map((v) => v * 1.25)))],
+    ticksuffix: "%",
     rangemode: "tozero",
   };
-  return { data: traces, layout };
+  if (preview) {
+    layout.xaxis.tickmode = "array";
+    layout.xaxis.tickvals = labels;
+    layout.xaxis.ticktext = bars.map((b) => b.name === "Others" ? "Others" : `${spec.binCategory === "soft" ? "SBIN" : "HBIN"} ${b.code}`);
+    layout.xaxis.tickangle = -30;
+  }
+  return previewFigure(traces, layout, preview, spec.binCategory === "soft" ? "SBIN" : "HBIN", "Fail [%]");
 }
 
 /* ------------------------------------------------------------------ */
@@ -647,31 +759,55 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
 export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
-  const style = chartStyle(spec.presentation);
+  const style = chartStyle(opts.preview ? false : spec.presentation);
   const s = data.summary;
   const nb = data.counts.length;
-  if (nb === 0) return { data: [], layout: baseLayout(t, opts.title, spec.presentation) };
+  const preview = opts.preview === true;
+  if (nb === 0) return { data: [], layout: baseLayout(t, preview ? "" : opts.title, spec.presentation) };
   const width = data.edges[1] - data.edges[0];
   const mids = data.counts.map((_, i) => (data.edges[i] + data.edges[i + 1]) / 2);
-  const traces: any[] = [
-    {
+  const facet = opts.facetLabel;
+  const grouped = data.groups.length > 0 && facet === undefined;
+  const facetGroup = facet !== undefined ? data.groups.find((g) => g.label === facet) : undefined;
+  const traces: any[] = [];
+
+  const addBars = (
+    counts: number[],
+    color: string,
+    name: string,
+    showlegend: boolean,
+    opacity: number
+  ) => {
+    traces.push({
       type: "bar",
+      name,
       x: mids,
-      y: data.counts,
+      y: counts,
       width: width * 0.93,
+      showlegend,
       marker: {
-        color: t.blue,
-        opacity: 0.88,
+        color,
+        opacity,
         line: { color: t.paper, width: Math.max(0.5, style.line * 0.25) },
       },
-      customdata: data.counts.map((_, i) => [data.edges[i], data.edges[i + 1]]),
+      customdata: counts.map((_, i) => [data.edges[i], data.edges[i + 1]]),
       hovertemplate:
-        "<b>%{y} dice</b><br>" +
+        `<b>%{y} dice</b><br>` +
         "%{customdata[0]:.5~g} – %{customdata[1]:.5~g}<extra></extra>",
-    },
-  ];
+    });
+  };
 
-  if (spec.showNormal && s.sd > 0) {
+  if (facetGroup) {
+    addBars(facetGroup.counts, t.blue, facetGroup.label, false, 0.88);
+  } else if (grouped) {
+    for (const g of data.groups) {
+      addBars(g.counts, categoricalColor(t, g.key, g.label), g.label, !preview, 0.52);
+    }
+  } else {
+    addBars(data.counts, t.blue, "", false, 0.88);
+  }
+
+  if (spec.showNormal && s.sd > 0 && !grouped && !facetGroup) {
     const lo = data.edges[0];
     const hi = data.edges[nb];
     const steps = 220;
@@ -691,19 +827,17 @@ export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
       fill: "tozeroy",
       fillcolor: t.yellowFill,
       hoverinfo: "skip",
+      showlegend: false,
     });
   }
 
-  const { shapes, annotations } = limitLinesX(
-    t,
-    spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null,
-    spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null,
-    spec.showControlLimits ? data.test.loLimit : null,
-    spec.showControlLimits ? data.test.hiLimit : null,
-    style
-  );
-  // mean marker
-  if (Number.isFinite(s.mean)) {
+  const lsl = spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null;
+  const usl = spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null;
+  const limits = preview
+    ? { shapes: [], annotations: [] }
+    : limitLinesX(t, lsl, usl, style);
+  const { shapes, annotations } = limits;
+  if (!preview && !grouped && !facetGroup && Number.isFinite(s.mean)) {
     shapes.push({
       type: "line",
       xref: "x",
@@ -717,30 +851,71 @@ export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
     });
   }
 
-  const layout = baseLayout(t, opts.title, spec.presentation);
-  layout.margin = { ...layout.margin, l: style.margin.l, r: style.margin.r, b: style.margin.b };
+  const layout = baseLayout(t, preview ? "" : opts.title, spec.presentation);
+  layout.margin = preview
+    ? { l: 8, r: 8, t: 8, b: 8 }
+    : {
+        ...layout.margin,
+        l: style.margin.l,
+        r: style.margin.r,
+        b: style.margin.b,
+        t: layout.margin.t + (grouped ? Math.round(style.annotation * 1.2) : 0),
+      };
   layout.bargap = 0.04;
+  layout.barmode = grouped ? "overlay" : "group";
+  layout.showlegend = grouped && !preview;
+  if (layout.showlegend) {
+    layout.legend = {
+      orientation: "h",
+      x: 0,
+      xanchor: "left",
+      y: 1.02,
+      yanchor: "bottom",
+      font: { size: Math.round(style.annotation * 0.8), color: t.text, family: CHART_FONT },
+      bgcolor: "rgba(0,0,0,0)",
+      borderwidth: 0,
+      itemwidth: 30,
+    };
+  }
   layout.xaxis = {
     ...layout.xaxis,
-    title: {
-      text: axisTitle(testLabel(data.test), data.test.units, style.axisTitle * 0.62),
-      font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
-    },
+    title: preview
+      ? { text: "" }
+      : {
+          text: axisTitle(testLabel(data.test), data.test.units, style.axisTitle * 0.62),
+          font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
+        },
+    showticklabels: !preview,
     showgrid: false,
     zeroline: false,
   };
   layout.yaxis = {
     ...layout.yaxis,
-    title: {
-      text: "Count",
-      font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
-    },
-    rangemode: "tozero",
+    title: preview
+      ? { text: "" }
+      : {
+          text: "Count",
+          font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
+        },
+    showticklabels: !preview,
+    rangemode: spec.logY ? undefined : "tozero",
+    type: spec.logY ? "log" : "linear",
   };
-  applyYRange(layout, spec, 0, Math.max(...data.counts) * 1.08);
+  if (!preview) {
+    applyAxisRange(
+      layout,
+      "x",
+      spec,
+      s,
+      lsl,
+      usl,
+      data.edges[0],
+      data.edges[nb]
+    );
+  }
   layout.shapes = shapes;
   layout.annotations = annotations;
-  return { data: traces, layout };
+  return previewFigure(traces, layout, preview, `${testLabel(data.test)}${data.test.units ? ` [${data.test.units}]` : ""}`, "Count");
 }
 
 /* ------------------------------------------------------------------ */
@@ -797,15 +972,9 @@ export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
       "sd %{customdata[0]:.4~g} · n %{customdata[1]}<extra></extra>",
   });
 
-  const { shapes, annotations } = limitLines(
-    t,
-    spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null,
-    spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null,
-    spec.showControlLimits ? data.test.loLimit : null,
-    spec.showControlLimits ? data.test.hiLimit : null,
-    "y",
-    style
-  );
+  const lsl = spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null;
+  const usl = spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null;
+  const { shapes, annotations } = limitLines(t, lsl, usl, "y", style, spec.logY);
   const short = labels.map(shortTick);
   const n = labels.length;
   const stride = n > (spec.presentation ? 30 : 40) ? 2 : 1;
@@ -843,7 +1012,23 @@ export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
     type: spec.logY ? "log" : "linear",
   };
   const all = [...lo, ...hi].filter((v) => Number.isFinite(v));
-  applyYRange(layout, spec, Math.min(...all), Math.max(...all));
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of all) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  const meanStats = {
+    mean: data.points.reduce((a, p) => a + p.mean, 0) / Math.max(1, data.points.length),
+    sd: Math.sqrt(
+      data.points.reduce((a, p) => a + p.sd * p.sd, 0) / Math.max(1, data.points.length)
+    ),
+    min,
+    max,
+    q1: min,
+    q3: max,
+  };
+  applyAxisRange(layout, "y", spec, meanStats, lsl, usl, meanStats.min, meanStats.max);
   if (addLabelBlocks(t, labels, shapes, annotations, style)) {
     layout.margin.t = Math.max(
       layout.margin.t,
@@ -859,11 +1044,11 @@ export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
 /* Scatter                                                             */
 /* ------------------------------------------------------------------ */
 
-function pointArrays(points: ScatterPoint[], data: ScatterResponse) {
+function pointArrays(points: ScatterPoint[], data: ScatterResponse, preview = false) {
   return {
     x: points.map((p) => p.x),
     y: points.map((p) => p.y),
-    customdata: points.map((p) => [
+    customdata: preview ? undefined : points.map((p) => [
       data.lots[p.lot] ?? `L${p.lot}`,
       data.wafers[p.wafer] ?? `W${p.wafer}`,
       p.hbin,
@@ -901,7 +1086,8 @@ function scatterHover(
 export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
-  const style = chartStyle(spec.presentation);
+  const style = chartStyle(opts.preview ? false : spec.presentation);
+  const preview = opts.preview === true;
   const traces: any[] = [];
   const series =
     opts.facetKey === undefined
@@ -909,88 +1095,126 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
       : data.series.filter((s) => s.key === opts.facetKey);
   const totalPoints = series.reduce((n, s) => n + s.points.length, 0);
   const traceType = totalPoints > 12000 ? "scattergl" : "scatter";
-  const showLegend =
-    data.zMode === "category" && series.length > 1 && opts.facetKey === undefined;
+  const facet = opts.facetKey !== undefined;
+  const hasGroups = data.series.length > 1 || !!data.groupLabel;
+  const showLegend = hasGroups && series.length > 1 && !facet && !preview;
+  const symbols = ["circle", "square", "diamond", "triangle-up", "cross", "x", "star", "hexagon"];
+  const groupedZ = data.zMode === "continuous" && !!data.groupLabel;
 
   if (data.zMode === "continuous") {
-    const points = series[0]?.points ?? [];
-    const finite = points.filter((p) => p.z !== null && Number.isFinite(p.z));
-    const missing = points.filter((p) => p.z === null || !Number.isFinite(p.z));
-    if (finite.length) {
-      const arr = pointArrays(finite, data);
-      traces.push({
-        type: traceType,
-        mode: "markers",
-        x: arr.x,
-        y: arr.y,
-        customdata: arr.customdata,
-        showlegend: false,
-        marker: {
-          size: style.marker,
-          color: finite.map((p) => p.z as number),
-          colorscale: [
-            [0, t.heat[0]],
-            [0.5, t.heat[1]],
-            [1, t.heat[2]],
-          ],
-          cmin: data.zMin ?? undefined,
-          cmax: data.zMax ?? undefined,
-          showscale: true,
-          opacity: 0.82,
-          line: { width: 0 },
-          colorbar: {
-            title: {
-              text: data.zColLabel || "Z",
-              side: "right",
-              font: {
-                size: Math.round(style.axisTitle * 0.78),
-                color: t.muted,
-                family: CHART_FONT,
-              },
-            },
-            tickfont: {
-              size: Math.round(style.tick * 0.78),
+    const colorbar = groupedZ
+      ? {
+          orientation: "h",
+          x: 0.5,
+          xanchor: "center",
+          y: -0.2,
+          yanchor: "top",
+          len: 0.55,
+          thickness: spec.presentation ? 16 : 12,
+          title: {
+            text: data.zColLabel || "Z",
+            side: "top",
+            font: {
+              size: Math.round(style.axisTitle * 0.72),
               color: t.muted,
               family: CHART_FONT,
             },
-            thickness: spec.presentation ? 28 : 16,
-            len: 0.82,
-            x: 1.015,
-            xpad: 8,
-            outlinewidth: 0,
           },
-        },
-        hovertemplate: scatterHover(data, "", "continuous"),
-      });
+          tickfont: {
+            size: Math.round(style.tick * 0.72),
+            color: t.muted,
+            family: CHART_FONT,
+          },
+          outlinewidth: 0,
+        }
+      : {
+          title: {
+            text: data.zColLabel || "Z",
+            side: "right",
+            font: {
+              size: Math.round(style.axisTitle * 0.78),
+              color: t.muted,
+              family: CHART_FONT,
+            },
+          },
+          tickfont: {
+            size: Math.round(style.tick * 0.78),
+            color: t.muted,
+            family: CHART_FONT,
+          },
+          thickness: spec.presentation ? 28 : 16,
+          len: 0.82,
+          x: 1.015,
+          xpad: 8,
+          outlinewidth: 0,
+        };
+    let colorbarShown = false;
+    for (let i = 0; i < series.length; i++) {
+      const s = series[i];
+      const finite = s.points.filter((p) => p.z !== null && Number.isFinite(p.z));
+      const missing = s.points.filter((p) => p.z === null || !Number.isFinite(p.z));
+      if (finite.length) {
+        const arr = pointArrays(finite, data, preview);
+        traces.push({
+          type: traceType,
+          mode: "markers",
+          name: s.name || data.groupLabel || undefined,
+          x: arr.x,
+          y: arr.y,
+          customdata: arr.customdata,
+          showlegend: showLegend,
+          legendgroup: s.name || undefined,
+          legendrank: i,
+          marker: {
+            size: style.marker,
+            color: finite.map((p) => p.z as number),
+            colorscale: [
+              [0, t.heat[0]],
+              [0.5, t.heat[1]],
+              [1, t.heat[2]],
+            ],
+            cmin: data.zMin ?? undefined,
+            cmax: data.zMax ?? undefined,
+            showscale: !preview && !colorbarShown,
+            colorbar: !preview && !colorbarShown ? colorbar : undefined,
+            opacity: 0.82,
+            symbol: groupedZ && !facet ? symbols[i % symbols.length] : "circle",
+            line: { width: 0 },
+          },
+          hovertemplate: scatterHover(data, s.name, "continuous"),
+        });
+        if (!preview) colorbarShown = true;
+      }
+      if (missing.length) {
+        const arr = pointArrays(missing, data, preview);
+        traces.push({
+          type: traceType,
+          mode: "markers",
+          name: s.name || data.groupLabel || undefined,
+          x: arr.x,
+          y: arr.y,
+          customdata: arr.customdata,
+          showlegend: false,
+          legendgroup: s.name || undefined,
+          marker: {
+            size: Math.max(3, style.marker * 0.7),
+            color: t.gray,
+            opacity: 0.45,
+            line: { width: 0 },
+          },
+          hovertemplate: scatterHover(data, s.name ? `${s.name} · no Z` : "No Z data", "none"),
+        });
+      }
     }
-    if (missing.length) {
-      const arr = pointArrays(missing, data);
-      traces.push({
-        type: traceType,
-        mode: "markers",
-        x: arr.x,
-        y: arr.y,
-        customdata: arr.customdata,
-        showlegend: false,
-        marker: {
-          size: Math.max(3, style.marker * 0.7),
-          color: t.gray,
-          opacity: 0.45,
-          line: { width: 0 },
-        },
-        hovertemplate: scatterHover(data, "No Z data", "none"),
-      });
-    }
-  } else if (data.zMode === "category") {
+  } else if (data.zMode === "category" || data.groupLabel) {
     // Draw large groups first so smaller categories stay visible when the
     // populations overlap (common when wafers track the same distribution).
     // `legendrank` keeps the natural, alphabetical legend order.
     const legendRank = new Map(series.map((s, i) => [s.key, i]));
     const drawOrder = [...series].sort((a, b) => b.points.length - a.points.length);
-    const symbols = ["circle", "square", "diamond", "triangle-up", "cross", "x", "star", "hexagon"];
     for (const s of drawOrder) {
       if (!s.points.length) continue;
-      const arr = pointArrays(s.points, data);
+      const arr = pointArrays(s.points, data, preview);
       const rank = legendRank.get(s.key) ?? 0;
       traces.push({
         type: traceType,
@@ -999,15 +1223,20 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
         x: arr.x,
         y: arr.y,
         customdata: arr.customdata,
-        showlegend: true,
+        showlegend: !facet,
         legendgroup: s.name,
         legendrank: rank,
         marker: {
           size: style.marker,
-          color: categoricalColor(t, s.key, s.name),
-          symbol: symbols[rank % symbols.length],
+          color: facet ? t.blue : categoricalColor(t, s.key, s.name),
+          symbol: facet ? "circle" : symbols[rank % symbols.length],
           opacity: 0.85,
-          line: { width: Math.max(0.8, style.line * 0.45), color: t.paper },
+          line: {
+            // The old paper-coloured ring read as a white halo in the small
+            // split thumbnails. Keep outlines only in the combined plot.
+            width: facet ? 0 : Math.max(0.8, style.line * 0.45),
+            color: t.paper,
+          },
         },
         hovertemplate: scatterHover(data, s.name, "none"),
       });
@@ -1015,7 +1244,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
   } else {
     const points = series[0]?.points ?? [];
     if (points.length) {
-      const arr = pointArrays(points, data);
+      const arr = pointArrays(points, data, preview);
       traces.push({
         type: traceType,
         mode: "markers",
@@ -1060,9 +1289,12 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
     if (sxx > 0) {
       const slope = sxy / sxx;
       const intercept = my - slope * mx;
-      const xs = allPoints.map((p) => p.x);
-      const lo = Math.min(...xs);
-      const hi = Math.max(...xs);
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const p of allPoints) {
+        if (p.x < lo) lo = p.x;
+        if (p.x > hi) hi = p.x;
+      }
       if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) {
         fitShape = {
           type: "line",
@@ -1094,36 +1326,77 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
     }
   }
 
-  const layout = baseLayout(t, opts.title, spec.presentation);
+  const layout = baseLayout(t, preview ? "" : opts.title, spec.presentation);
+  const horizontalColorbar = groupedZ && !preview;
   const colorbarSpace =
-    data.zMode === "continuous" ? (spec.presentation ? 96 : 70) : 0;
+    data.zMode === "continuous" && !preview && !horizontalColorbar
+      ? spec.presentation
+        ? 96
+        : 70
+      : 0;
   const legendSpace = showLegend ? (spec.presentation ? 190 : 130) : 0;
-  layout.margin = {
-    ...layout.margin,
-    l: style.margin.l,
-    r: style.margin.r + Math.max(colorbarSpace, legendSpace),
-    b: style.margin.b,
-  };
+  layout.margin = preview
+    ? { l: 8, r: 8, t: 8, b: 8 }
+    : {
+        ...layout.margin,
+        l: style.margin.l,
+        r: style.margin.r + Math.max(colorbarSpace, legendSpace),
+        b: style.margin.b + (horizontalColorbar ? Math.round(style.annotation * 3.2) : 0),
+      };
   layout.showlegend = showLegend;
   layout.hovermode = "closest";
   layout.xaxis = {
     ...layout.xaxis,
-    title: {
-      text: axisTitle(testLabel(data.xTest), data.xTest.units, style.axisTitle * 0.62),
-      font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
-    },
+    title: preview
+      ? { text: "" }
+      : {
+          text: axisTitle(testLabel(data.xTest), data.xTest.units, style.axisTitle * 0.62),
+          font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
+        },
+    showticklabels: !preview,
     showgrid: true,
     zeroline: false,
   };
   layout.yaxis = {
     ...layout.yaxis,
-    title: {
-      text: axisTitle(testLabel(data.yTest), data.yTest.units, style.axisTitle * 0.62),
-      font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
-    },
+    title: preview
+      ? { text: "" }
+      : {
+          text: axisTitle(testLabel(data.yTest), data.yTest.units, style.axisTitle * 0.62),
+          font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
+        },
+    showticklabels: !preview,
+    type: spec.logY ? "log" : "linear",
     showgrid: true,
     zeroline: false,
   };
+  if (!preview) {
+    const ys = data.series
+      .flatMap((s) => s.points.map((p) => p.y))
+      .filter((v) => Number.isFinite(v))
+      .sort((a, b) => a - b);
+    if (ys.length) {
+      const mean = ys.reduce((a, b) => a + b, 0) / ys.length;
+      const sd = Math.sqrt(ys.reduce((a, b) => a + (b - mean) * (b - mean), 0) / ys.length);
+      applyAxisRange(
+        layout,
+        "y",
+        spec,
+        {
+          mean,
+          sd,
+          min: ys[0],
+          max: ys[ys.length - 1],
+          q1: quantileSorted(ys, 0.25),
+          q3: quantileSorted(ys, 0.75),
+        },
+        null,
+        null,
+        ys[0],
+        ys[ys.length - 1]
+      );
+    }
+  }
   if (showLegend) {
     layout.legend = {
       orientation: "v",
@@ -1137,7 +1410,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
         family: CHART_FONT,
       },
       title: {
-        text: data.zColLabel,
+        text: data.groupLabel || data.zColLabel,
         side: "top",
         font: {
           size: Math.round(style.annotation * 0.9),
@@ -1153,8 +1426,8 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
     };
   }
   if (fitShape) layout.shapes = [...(layout.shapes ?? []), fitShape];
-  if (annotations.length) layout.annotations = annotations;
-  return { data: traces, layout };
+  if (annotations.length && !preview) layout.annotations = annotations;
+  return { ...previewFigure(traces, layout, preview, `${testLabel(data.xTest)}${data.xTest.units ? ` [${data.xTest.units}]` : ""}`, `${testLabel(data.yTest)}${data.yTest.units ? ` [${data.yTest.units}]` : ""}`), rasterScatter: preview };
 }
 
 /** Small helper used by the report to summarise a plot in text. */

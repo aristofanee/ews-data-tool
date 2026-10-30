@@ -42,9 +42,9 @@ pub async fn pick_files(state: State<'_, AppState>) -> Result<Vec<String>, Strin
     let mut dlg = rfd::FileDialog::new()
         .add_filter(
             "Semiconductor data",
-            &["stdf", "std", "atdf", "csv", "txt", "tsv", "z"],
+            &["stdf", "std", "atdf", "csv", "txt", "tsv", "z", "zip"],
         )
-        .add_filter("STDF (including .Z)", &["stdf", "std", "z"])
+        .add_filter("STDF (including .Z and ZIP)", &["stdf", "std", "z", "zip"])
         .add_filter("CSV / text", &["csv", "txt", "tsv"])
         .add_filter("All files", &["*"]);
     if let Some(dir) = state.last_dir.lock().unwrap().clone() {
@@ -162,7 +162,6 @@ pub async fn open_paths(
 
     tauri::async_runtime::spawn_blocking(move || {
         let mut ds = Dataset::new();
-        ds.files = paths2.clone();
         let n = paths2.len().max(1) as f32;
         for (i, p) in paths2.iter().enumerate() {
             let path = PathBuf::from(p);
@@ -179,6 +178,12 @@ pub async fn open_paths(
                 );
             };
             let ext = extension(&path);
+            if ext == "zip" {
+                crate::archive::import_zip(&path, &mut cb, &mut |name, imported| {
+                    ds.files.push(name); ds.append_import(imported);
+                })?;
+                continue;
+            }
             let imp = match ext.as_str() {
                 "csv" | "txt" | "tsv" | "dat" => {
                     csv_io::import_csv_with_mapping(&path, &mut cb, mapping.as_ref())?
@@ -192,8 +197,10 @@ pub async fn open_paths(
                     msg: format!("Merging {}", path.file_name().and_then(|f| f.to_str()).unwrap_or("")),
                 },
             );
-            ds.merge(imp);
+            ds.append_import(imp);
+            ds.files.push(p.clone());
         }
+        ds.resolve_retests();
         if ds.rows == 0 {
             return Err("No data rows were found in the selected file(s)".into());
         }
@@ -301,6 +308,11 @@ pub async fn wafer_map(
 }
 
 #[tauri::command]
+pub async fn wafer_maps(state: State<'_, AppState>, req: query::MapRequest) -> Result<Vec<query::MapResponse>, String> {
+    with_ds(state, move |ds| query::wafer_maps(ds, &req)).await
+}
+
+#[tauri::command]
 pub async fn pareto(
     state: State<'_, AppState>,
     req: query::ParetoRequest,
@@ -361,7 +373,7 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
     let file = std::fs::File::create(&path).map_err(|e| format!("Cannot create file: {e}"))?;
     let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
 
-    write!(w, "lot,wafer,x,y,hbin,sbin").map_err(|e| e.to_string())?;
+    write!(w, "lot,wafer,x,y,hbin,sbin,site").map_err(|e| e.to_string())?;
     for t in ds.tests.iter() {
         // Keep units in the header so the export can be re-imported with them.
         write!(w, ",{}", csv_escape(&t.display_with_units())).map_err(|e| e.to_string())?;
@@ -375,7 +387,7 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
     // and limits here makes an exported CSV a complete round-trip instead of
     // losing everything except the measurements.
     let mut meta = String::from("Tests#");
-    for _ in 0..5 {
+    for _ in 0..6 {
         meta.push(',');
     }
     for t in ds.tests.iter() {
@@ -390,7 +402,7 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
     writeln!(w, "{meta}").map_err(|e| e.to_string())?;
 
     let mut units = String::from("Unit");
-    for _ in 0..5 {
+    for _ in 0..6 {
         units.push(',');
     }
     for t in ds.tests.iter() {
@@ -403,7 +415,7 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
     writeln!(w, "{units}").map_err(|e| e.to_string())?;
 
     let mut lows = String::from("LowL");
-    for _ in 0..5 {
+    for _ in 0..6 {
         lows.push(',');
     }
     for t in ds.tests.iter() {
@@ -418,7 +430,7 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
     writeln!(w, "{lows}").map_err(|e| e.to_string())?;
 
     let mut highs = String::from("HighL");
-    for _ in 0..5 {
+    for _ in 0..6 {
         highs.push(',');
     }
     for t in ds.tests.iter() {
@@ -449,6 +461,8 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
             ds.hbin[r],
             ds.sbin[r]
         ));
+        line.push(',');
+        if let Some(site) = ds.site.get(r).copied().flatten() { line.push_str(&site.to_string()); }
         for c in ds.cols.iter() {
             let v = c[r];
             if v.is_finite() {
@@ -538,6 +552,23 @@ pub fn file_name(path: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::fmt_csv_num;
+
+    #[test]
+    fn csv_roundtrip_preserves_site_and_measurement_metadata() {
+        let source = std::env::temp_dir().join(format!("ews-site-source-{}.csv", std::process::id()));
+        let output = std::env::temp_dir().join(format!("ews-site-export-{}.csv", std::process::id()));
+        std::fs::write(&source, "Lot,Wafer,X,Y,HBIN,SBIN,Site,V [V]\nL,W,1,2,1,1,0,1.25\nL,W,2,2,2,5,3,2.5\n").unwrap();
+        let imp = crate::csv_io::import_csv(&source, &mut |_, _| {}).unwrap();
+        assert_eq!(imp.site, vec![Some(0), Some(3)]);
+        assert_eq!(imp.tests.len(), 1, "site must not become a measurement test");
+        let mut ds = crate::model::Dataset::new(); ds.merge(imp);
+        super::write_csv(&ds, output.to_str().unwrap(), &crate::model::Filter::default()).unwrap();
+        let roundtrip = crate::csv_io::import_csv(&output, &mut |_, _| {}).unwrap();
+        assert_eq!(roundtrip.site, ds.site);
+        assert_eq!(roundtrip.cols, ds.cols);
+        assert_eq!(roundtrip.tests[0].units, "V");
+        let _ = std::fs::remove_file(source); let _ = std::fs::remove_file(output);
+    }
 
     #[test]
     fn csv_numbers_keep_tiny_values() {

@@ -7,7 +7,7 @@ export const colors = {
   yellow: "#f5b301",
   yellowSoft: "#fbbf24",
   red: "#e11d48",
-  green: "#10b981",
+  green: "#16c55e",
   purple: "#8b5cf6",
   orange: "#f97316",
   teal: "#06b6d4",
@@ -107,20 +107,6 @@ export const PALETTES: Palette[] = [
   },
 ];
 
-export const BIN_COLORS = [
-  "#2563eb",
-  "#f5b301",
-  "#ef4444",
-  "#10b981",
-  "#8b5cf6",
-  "#f97316",
-  "#06b6d4",
-  "#ec4899",
-  "#84cc16",
-  "#64748b",
-  "#0ea5e9",
-  "#a855f7",
-];
 
 export function hexToRgb(hex: string): [number, number, number] {
   const h = hex.replace("#", "");
@@ -160,8 +146,17 @@ export function paletteColor(id: string, t: number): string {
   return rgbToHex(r, g, b);
 }
 
-export function binColor(code: number, pass: boolean): string {
-  if (pass) return BIN_COLORS[0];
-  const idx = 1 + (Math.abs(code * 7 + 3) % (BIN_COLORS.length - 1));
-  return BIN_COLORS[idx];
+const FAILURE_COLORS = ["#2563eb", "#f5b301", "#ef4444", "#8b5cf6", "#f97316", "#06b6d4", "#ec4899", "#64748b", "#0ea5e9", "#a855f7", "#d97706", "#e11d48", "#4f46e5", "#db2777", "#c026d3", "#ea580c", "#475569"];
+
+export function binColor(code: number, _pass = code === 1): string {
+  if (code === 1) return "#16c55e";
+  return FAILURE_COLORS[Math.abs(code) % FAILURE_COLORS.length];
+}
+
+export function binLabel(category: "hard" | "soft", code: number, description?: string): string {
+  if (code === 0xffff && description === "Others") return "Others";
+  const label = `${category === "soft" ? "SBIN" : "HBIN"} ${code}`;
+  const text = description?.trim();
+  if (!text || /^(?:[HS]?BIN)\s*\d+$/i.test(text)) return label;
+  return `${label} · ${text}`;
 }

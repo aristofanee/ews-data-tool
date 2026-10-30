@@ -33,12 +33,58 @@ const PLOT_TITLE_LABELS: Record<PlotType, string> = {
   scatter: "Scatter",
 };
 
+const PLOT_TYPES: PlotType[] = ["box", "map", "hist", "scatter", "trend", "binmap", "pareto"];
+const BUILTIN_CATEGORIES = ["lot", "wafer", "hbin", "sbin", "site"];
+
+function defaultSpecs(): Record<PlotType, PlotSpec> {
+  return Object.fromEntries(
+    PLOT_TYPES.map((type) => [type, defaultSpec(type, null, PLOT_LABELS[type])])
+  ) as Record<PlotType, PlotSpec>;
+}
+
+function hasCategory(info: DatasetInfo | null, value: string): boolean {
+  if (!info || !value) return false;
+  return BUILTIN_CATEGORIES.includes(value) || info.customColumns.some((c) => c.name === value);
+}
+
+/** Pareto splits include the per-die site category as well as wafer labels. */
+function isParetoCategory(info: DatasetInfo | null, value: string): boolean {
+  if (value === "lot" || value === "wafer" || value === "site") return true;
+  if (!info) return true;
+  return info.customColumns.some((c) => c.name === value);
+}
+
+/** Keep old templates and removed custom columns from leaving a dead category selected. */
+function sanitizeSpec(spec: PlotSpec, info: DatasetInfo | null): PlotSpec {
+  const next = { ...spec };
+  if (next.type === "pareto") {
+    if (next.xAxis !== "none" && !hasCategory(info, next.xAxis)) next.xAxis = "none";
+    if (next.groupBy !== "none" && !isParetoCategory(info, next.groupBy)) next.groupBy = "none";
+  } else {
+    if (!hasCategory(info, next.xAxis)) next.xAxis = "wafer";
+    if (next.groupBy !== "none") {
+      const valid =
+        next.type === "map"
+          ? next.groupBy === "lot" || next.groupBy === "wafer" || !!info?.customColumns.some((c) => c.name === next.groupBy)
+          : hasCategory(info, next.groupBy);
+      if (!valid) next.groupBy = "none";
+    }
+  }
+  if ((next.scatterZMode as string) === "category") next.scatterZMode = "none";
+  if (!info) return next;
+  if (next.test !== null && (next.test < 0 || next.test >= info.tests.length)) {
+    next.test = info.tests.length ? 0 : null;
+  }
+  return next;
+}
+
 export interface TemplateFile {
   app: "EWS Data Tool";
   version: 1;
   name: string;
   created: string;
   theme?: Theme;
+  presentation?: boolean;
   filters: Filter;
   plots: { spec: PlotSpec; filters: Filter }[];
   /** Labels created in the app; restored when the same wafers are loaded. */
@@ -89,6 +135,7 @@ function scatterSpecTitle(spec: PlotSpec, tests: TestInfo[]): string {
 
 const initialTheme: Theme =
   typeof localStorage !== "undefined" && localStorage.getItem("ews-theme") === "dark" ? "dark" : "light";
+const initialPresentation = typeof localStorage === "undefined" || localStorage.getItem("ews-presentation") !== "false";
 
 export interface CsvPrompt {
   paths: string[];
@@ -104,7 +151,11 @@ interface AppState {
   error: string | null;
   toast: string | null;
   theme: Theme;
+  presentation: boolean;
+  setPresentation: (value: boolean) => void;
   spec: PlotSpec;
+  /** Inspector state is remembered independently for every plot type. */
+  specs: Record<PlotType, PlotSpec>;
   filters: Filter;
   report: ReportItem[];
   reportOpen: boolean;
@@ -151,7 +202,9 @@ export const useStore = create<AppState>((set, get) => ({
   error: null,
   toast: null,
   theme: initialTheme,
-  spec: defaultSpec("box", null, "Box plot"),
+  presentation: initialPresentation,
+  spec: { ...defaultSpec("box", null, "Box plot"), presentation: initialPresentation },
+  specs: Object.fromEntries(Object.entries(defaultSpecs()).map(([key, spec]) => [key, { ...spec, presentation: initialPresentation }])) as Record<PlotType, PlotSpec>,
   filters: emptyFilter(),
   report: [],
   reportOpen: false,
@@ -166,37 +219,47 @@ export const useStore = create<AppState>((set, get) => ({
     if (!opts?.keepFilters) patch.filters = emptyFilter();
     if (info) {
       let test = prev.spec.test;
-      if (test === null || test >= info.tests.length) test = 0;
-      const testInfo = info.tests[test] ?? null;
-      const wafer = prev.spec.mapWafer;
-      let spec: PlotSpec = {
-        ...prev.spec,
-        test,
-        mapWafer: wafer !== null && wafer < info.wafers.length ? wafer : null,
-      };
-      const hasColumn = (name: string) => info.customColumns.some((c) => c.name === name);
-      if (spec.blockCol && spec.blockCol !== "__wafer" && !hasColumn(spec.blockCol)) {
-        spec.blockCol = "";
-      }
-      if (
-        spec.scatterZCol &&
-        !["lot", "wafer", "hbin", "sbin"].includes(spec.scatterZCol) &&
-        !hasColumn(spec.scatterZCol)
-      ) {
-        spec.scatterZCol = "lot";
-      }
+      if (test === null || test >= info.tests.length) test = info.tests.length ? 0 : null;
+      const testInfo = test !== null ? info.tests[test] ?? null : null;
+      let spec = sanitizeSpec({ ...prev.spec, test }, info);
       if (spec.type === "scatter") {
         spec = normalizeScatter(spec, info.tests);
         spec.title = scatterSpecTitle(spec, info.tests);
       } else {
         spec.title = autoTitle(testInfo, spec.type);
       }
+
+      const specs = { ...prev.specs };
+      for (const type of PLOT_TYPES) {
+        let s = specs[type] ?? defaultSpec(type, test, PLOT_LABELS[type]);
+        s = sanitizeSpec({ ...s, type }, info);
+        if (type === spec.type) {
+          s = spec;
+        } else {
+          if (s.test === null || s.test < 0 || s.test >= info.tests.length) {
+            s = { ...s, test };
+          }
+          if (type === "scatter") {
+            s = normalizeScatter(s, info.tests);
+          }
+        }
+        specs[type] = s;
+      }
       patch.spec = spec;
+      patch.specs = specs;
     }
     set(patch);
   },
 
   setBusy: (busy, pct = 0, msg = "") => set({ busy, busyPct: pct, busyMsg: msg }),
+  setPresentation: (presentation) => {
+    const s = get();
+    try { localStorage.setItem("ews-presentation", String(presentation)); } catch {}
+    set({ presentation, spec: { ...s.spec, presentation },
+      specs: Object.fromEntries(Object.entries(s.specs).map(([key, spec]) => [key, { ...spec, presentation }])) as Record<PlotType, PlotSpec>,
+      report: s.report.map((item) => ({ ...item, spec: { ...item.spec, presentation } })),
+    });
+  },
   setProgress: (pct, msg) => set({ busyPct: pct, busyMsg: msg }),
   setError: (error) => set({ error }),
   notify: (msg) => {
@@ -216,17 +279,25 @@ export const useStore = create<AppState>((set, get) => ({
 
   setPlotType: (type) => {
     const s = get();
+    if (type === s.spec.type) return;
+    const tests = s.info?.tests ?? [];
+    const specs = { ...s.specs, [s.spec.type]: s.spec };
+    let next = specs[type] ?? defaultSpec(type, s.spec.test, PLOT_LABELS[type]);
+    next = { ...next, type, presentation: s.presentation };
     if (type === "scatter") {
-      let spec = normalizeScatter({ ...s.spec, type }, s.info?.tests ?? []);
-      spec.title = scatterSpecTitle(spec, s.info?.tests ?? []);
-      set({ spec });
-      return;
+      next = normalizeScatter({ ...next, test: next.test ?? s.spec.test }, tests);
+      next.title = scatterSpecTitle(next, tests);
+    } else {
+      next.test = s.spec.test;
+      if (type === "map") next.mapMode = "value";
+      next.title = autoTitle(next.test !== null ? tests[next.test] ?? null : null, type);
     }
-    const test = s.info?.tests[s.spec.test ?? -1] ?? null;
-    const mapMode = type === "map" ? ("value" as const) : s.spec.mapMode;
-    set({ spec: { ...s.spec, type, mapMode, title: autoTitle(test, type) } });
+    next = sanitizeSpec(next, s.info);
+    specs[type] = next;
+    set({ spec: next, specs });
   },
   patchSpec: (p) => {
+    if (p.presentation !== undefined && p.presentation !== get().presentation) get().setPresentation(p.presentation);
     const s = get();
     const next: PlotSpec = { ...s.spec, ...p };
     let title = p.title ?? s.spec.title;
@@ -260,7 +331,8 @@ export const useStore = create<AppState>((set, get) => ({
         );
       }
     }
-    set({ spec: { ...next, title } });
+    const spec = sanitizeSpec({ ...next, title }, s.info);
+    set({ spec, specs: { ...s.specs, [spec.type]: spec } });
   },
   selectTest: (index) => {
     const s = get();
@@ -277,10 +349,11 @@ export const useStore = create<AppState>((set, get) => ({
       }
       const spec: PlotSpec = { ...s.spec, test: y, scatterX: x, scatterY: y };
       spec.title = scatterSpecTitle(spec, tests);
-      set({ spec });
+      set({ spec, specs: { ...s.specs, scatter: spec } });
       return;
     }
-    set({ spec: { ...s.spec, test: index, title: autoTitle(test, s.spec.type) } });
+    const spec: PlotSpec = { ...s.spec, test: index, title: autoTitle(test, s.spec.type) };
+    set({ spec, specs: { ...s.specs, [spec.type]: spec } });
   },
 
   patchFilters: (p) => set({ filters: { ...get().filters, ...p } }),
@@ -315,7 +388,7 @@ export const useStore = create<AppState>((set, get) => ({
   addReportItems: (items) => {
     const s = get();
     const added: ReportItem[] = items.map((it) => {
-      const spec = { ...it.spec, id: rid() };
+      const spec = { ...it.spec, id: rid(), presentation: s.presentation };
       return { id: spec.id, spec, filters: structuredClone(it.filters) };
     });
     set({ report: [...s.report, ...added], reportOpen: true });
@@ -334,27 +407,59 @@ export const useStore = create<AppState>((set, get) => ({
   setReportOpen: (reportOpen) => set({ reportOpen }),
   setTemplateName: (templateName) => set({ templateName }),
   applyTemplate: (t) => {
+    const presentation = t.presentation ?? t.plots?.[0]?.spec.presentation ?? get().presentation;
+    get().setPresentation(presentation);
     const s = get();
     const tests = s.info?.tests ?? [];
     const plots = (t.plots ?? []).map((p) => {
+      const raw = p.spec as PlotSpec & {
+        blockCol?: string;
+        paretoGroup?: string;
+        scatterZCol?: string;
+        scatterZMode?: string;
+      };
       let spec: PlotSpec = {
         ...defaultSpec(p.spec.type ?? "box", p.spec.test ?? null, p.spec.title ?? ""),
-        ...p.spec,
+        ...raw,
+        presentation,
         id: rid(),
       };
+      // Migrate templates saved before grouping was unified.
+      if (raw.groupBy === undefined) {
+        if (raw.blockCol) spec.groupBy = raw.blockCol === "__wafer" ? "wafer" : raw.blockCol;
+        if (raw.paretoGroup && raw.paretoGroup !== "none") spec.groupBy = raw.paretoGroup;
+        if ((raw.scatterZMode as string) === "category" && raw.scatterZCol) {
+          spec.groupBy = raw.scatterZCol;
+        }
+      }
+      if ((spec.scatterZMode as string) === "category") spec.scatterZMode = "none";
+      if (!raw.limitMode) {
+        spec.limitMode = spec.yMin !== null || spec.yMax !== null ? "manual" : "auto";
+      }
+      spec = sanitizeSpec(spec, s.info);
       if (spec.type === "scatter") {
         spec = normalizeScatter(spec, tests);
         if (!spec.title) spec.title = scatterSpecTitle(spec, tests);
+      } else if (!spec.title) {
+        spec.title = autoTitle(
+          spec.test !== null ? tests[spec.test] ?? null : null,
+          spec.type
+        );
       }
       return { id: spec.id, spec, filters: p.filters ?? emptyFilter() };
     });
+    const specs = { ...s.specs };
+    for (const item of plots) specs[item.spec.type] = item.spec;
+    const active = plots[0]?.spec ?? s.spec;
+    specs[active.type] = active;
     set({
       report: plots,
       filters: t.filters ?? emptyFilter(),
       templateName: t.name ?? "Template",
       theme: t.theme === "dark" || t.theme === "light" ? t.theme : s.theme,
       reportOpen: true,
-      spec: plots[0]?.spec ?? s.spec,
+      spec: active,
+      specs,
     });
     s.notify(`Template “${t.name}” loaded: ${plots.length} plots.`);
   },

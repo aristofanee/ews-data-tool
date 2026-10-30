@@ -3,7 +3,6 @@ use crate::model::{WaferGeom, NAN};
 use memmap2::Mmap;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 struct Cur<'a> {
@@ -93,9 +92,22 @@ impl<'a> Cur<'a> {
         (self.remaining() >= 1).then(|| self.cn())
     }
 
+    fn skip_cn(&mut self) {
+        if self.remaining() > 0 {
+            let n = self.u8() as usize;
+            self.take(n);
+        }
+    }
+
     fn cn(&mut self) -> String {
         let n = self.u8() as usize;
         let raw = self.take(n);
+        let raw = &raw[..raw.iter().position(|b| *b == 0).unwrap_or(raw.len())];
+        if raw.iter().all(|b| (0x20..0x7f).contains(b)) {
+            // Common tester strings are printable ASCII. Allocate only the
+            // trimmed result rather than a temporary String and another copy.
+            return std::str::from_utf8(raw).unwrap().trim().to_owned();
+        }
         let s: String = raw
             .iter()
             .take_while(|b| **b != 0)
@@ -323,30 +335,26 @@ fn display_unit(base: &str, exponent: i8, resfmt: &str) -> String {
 }
 
 pub fn import_stdf(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Imported, String> {
-    let mut file = File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
-    let mut magic = [0u8; 3];
-    let n = file
-        .read(&mut magic)
-        .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-
-    // Unix compress (.Z / LZC) is a common wrapper for STDF files on older
-    // test floors. It is not gzip/zip; decode it before parsing the records.
-    if n >= 2 && magic[0] == 0x1f && magic[1] == 0x9d {
-        file.seek(SeekFrom::Start(0))
-            .map_err(|e| format!("Cannot rewind {}: {e}", path.display()))?;
-        let mut compressed = Vec::new();
-        file.read_to_end(&mut compressed)
-            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-        progress(1.0, "Decompressing .Z...");
-        let data = lzw_z::decompress_slice(&compressed)
-            .map_err(|e| format!("Cannot decompress {}: {e}", path.display()))?;
-        progress(10.0, "Parsing STDF...");
-        let mut cb = |pct: f32, msg: &str| progress(10.0 + pct * 0.9, msg);
-        return parse_stdf_bytes(&data, &mut cb);
+    let file = File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+    if file.metadata().map_err(|e| e.to_string())?.len() == 0 {
+        return Err(format!("{} is empty", path.display()));
     }
-
     let mmap = unsafe { Mmap::map(&file) }.map_err(|e| format!("Cannot map file: {e}"))?;
-    parse_stdf_bytes(&mmap, progress)
+    import_stdf_bytes(&mmap, &path.display().to_string(), progress)
+}
+
+/// Shared by standalone files and ZIP members; no temporary extraction or
+/// Read-adapter copies are needed for either plain STDF or Unix compress.
+pub fn import_stdf_bytes(bytes: &[u8], source: &str, progress: &mut dyn FnMut(f32, &str)) -> Result<Imported, String> {
+    if bytes.starts_with(&[0x1f, 0x9d]) {
+        progress(1.0, &format!("Decompressing .Z: {source}"));
+        let data = crate::z_decode::decompress(bytes)
+            .map_err(|e| format!("Cannot decompress {source}: {e}"))?;
+        progress(10.0, &format!("Parsing STDF: {source}"));
+        let mut cb = |pct: f32, msg: &str| progress(10.0 + pct * 0.9, msg);
+        return parse_stdf_bytes(&data, &mut cb).map_err(|e| format!("{source}: {e}"));
+    }
+    parse_stdf_bytes(bytes, progress).map_err(|e| format!("{source}: {e}"))
 }
 
 fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imported, String> {
@@ -362,7 +370,7 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
     } else if le_len == 2 && d[2] == 0 && d[3] == 10 && d[5] == 4 {
         false
     } else {
-        d.get(4).copied().unwrap_or(2) != 2
+        return Err("Expected an STDF V4 FAR header".into());
     };
 
     let mut out = Imported::new();
@@ -371,14 +379,16 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
     let mut cur_wafer: u16 = 0;
     let mut have_lot = false;
     let mut have_wafer = false;
-    let mut row: Option<usize> = None;
+    // Several sites may have a part in flight at once. Never share a row
+    // between their interleaved PIR/PTR/MPR/PRR records.
+    let mut active_rows: HashMap<(u8, u8), usize> = HashMap::new();
     let mut last_report = 0.0f32;
     let mut cur_geom = WaferGeom::default();
     // STDF's first PTR/MPR for a test supplies defaults for RES_SCAL, limits
     // and units. It may appear outside a PIR/PRR, so keep defaults separate
     // from the per-die test slots.
     let mut test_defaults: HashMap<u32, TestDefaults> = HashMap::new();
-    let mut scale_states: HashMap<usize, ScaleState> = HashMap::new();
+    let mut scale_states: Vec<Option<ScaleState>> = Vec::new();
 
     while off + 4 <= d.len() {
         let len = read_u16(d, off, be) as usize;
@@ -387,7 +397,7 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
         let body_start = off + 4;
         let body_end = body_start + len;
         if body_end > d.len() {
-            break;
+            return Err(format!("Truncated STDF record ({typ},{sub}) at byte {off}"));
         }
         let body = &d[body_start..body_end];
         off = body_end;
@@ -420,7 +430,7 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 // WCR geometry belongs to the current lot. Do not leak it into
                 // a following lot that has no WCR of its own.
                 cur_geom = WaferGeom::default();
-                row = None;
+                active_rows.clear();
             }
             // WIR - wafer information record
             (2, 10) => {
@@ -513,6 +523,11 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
             }
             // PIR - part information record
             (5, 10) => {
+                let mut c = Cur::new(body, be);
+                let site = (c.u8(), c.u8());
+                if active_rows.contains_key(&site) {
+                    return Err(format!("PIR before previous PRR for head {} site {}", site.0, site.1));
+                }
                 if !have_lot {
                     cur_lot = out.lot_index("LOT");
                     have_lot = true;
@@ -521,11 +536,15 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                     cur_wafer = out.wafer_index(cur_lot, "W1");
                     have_wafer = true;
                 }
-                row = Some(out.new_row(cur_lot, cur_wafer));
+                let r = out.new_row(cur_lot, cur_wafer);
+                out.site[r] = Some(site.1);
+                active_rows.insert(site, r);
             }
             // PRR - part results record
             (5, 20) => {
-                let r = match row {
+                let mut c = Cur::new(body, be);
+                let site = (c.u8(), c.u8());
+                let r = match active_rows.remove(&site) {
                     Some(r) => r,
                     None => {
                         if !have_lot {
@@ -539,28 +558,27 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                         out.new_row(cur_lot, cur_wafer)
                     }
                 };
-                let mut c = Cur::new(body, be);
-                c.take(5);
+                c.take(3);
                 let hard = c.u16();
                 let soft = c.u16();
                 let x = c.i16();
                 let y = c.i16();
                 out.hbin[r] = hard;
+                out.site[r] = Some(site.1);
                 out.sbin[r] = soft;
                 out.x[r] = x;
                 out.y[r] = y;
-                row = None;
             }
             // PTR - parametric test record
             (15, 10) => {
                 let mut c = Cur::new(body, be);
                 let test_num = c.u32();
-                c.take(2);
+                let site = (c.u8(), c.u8());
                 let flg = c.u8();
                 c.take(1);
                 let raw_result = c.f32();
                 let txt = c.cn();
-                let _alarm = c.cn();
+                c.skip_cn();
                 let opt = c.u8();
                 let res_scal = c.i8_opt();
                 let _llm_scal = c.i8_opt();
@@ -569,8 +587,8 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 let hi_limit = c.f32_opt();
                 let units = c.cn_opt().unwrap_or_default();
                 let resfmt = c.cn_opt().unwrap_or_default();
-                let _llmfmt = c.cn_opt();
-                let _hlmfmt = c.cn_opt();
+                c.skip_cn();
+                c.skip_cn();
                 let lo_spec = c.f32_opt();
                 let hi_spec = c.f32_opt();
 
@@ -632,17 +650,17 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 let effective_lo_spec = record_lo_spec.or(defaults.lo_spec);
                 let effective_hi_spec = record_hi_spec.or(defaults.hi_spec);
                 let effective_units = if units.is_empty() {
-                    defaults.units.clone()
+                    defaults.units.as_str()
                 } else {
-                    units
+                    units.as_str()
                 };
                 let effective_name = if txt.is_empty() {
-                    defaults.name.clone()
+                    defaults.name.as_str()
                 } else {
-                    txt
+                    txt.as_str()
                 };
 
-                if let Some(r) = row {
+                if let Some(r) = active_rows.get(&site).copied() {
                     let key = (test_num, 0);
                     let idx = out.test_slot(key);
                     {
@@ -654,11 +672,12 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                             t.name = if effective_name.is_empty() {
                                 format!("T{test_num}")
                             } else {
-                                effective_name
+                                effective_name.to_owned()
                             };
                         }
                     }
-                    let state = scale_states.entry(idx).or_default();
+                    if scale_states.len() <= idx { scale_states.resize_with(idx + 1, || None); }
+                    let state = scale_states[idx].get_or_insert_with(ScaleState::default);
                     if opt & 1 == 0 {
                         if let Some(scale) = res_scal {
                             *state.votes.entry(scale).or_insert(0) += 1;
@@ -668,7 +687,8 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                         }
                     }
                     if !effective_units.is_empty() {
-                        *state.units.entry(effective_units).or_insert(0) += 1;
+                        if let Some(count) = state.units.get_mut(effective_units) { *count += 1; }
+                        else { state.units.insert(effective_units.to_owned(), 1); }
                     }
                     note_limit(&mut state.lo, effective_lo);
                     note_limit(&mut state.hi, effective_hi);
@@ -681,14 +701,14 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                     if flg & 0b0011_1100 != 0 {
                         result = NAN;
                     }
-                    out.column(key, r, result);
+                    out.write_column(idx, r, result);
                 }
             }
             // MPR - multiple result parametric record
             (15, 15) => {
                 let mut c = Cur::new(body, be);
                 let test_num = c.u32();
-                c.take(2);
+                let site = (c.u8(), c.u8());
                 let flg = c.u8();
                 c.take(1);
                 let rtn_icnt = c.u16() as usize;
@@ -703,7 +723,7 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                     results.push(c.f32());
                 }
                 let txt = c.cn();
-                let _alarm = c.cn();
+                c.skip_cn();
                 let opt = c.u8();
                 let res_scal = c.i8_opt();
                 let _llm_scal = c.i8_opt();
@@ -716,10 +736,10 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                     c.take(rtn_icnt * 2);
                 }
                 let units = c.cn_opt().unwrap_or_default();
-                let _units_in = c.cn_opt();
+                c.skip_cn();
                 let resfmt = c.cn_opt().unwrap_or_default();
-                let _llmfmt = c.cn_opt();
-                let _hlmfmt = c.cn_opt();
+                c.skip_cn();
+                c.skip_cn();
                 let lo_spec = c.f32_opt();
                 let hi_spec = c.f32_opt();
 
@@ -778,17 +798,17 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 let effective_lo_spec = record_lo_spec.or(defaults.lo_spec);
                 let effective_hi_spec = record_hi_spec.or(defaults.hi_spec);
                 let effective_units = if units.is_empty() {
-                    defaults.units.clone()
+                    defaults.units.as_str()
                 } else {
-                    units
+                    units.as_str()
                 };
                 let effective_name = if txt.is_empty() {
-                    defaults.name.clone()
+                    defaults.name.as_str()
                 } else {
-                    txt
+                    txt.as_str()
                 };
 
-                if let Some(r) = row {
+                if let Some(r) = active_rows.get(&site).copied() {
                     for (i, raw) in results.into_iter().enumerate() {
                         let key = (test_num, i as u16);
                         let idx = out.test_slot(key);
@@ -801,12 +821,13 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                                 let base = if effective_name.is_empty() {
                                     format!("T{test_num}")
                                 } else {
-                                    effective_name.clone()
+                                    effective_name.to_owned()
                                 };
                                 t.name = format!("{base}[{i}]");
                             }
                         }
-                        let state = scale_states.entry(idx).or_default();
+                        if scale_states.len() <= idx { scale_states.resize_with(idx + 1, || None); }
+                    let state = scale_states[idx].get_or_insert_with(ScaleState::default);
                         if opt & 1 == 0 {
                             if let Some(scale) = res_scal {
                                 *state.votes.entry(scale).or_insert(0) += 1;
@@ -816,7 +837,8 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                             }
                         }
                         if !effective_units.is_empty() {
-                            *state.units.entry(effective_units.clone()).or_insert(0) += 1;
+                            if let Some(count) = state.units.get_mut(effective_units) { *count += 1; }
+                            else { state.units.insert(effective_units.to_owned(), 1); }
                         }
                         note_limit(&mut state.lo, effective_lo);
                         note_limit(&mut state.hi, effective_hi);
@@ -827,7 +849,7 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                         if flg & 0b0011_1100 != 0 {
                             value = NAN;
                         }
-                        out.column(key, r, value);
+                        out.write_column(idx, r, value);
                     }
                 }
             }
@@ -873,12 +895,19 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
         }
     }
 
+    if off != d.len() {
+        return Err(format!("Incomplete STDF record header at byte {off}"));
+    }
+    if !active_rows.is_empty() {
+        return Err("STDF ended with unfinished die records (missing PRR)".into());
+    }
+
     // Apply one display scale to every die of a test. STDF stores RESULT and
     // limits in base UNITS; RES_SCAL only selects the display exponent. A
     // record that omitted RES_SCAL must therefore inherit the test default
     // instead of being left in base units while the rest of the file is
     // scaled.
-    for (idx, state) in scale_states {
+    for (idx, state) in scale_states.into_iter().enumerate().filter_map(|(idx, state)| state.map(|state| (idx, state))) {
         if idx >= out.tests.len() {
             continue;
         }
@@ -1050,6 +1079,105 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "synthetic STDF import benchmark; run explicitly with --ignored --nocapture"]
+    fn stdf_import_benchmark() {
+        let mut d = minimal_stdf(&[], None);
+        let templates: Vec<_> = (0..32).map(|t| ptr_body(100 + t, t as f32, 0,
+            Some(0), Some(-1.0), Some(100.0), Some("V"), Some("%g"))).collect();
+        for die in 0..10_000 {
+            d.extend(rec(5, 10, &[1, 0]));
+            for template in &templates { d.extend(rec(15, 10, template)); }
+            d.extend(rec(5, 20, &prr_body((die % 100) as i16, (die / 100) as i16)));
+        }
+        let p = std::env::temp_dir().join(format!("ews-import-benchmark-{}.stdf", std::process::id()));
+        std::fs::write(&p, &d).unwrap();
+        for run in 1..=3 {
+            let start = std::time::Instant::now();
+            let imp = import_stdf(&p, &mut |_, _| {}).unwrap();
+            let parse_ms = start.elapsed().as_millis();
+            assert_eq!(imp.row_lot.len(), 10_000);
+            assert_eq!(imp.tests.len(), 32);
+            assert!(imp.tests.iter().all(|t| t.count == 10_000));
+            assert!(imp.cols.iter().enumerate().all(|(t, col)| col.iter().all(|v| *v == t as f32)));
+            eprintln!("STDF import run {run}: {} bytes, 320000 PTR measurements, {parse_ms}ms", d.len());
+        }
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn interleaved_sites_keep_their_measurements_and_coordinates() {
+        let mut d = minimal_stdf(&[], None);
+        d.extend(rec(5, 10, &[1, 0]));
+        d.extend(rec(5, 10, &[1, 1]));
+        let p0 = ptr_body(100, 10.0, 0xff, None, None, None, None, None);
+        let mut p1 = ptr_body(100, 20.0, 0xff, None, None, None, None, None);
+        p1[5] = 1;
+        d.extend(rec(15, 10, &p1));
+        d.extend(rec(15, 10, &p0));
+        let mut r1 = prr_body(8, 9);
+        r1[1] = 1;
+        d.extend(rec(5, 20, &r1));
+        d.extend(rec(5, 20, &prr_body(2, 3)));
+        let imp = import_bytes("multisite", &d);
+        assert_eq!(imp.x, vec![2, 8]);
+        assert_eq!(imp.y, vec![3, 9]);
+        assert_eq!(imp.cols[0], vec![10.0, 20.0]);
+        assert_eq!(imp.site, vec![Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn string_fast_path_and_skips_preserve_cursor_and_sanitization() {
+        for (bytes, expected) in [
+            (&[5u8, b' ', b'A', b'B', b' ', b' ', 9][..], "AB"),
+            (&[4u8, b'A', 0, b'B', b' ', 9][..], "A"),
+            (&[3u8, b'A', 255, b'B', 9][..], "A B"),
+        ] {
+            let mut read = Cur::new(bytes, false);
+            let mut skip = Cur::new(bytes, false);
+            assert_eq!(read.cn(), expected);
+            skip.skip_cn();
+            assert_eq!(read.remaining(), skip.remaining());
+            assert_eq!(read.u8(), 9);
+            assert_eq!(skip.u8(), 9);
+        }
+    }
+
+    #[test]
+    fn mpr_import_preserves_result_columns_and_limits() {
+        let mut d = minimal_stdf(&[], None);
+        d.extend(rec(5, 10, &[1, 0]));
+        let mut body = Vec::new();
+        body.extend(100u32.to_le_bytes());
+        body.extend([1, 0, 0, 0]);
+        body.extend(0u16.to_le_bytes());
+        body.extend(2u16.to_le_bytes());
+        body.extend(1.25f32.to_le_bytes()); body.extend(2.5f32.to_le_bytes());
+        body.extend(cn("Multi")); body.extend(cn("ignored alarm"));
+        body.extend([0, 0, 0, 0]);
+        body.extend((-1.0f32).to_le_bytes()); body.extend(100f32.to_le_bytes());
+        body.extend(0f32.to_le_bytes()); body.extend(1f32.to_le_bytes());
+        for text in ["V", "ignored input units", "%g", "ignored low format", "ignored high format"] { body.extend(cn(text)); }
+        d.extend(rec(15, 15, &body));
+        d.extend(rec(5, 20, &prr_body(2, 3)));
+        let imp = import_bytes("mpr-optimized", &d);
+        assert_eq!(imp.cols, vec![vec![1.25], vec![2.5]]);
+        assert_eq!(imp.tests[0].name, "Multi[0]");
+        assert_eq!(imp.tests[1].name, "Multi[1]");
+        for t in &imp.tests {
+            assert_eq!(t.units, "V");
+            assert_eq!(t.lo_limit, Some(-1.0)); assert_eq!(t.hi_limit, Some(100.0));
+        }
+    }
+
+    #[test]
+    fn rejects_truncated_records_instead_of_importing_a_partial_dataset() {
+        let mut d = minimal_stdf(&[(0, 0, ptr_body(100, 1.0, 0xff, None, None, None, None, None))], None);
+        d.extend_from_slice(&[20, 0, 15, 10, 0]);
+        let result = parse_stdf_bytes(&d, &mut |_, _| {});
+        assert!(result.err().unwrap().contains("Truncated STDF"));
+    }
+
+    #[test]
     fn applies_first_test_defaults_to_die_with_omitted_fields() {
         // STDF allows the first PTR for a test to be a default-only record
         // outside a PIR/PRR. Later PTRs may omit RES_SCAL, limits and UNITS.
@@ -1208,10 +1336,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires STDF_DEMO_Z fixture; run explicitly with --ignored"]
     fn parses_compressed_reference_file() {
         let p = match std::env::var("STDF_DEMO_Z") {
             Ok(p) if !p.is_empty() => p,
-            _ => return,
+            _ => panic!("Set STDF_DEMO_Z to the compressed reference file"),
         };
         let mut cb = |_: f32, _: &str| {};
         let imp = import_stdf(std::path::Path::new(&p), &mut cb).expect("parse .Z");
@@ -1220,10 +1349,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires STDF_DEMO fixture; run explicitly with --ignored"]
     fn parses_reference_file() {
         let p = match std::env::var("STDF_DEMO") {
             Ok(p) if !p.is_empty() => p,
-            _ => return,
+            _ => panic!("Set STDF_DEMO to the reference file"),
         };
         let mut cb = |_: f32, _: &str| {};
         let imp = import_stdf(std::path::Path::new(&p), &mut cb).expect("parse");

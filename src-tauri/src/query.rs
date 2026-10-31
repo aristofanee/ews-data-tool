@@ -284,6 +284,7 @@ pub struct MapDie {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MapResponse {
+    pub unknown_bins: usize,
     pub test_pass: usize,
     pub test_fail: usize,
     pub test_yield_pct: Option<f32>,
@@ -527,11 +528,13 @@ fn wafer_map_prepared(ds: &Dataset, req: &MapRequest, keep_ref: Option<&[bool]>,
         && lsl.zip(usl).map_or(true, |(l, u)| l <= u);
     let col = req.test.and_then(|t| ds.cols.get(t));
     let (mut pass, mut fail, mut test_pass, mut test_fail) = (0, 0, 0, 0);
+    let mut unknown_bins = 0;
     for &r in rows {
         if req.wafer.is_some_and(|w| ds.wafer_of_row[r] != w)
             || (!req.filter.lots.is_empty() && !req.filter.lots.contains(&ds.lot_of_row[r]))
             || (!req.filter.wafers.is_empty() && !req.filter.wafers.contains(&ds.wafer_of_row[r])) { continue; }
         // Physical wafer yield never changes with a test/outlier/bin filter.
+        if ds.hbin[r] == UNKNOWN_BIN { unknown_bins += 1; }
         if ds.hbin[r] == 1 { pass += 1; } else { fail += 1; }
         if valid_limits && considered[r] && keep_ref.map_or(true, |k| k[r]) {
             if let Some(v) = col.and_then(|c| c.get(r)).copied().filter(|v| v.is_finite()) {
@@ -582,6 +585,7 @@ fn wafer_map_prepared(ds: &Dataset, req: &MapRequest, keep_ref: Option<&[bool]>,
     };
 
     MapResponse {
+        unknown_bins,
         test_pass,
         test_fail,
         test_yield_pct: (test_pass + test_fail > 0).then(|| test_pass as f32 * 100.0 / (test_pass + test_fail) as f32),
@@ -702,6 +706,7 @@ pub struct ParetoBar {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParetoGroup {
+    pub unknown_total: usize,
     pub key: usize,
     pub label: String,
     pub total: usize,
@@ -723,6 +728,7 @@ pub struct ParetoSeries {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParetoResponse {
+    pub unknown_total: usize,
     pub mode: ParetoMode,
     pub bars: Vec<ParetoBar>,
     pub groups: Vec<ParetoGroup>,
@@ -735,6 +741,7 @@ pub struct ParetoResponse {
 
 #[derive(Default)]
 struct ParetoGroupAcc {
+    unknown: usize,
     total: usize,
     pass: usize,
     counts: HashMap<u16, usize>,
@@ -785,6 +792,7 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
     let mut total = 0usize;
     let mut pass_total = 0usize;
     let mut fail_total = 0usize;
+    let mut unknown_total = 0usize;
     let mut grouped: HashMap<String, ParetoGroupAcc> = HashMap::new();
 
     for r in 0..ds.rows {
@@ -796,18 +804,21 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
         total += 1;
         if pass {
             pass_total += 1;
-        } else {
+        } else if code != crate::model::UNKNOWN_BIN {
             fail_total += 1;
+        } else {
+            unknown_total += 1;
         }
-        if mask[r] { *counts.entry(code).or_insert(0) += 1; }
+        if mask[r] && code != crate::model::UNKNOWN_BIN { *counts.entry(code).or_insert(0) += 1; }
         if let Some(by) = group_by {
             let glabel = pareto_group_label(ds, by, r, multi_lot);
             let g = grouped.entry(glabel).or_default();
             g.total += 1;
+            if code == crate::model::UNKNOWN_BIN { g.unknown += 1; }
             if pass {
                 g.pass += 1;
             }
-            if mask[r] { *g.counts.entry(code).or_insert(0) += 1; }
+            if mask[r] && code != crate::model::UNKNOWN_BIN { *g.counts.entry(code).or_insert(0) += 1; }
         }
     }
 
@@ -816,7 +827,7 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
     } else {
         0.0
     };
-    let top = req.top.unwrap_or(20).max(1);
+    let top = req.top.unwrap_or(10).max(1);
 
     if let Some(by) = group_by {
         let mut group_rows: Vec<(String, ParetoGroupAcc)> = grouped.into_iter().collect();
@@ -825,11 +836,12 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
             .iter()
             .enumerate()
             .map(|(key, (label, g))| ParetoGroup {
+                unknown_total: g.unknown,
                 key,
                 label: label.clone(),
                 total: g.total,
                 pass: g.pass,
-                fail: g.total.saturating_sub(g.pass),
+                fail: g.total.saturating_sub(g.pass + g.unknown),
                 yield_pct: if g.total > 0 {
                     g.pass as f32 * 100.0 / g.total as f32
                 } else {
@@ -912,6 +924,7 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
         }
 
         return ParetoResponse {
+            unknown_total,
             mode: ParetoMode::Grouped,
             bars: Vec::new(),
             groups,
@@ -965,6 +978,7 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
         });
     }
     ParetoResponse {
+        unknown_total,
         mode: ParetoMode::Global,
         bars,
         groups: Vec::new(),

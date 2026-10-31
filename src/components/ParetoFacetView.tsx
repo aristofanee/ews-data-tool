@@ -36,7 +36,8 @@ export function ParetoFacetView({ spec, filter, onReady }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const viewKey = usePlotViewKey(spec);
-  const [selected, setSelected] = usePlotSelection("pareto-split", viewKey);
+  const selectionKey = usePlotViewKey({ ...spec, binCategory: "hard" });
+  const [selected, setSelected] = usePlotSelection("pareto-split", selectionKey);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
 
   const groups = useMemo(
@@ -209,7 +210,7 @@ export function ParetoFacetView({ spec, filter, onReady }: Props) {
             }}
           >
             <div className="facet-label">
-              {label} · <span className="yield-value">{data.yieldPct.toFixed(1)}%</span>
+              {label} · <span className="yield-value">{data.unknownTotal ? "N/A (unknown bins)" : `${data.yieldPct.toFixed(1)}%`}</span>
             </div>
             <div className="facet-chart-body">
               <PlotlyChart figure={preview} staticPlot />

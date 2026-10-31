@@ -225,6 +225,18 @@ pub fn inspect_csv(path: String) -> Result<csv_io::CsvInspection, String> {
 }
 
 #[tauri::command]
+pub async fn import_product_metadata(state: State<'_, AppState>, path: String) -> Result<DatasetInfo, String> {
+    let target = state.ds.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = stdf::import_metadata(std::path::Path::new(&path))?;
+        let mut guard = target.lock().map_err(|e| e.to_string())?;
+        let ds = guard.as_mut().ok_or("Import CSV data before adding product metadata")?;
+        ds.fill_product_metadata(source)?;
+        Ok(ds.info())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub fn dataset_info(state: State<'_, AppState>) -> Result<Option<DatasetInfo>, String> {
     Ok(state.ds.lock().unwrap().as_ref().map(|d| d.info()))
 }

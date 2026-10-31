@@ -1,4 +1,5 @@
 import type { Theme } from "../lib/theme";
+import { graphFontOffset } from "../lib/demoFonts";
 
 export const CHART_FONT = '"Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif';
 
@@ -202,11 +203,11 @@ export function chartStyle(presentation: boolean): ChartStyle {
     };
   }
   return {
-    title: 16,
-    axisTitle: 12,
-    tick: 11,
-    annotation: 10,
-    hover: 12,
+    title: 18 + graphFontOffset(),
+    axisTitle: 14 + graphFontOffset(),
+    tick: 13 + graphFontOffset(),
+    annotation: 12 + graphFontOffset(),
+    hover: 14 + graphFontOffset(),
     line: 1.4,
     axisLine: 1,
     marker: 4,

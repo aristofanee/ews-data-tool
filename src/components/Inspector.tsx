@@ -322,7 +322,7 @@ export function Inspector() {
             />
           </Row>
           <Row label="Top bins">
-            <Num value={spec.top} onChange={(v) => patch({ top: v ?? 20 })} step="1" />
+            <Num value={spec.top} onChange={(v) => patch({ top: v ?? 10 })} step="1" />
           </Row>
           <Row label="X axis">
             <select
@@ -390,16 +390,6 @@ export function Inspector() {
 
       {isScatter && (
         <Section title="Scatter">
-          <Row label="X test">
-            <select
-              className="input"
-              value={spec.scatterX ?? ""}
-              onChange={(e) => patch({ scatterX: e.target.value === "" ? null : Number(e.target.value) })}
-            >
-              {spec.scatterX === null && <option value="">Select…</option>}
-              {testOptions}
-            </select>
-          </Row>
           <Row label="Y test">
             <select
               className="input"

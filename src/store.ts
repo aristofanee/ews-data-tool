@@ -115,16 +115,15 @@ export function scatterTitle(x: TestInfo | null, y: TestInfo | null): string {
   return "Scatter";
 }
 
-/** Fill in sensible X/Y tests (never the same test twice) for a scatter spec. */
+/** The selected main test is X; retain a valid independently selected Y. */
 function normalizeScatter(spec: PlotSpec, tests: TestInfo[]): PlotSpec {
   const n = tests.length;
   if (n === 0) return { ...spec, scatterX: null, scatterY: null };
-  let x = spec.scatterX;
+  let x = spec.test;
   let y = spec.scatterY;
   if (x === null || x < 0 || x >= n) x = spec.test !== null && spec.test < n ? spec.test : 0;
   if (y === null || y < 0 || y >= n) y = x + 1 < n ? x + 1 : x;
-  if (n > 1 && x === y) y = (x + 1) % n;
-  return { ...spec, test: y, scatterX: x, scatterY: y };
+  return { ...spec, test: x, scatterX: x, scatterY: y };
 }
 
 function scatterSpecTitle(spec: PlotSpec, tests: TestInfo[]): string {
@@ -135,7 +134,7 @@ function scatterSpecTitle(spec: PlotSpec, tests: TestInfo[]): string {
 
 const initialTheme: Theme =
   typeof localStorage !== "undefined" && localStorage.getItem("ews-theme") === "dark" ? "dark" : "light";
-const initialPresentation = typeof localStorage === "undefined" || localStorage.getItem("ews-presentation") !== "false";
+const initialPresentation = typeof localStorage !== "undefined" && localStorage.getItem("ews-presentation") === "true";
 
 export interface CsvPrompt {
   paths: string[];
@@ -144,6 +143,7 @@ export interface CsvPrompt {
 }
 
 interface AppState {
+  demoFontRevision: number;
   info: DatasetInfo | null;
   busy: boolean;
   busyPct: number;
@@ -164,7 +164,7 @@ interface AppState {
   dataVersion: number;
   csvPrompt: CsvPrompt | null;
 
-  setInfo: (info: DatasetInfo | null, opts?: { keepFilters?: boolean }) => void;
+  setInfo: (info: DatasetInfo | null, opts?: { keepFilters?: boolean; reset?: boolean }) => void;
   setBusy: (busy: boolean, pct?: number, msg?: string) => void;
   setProgress: (pct: number, msg: string) => void;
   setError: (e: string | null) => void;
@@ -195,6 +195,7 @@ interface AppState {
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const useStore = create<AppState>((set, get) => ({
+  demoFontRevision: 0,
   info: null,
   busy: false,
   busyPct: 0,
@@ -214,6 +215,16 @@ export const useStore = create<AppState>((set, get) => ({
   csvPrompt: null,
 
   setInfo: (info, opts) => {
+    if (info && opts?.reset) {
+      const test = info.tests.length ? 0 : null;
+      const specs = defaultSpecs();
+      const spec = { ...specs.box, test, title: autoTitle(test !== null ? info.tests[test] : null, "box") };
+      specs.box = spec;
+      try { localStorage.setItem("ews-theme", "light"); localStorage.setItem("ews-presentation", "false"); } catch {}
+      set({ info, filters: emptyFilter(), spec, specs, theme: "light", presentation: false,
+        report: [], reportOpen: false, templateName: "", showInspector: true, csvPrompt: null });
+      return;
+    }
     const prev = get();
     const patch: Partial<AppState> = { info };
     if (!opts?.keepFilters) patch.filters = emptyFilter();
@@ -285,7 +296,7 @@ export const useStore = create<AppState>((set, get) => ({
     let next = specs[type] ?? defaultSpec(type, s.spec.test, PLOT_LABELS[type]);
     next = { ...next, type, presentation: s.presentation };
     if (type === "scatter") {
-      next = normalizeScatter({ ...next, test: next.test ?? s.spec.test }, tests);
+      next = normalizeScatter({ ...next, test: s.spec.test }, tests);
       next.title = scatterSpecTitle(next, tests);
     } else {
       next.test = s.spec.test;
@@ -303,20 +314,7 @@ export const useStore = create<AppState>((set, get) => ({
     let title = p.title ?? s.spec.title;
     if (p.title === undefined) {
       if (next.type === "scatter") {
-        // Keep X and Y distinct when the user picks the same test twice.
-        if (next.scatterX !== null && next.scatterX === next.scatterY) {
-          if (p.scatterX !== undefined) {
-            next.scatterY =
-              s.spec.scatterY !== null && s.spec.scatterY !== p.scatterX
-                ? s.spec.scatterY
-                : (next.scatterX + 1) % Math.max(1, s.info?.tests.length ?? 1);
-          } else if (p.scatterY !== undefined) {
-            next.scatterX =
-              s.spec.scatterX !== null && s.spec.scatterX !== p.scatterY
-                ? s.spec.scatterX
-                : (next.scatterY + 1) % Math.max(1, s.info?.tests.length ?? 1);
-          }
-        }
+        next.scatterX = next.test;
         if (
           p.scatterX !== undefined ||
           p.scatterY !== undefined ||
@@ -339,15 +337,7 @@ export const useStore = create<AppState>((set, get) => ({
     const test = s.info?.tests[index] ?? null;
     if (s.spec.type === "scatter") {
       const tests = s.info?.tests ?? [];
-      let x = s.spec.scatterX;
-      const y = index;
-      if (x === null) x = tests.length > 1 ? (y + 1) % tests.length : y;
-      if (tests.length > 1 && x === y) {
-        x = s.spec.scatterY !== null && s.spec.scatterY !== y
-          ? s.spec.scatterY
-          : (y + 1) % tests.length;
-      }
-      const spec: PlotSpec = { ...s.spec, test: y, scatterX: x, scatterY: y };
+      const spec: PlotSpec = { ...s.spec, test: index, scatterX: index };
       spec.title = scatterSpecTitle(spec, tests);
       set({ spec, specs: { ...s.specs, scatter: spec } });
       return;

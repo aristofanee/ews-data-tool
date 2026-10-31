@@ -9,6 +9,7 @@ import type {
 } from "../types";
 import { axisTitle, fmt, fmtInt, testLabel, tidyName } from "../lib/format";
 import { normalPdf, quantileSorted } from "../lib/stats";
+import { graphFontOffset } from "../lib/demoFonts";
 import type { Theme } from "../lib/theme";
 import { binColor, binLabel } from "../lib/theme";
 import {
@@ -49,12 +50,12 @@ function previewFigure(data: any[], layout: any, preview: boolean, xTitle: strin
   const compact = (text: string, max = 36) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
   layout.margin = { l: 62, r: layout.yaxis2 ? 54 : 24, t: 22, b: 62 };
   layout.showlegend = false;
-  layout.font = { ...layout.font, size: 11 };
+  layout.font = { ...layout.font, size: 13 + graphFontOffset() };
   for (const [key, title] of [["xaxis", xTitle], ["yaxis", yTitle], ["yaxis2", "Yield [%]"]]) {
     if (!layout[key]) continue;
     layout[key] = { ...layout[key], showticklabels: true, automargin: true,
-      tickfont: { ...layout[key].tickfont, size: 10 }, nticks: 4,
-      title: { text: compact(title), font: { size: 11, color: key === "yaxis2" ? layout[key].tickfont?.color : layout.font.color, family: CHART_FONT }, standoff: 8 },
+      tickfont: { ...layout[key].tickfont, size: 12 + graphFontOffset() }, nticks: 4,
+      title: { text: compact(title), font: { size: 13 + graphFontOffset(), color: key === "yaxis2" ? layout[key].tickfont?.color : layout.font.color, family: CHART_FONT }, standoff: 8 },
     };
   }
   const axis = layout.xaxis;
@@ -67,6 +68,12 @@ function previewFigure(data: any[], layout: any, preview: boolean, xTitle: strin
 }
 
 const ALPHA_POINT = 0.55;
+
+// Apply the normal-mode font increase after scaling smaller chart labels.
+function scaledFont(size: number, factor: number, presentation: boolean): number {
+  const increase = presentation ? 0 : 2 + graphFontOffset();
+  return Math.round((size - increase) * factor) + increase;
+}
 
 function pseudo(i: number): number {
   const s = Math.sin(i * 12.9898 + 78.233) * 43758.5453;
@@ -463,7 +470,7 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
       limits.annotations.push({ xref: "x", x: start + (length - 1) / 2,
         yref: "paper", y: 1.02, xanchor: "center", yanchor: "bottom",
         text: heading, textangle: dense && heading.length > 3 ? (groupLabels.length > 20 ? -75 : -55) : 0,
-        showarrow: false, font: { size: dense ? Math.min(11, style.annotation) : style.annotation, color: t.text, family: CHART_FONT } });
+        showarrow: false, font: { size: dense ? Math.min(spec.presentation ? 11 : 13 + graphFontOffset(), style.annotation) : style.annotation, color: t.text, family: CHART_FONT } });
       if (start > 0) limits.shapes.push({ type: "line", xref: "x", x0: start - 0.5, x1: start - 0.5,
         yref: "paper", y0: 0, y1: 1, line: { color: t.axis, width: 1, dash: "dot" } });
       start += length;
@@ -475,7 +482,7 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
       ? { text: "" }
       : {
           text: categoryTitle(spec.xAxis),
-          font: { size: style.axisTitle * 0.82, color: t.muted, family: CHART_FONT },
+          font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
         },
     tickmode: "array",
     tickvals: ticks,
@@ -483,7 +490,7 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
     tickangle: angle,
     showticklabels: !preview,
     tickfont: {
-      size: Math.round(style.tick * (n > (spec.presentation ? 28 : 20) ? 0.78 : 1)),
+      size: style.tick,
       color: t.muted,
       family: CHART_FONT,
     },
@@ -496,7 +503,7 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
     title: preview
       ? { text: "" }
       : {
-          text: axisTitle(testLabel(data.test), units, style.axisTitle * 0.62),
+          text: axisTitle(testLabel(data.test), units, scaledFont(style.axisTitle, 0.62, spec.presentation)),
           font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
         },
     showticklabels: !preview,
@@ -584,7 +591,7 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
       mode: "lines+markers",
       name: "Yield",
       x: labels,
-      y: groups.map((g) => g.yieldPct),
+      y: groups.map((g) => g.unknownTotal ? null : g.yieldPct),
       yaxis: "y2",
       line: { color: t.green, width: style.line * 2.2 },
       marker: {
@@ -615,7 +622,7 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
       xanchor: "left",
       y: 1.02,
       yanchor: "bottom",
-      font: { size: Math.round(style.annotation * 0.8), color: t.text, family: CHART_FONT },
+      font: { size: scaledFont(style.annotation, 0.8, spec.presentation), color: t.text, family: CHART_FONT },
       bgcolor: "rgba(0,0,0,0)",
       borderwidth: 0,
       itemwidth: 30,
@@ -630,12 +637,12 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
           },
       tickangle: angle,
       showticklabels: !preview,
-      tickfont: { size: Math.round(style.tick * 0.82), color: t.muted, family: CHART_FONT },
+      tickfont: { size: style.tick, color: t.muted, family: CHART_FONT },
       showgrid: false,
       zeroline: false,
     };
     const failPeak = Math.max(0, ...groups.map((_, i) => data.series.reduce((n, series) => n + (series.pcts[i] ?? 0), 0)));
-    const yields = groups.map((g) => g.yieldPct);
+    const yields = groups.filter((g) => !g.unknownTotal).map((g) => g.yieldPct);
     const minYield = yields.length ? Math.min(...yields) : 0;
     const maxYield = yields.length ? Math.max(...yields) : 100;
     const yieldPad = Math.max(1, (maxYield - minYield) * 0.15);
@@ -672,12 +679,12 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
       linewidth: style.axisLine,
       showline: true,
       showticklabels: !preview,
-      tickfont: { size: Math.round(style.tick * 0.82), color: t.green, family: CHART_FONT },
+      tickfont: { size: style.tick, color: t.green, family: CHART_FONT },
       title: preview
         ? { text: "" }
         : {
             text: "Yield [%]",
-            font: { size: Math.round(style.axisTitle * 0.82), color: t.green, family: CHART_FONT },
+            font: { size: style.axisTitle, color: t.green, family: CHART_FONT },
             standoff: 18,
           },
     };
@@ -704,7 +711,7 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
         : undefined,
     textposition: "outside",
     cliponaxis: false,
-    textfont: { size: Math.round(style.tick * 0.72), color: t.muted, family: CHART_FONT },
+    textfont: { size: scaledFont(style.tick, 0.72, spec.presentation), color: t.muted, family: CHART_FONT },
     customdata: bars.map((b) => [b.count, b.code, b.pass ? "pass" : "fail"]),
     hovertemplate:
       "<b>%{x}</b><br>%{y:.2f}% of tested dice · %{customdata[0]} dice<br>" +
@@ -726,7 +733,7 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
     ...layout.xaxis,
     tickangle: angle,
     showticklabels: !preview,
-    tickfont: { size: Math.round(style.tick * 0.82), color: t.muted, family: CHART_FONT },
+    tickfont: { size: style.tick, color: t.muted, family: CHART_FONT },
     showgrid: false,
     zeroline: false,
   };
@@ -871,7 +878,7 @@ export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
       xanchor: "left",
       y: 1.02,
       yanchor: "bottom",
-      font: { size: Math.round(style.annotation * 0.8), color: t.text, family: CHART_FONT },
+      font: { size: scaledFont(style.annotation, 0.8, spec.presentation), color: t.text, family: CHART_FONT },
       bgcolor: "rgba(0,0,0,0)",
       borderwidth: 0,
       itemwidth: 30,
@@ -882,7 +889,7 @@ export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
     title: preview
       ? { text: "" }
       : {
-          text: axisTitle(testLabel(data.test), data.test.units, style.axisTitle * 0.62),
+          text: axisTitle(testLabel(data.test), data.test.units, scaledFont(style.axisTitle, 0.62, spec.presentation)),
           font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
         },
     showticklabels: !preview,
@@ -995,7 +1002,7 @@ export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
     ticktext: ticks.map((i) => short[i]),
     tickangle: angle,
     tickfont: {
-      size: Math.round(style.tick * (n > (spec.presentation ? 28 : 20) ? 0.78 : 1)),
+      size: style.tick,
       color: t.muted,
       family: CHART_FONT,
     },
@@ -1006,7 +1013,7 @@ export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
   layout.yaxis = {
     ...layout.yaxis,
     title: {
-      text: axisTitle(testLabel(data.test), data.test.units, style.axisTitle * 0.62),
+      text: axisTitle(testLabel(data.test), data.test.units, scaledFont(style.axisTitle, 0.62, spec.presentation)),
       font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
     },
     type: spec.logY ? "log" : "linear",
@@ -1115,13 +1122,13 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
             text: data.zColLabel || "Z",
             side: "top",
             font: {
-              size: Math.round(style.axisTitle * 0.72),
+              size: scaledFont(style.axisTitle, 0.72, spec.presentation),
               color: t.muted,
               family: CHART_FONT,
             },
           },
           tickfont: {
-            size: Math.round(style.tick * 0.72),
+            size: scaledFont(style.tick, 0.72, spec.presentation),
             color: t.muted,
             family: CHART_FONT,
           },
@@ -1132,13 +1139,13 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
             text: data.zColLabel || "Z",
             side: "right",
             font: {
-              size: Math.round(style.axisTitle * 0.78),
+              size: scaledFont(style.axisTitle, 0.78, spec.presentation),
               color: t.muted,
               family: CHART_FONT,
             },
           },
           tickfont: {
-            size: Math.round(style.tick * 0.78),
+            size: scaledFont(style.tick, 0.78, spec.presentation),
             color: t.muted,
             family: CHART_FONT,
           },
@@ -1350,7 +1357,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
     title: preview
       ? { text: "" }
       : {
-          text: axisTitle(testLabel(data.xTest), data.xTest.units, style.axisTitle * 0.62),
+          text: axisTitle(testLabel(data.xTest), data.xTest.units, scaledFont(style.axisTitle, 0.62, spec.presentation)),
           font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
         },
     showticklabels: !preview,
@@ -1362,7 +1369,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
     title: preview
       ? { text: "" }
       : {
-          text: axisTitle(testLabel(data.yTest), data.yTest.units, style.axisTitle * 0.62),
+          text: axisTitle(testLabel(data.yTest), data.yTest.units, scaledFont(style.axisTitle, 0.62, spec.presentation)),
           font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
         },
     showticklabels: !preview,
@@ -1405,7 +1412,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
       y: 1,
       yanchor: "top",
       font: {
-        size: Math.round(style.annotation * 0.78),
+        size: scaledFont(style.annotation, 0.78, spec.presentation),
         color: t.text,
         family: CHART_FONT,
       },
@@ -1413,7 +1420,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
         text: data.groupLabel || data.zColLabel,
         side: "top",
         font: {
-          size: Math.round(style.annotation * 0.9),
+          size: scaledFont(style.annotation, 0.9, spec.presentation),
           color: t.muted,
           family: CHART_FONT,
         },

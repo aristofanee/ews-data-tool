@@ -1,3 +1,4 @@
+import { binYieldText } from "../lib/theme";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MapResponse, PlotSpec } from "../types";
 import {
@@ -64,6 +65,7 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
     [spec, data]
   );
 
+  const fontRevision = useStore((s) => s.demoFontRevision);
   const opts = useMemo<MapOptions>(
     () => ({
       theme,
@@ -77,6 +79,7 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
       vmin: limits.vmin,
       vmax: limits.vmax,
       presentation: preview ? false : spec.presentation,
+      fontRevision,
       showLegend: preview ? false : undefined,
     }),
     [
@@ -87,6 +90,7 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
       spec.lsl,
       spec.usl,
       spec.presentation,
+      fontRevision,
       spec.binCategory,
       preview,
       data,
@@ -139,6 +143,14 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
       setHover(null);
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
+    // Capture Chromium's trackpad pinch even when the pointer is over a map
+    // overlay instead of the canvas itself.
+    const onPinch = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.stopPropagation();
+      onWheel(e);
+    };
+    wrap.addEventListener("wheel", onPinch, { passive: false, capture: true });
 
     readyRef.current?.({
       toDataURL: (format = "jpeg", themeOverride, width = 1600, height = 1000) => {
@@ -149,7 +161,7 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
           ? `All wafers (mean) · ${d.waferCount} wafer${d.waferCount === 1 ? "" : "s"}`
           : `${d.lotName} · Wafer ${d.wafer?.name ?? "?"}`;
         const subtitle =
-          scope + (test ? ` · ${test}` : "") + ` · Yield ${d.yieldPct.toFixed(2)}%`;
+          scope + (test ? ` · ${test}` : "") + ` · Yield ${binYieldText(d.yieldPct, d.dice, 2, d.unknownBins)}`;
         const opts = themeOverride
           ? { ...optsRef.current, theme: themeOverride }
           : optsRef.current;
@@ -160,6 +172,7 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
     return () => {
       ro.disconnect();
       canvas.removeEventListener("wheel", onWheel);
+      wrap.removeEventListener("wheel", onPinch, true);
       rendererRef.current = null;
       readyRef.current?.(null);
     };
@@ -267,7 +280,7 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
               {spec.binCategory === "soft" ? "SBIN" : "HBIN"}{" "}
               {spec.binCategory === "soft" ? hover.die.sbin : hover.die.hbin}
               <span>
-                {binNames[spec.binCategory === "soft" ? hover.die.sbin : hover.die.hbin] ?? ""}
+                {spec.binCategory === "soft" ? binNames[hover.die.sbin] ?? "" : ""}
               </span>
             </div>
           )}

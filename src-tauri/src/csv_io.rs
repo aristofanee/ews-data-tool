@@ -1,5 +1,5 @@
 use crate::dataset::Imported;
-use crate::model::{CustomColumn, TestInfo, NAN};
+use crate::model::{CustomColumn, TestInfo, WaferGeom, NAN, UNKNOWN_BIN};
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -116,14 +116,43 @@ fn parse_i16(s: &str) -> i16 {
 }
 
 fn parse_u16(s: &str) -> u16 {
-    let t = s.trim();
-    if let Ok(v) = t.parse::<u16>() {
-        return v;
+    s.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0 && *v < UNKNOWN_BIN as f64 && v.fract() == 0.0)
+        .map(|v| v as u16).unwrap_or(UNKNOWN_BIN)
+}
+
+#[derive(Default)]
+struct Preamble { geom: WaferGeom, soft_bins: HashMap<u16, (String, bool)> }
+impl Preamble {
+    fn read(&mut self, rec: &csv::StringRecord) -> Result<(), String> {
+        let key = norm(rec.get(0).unwrap_or(""));
+        let value = rec.get(1).unwrap_or("").trim();
+        let positive = || { let v = parse_f32(value); if v.is_finite() && v > 0.0 { Ok(v) } else { Err(format!("Invalid CSV {key}: {value}")) } };
+        match key.as_str() {
+            "waferdiameter" => self.geom.diameter_mm = Some(positive()?),
+            "waferheight" => self.geom.die_h_mm = Some(positive()?),
+            "waferwidth" => self.geom.die_w_mm = Some(positive()?),
+            "wafercenterx" | "wafercentery" => {
+                let n = value.parse::<f64>().map_err(|_| format!("Invalid CSV {key}: {value}"))?;
+                if !n.is_finite() || n.fract() != 0.0 || n < i16::MIN as f64 || n > i16::MAX as f64 { return Err(format!("Invalid CSV {key}: {value}")); }
+                if key == "wafercenterx" { self.geom.center_x = Some(n as i16); } else { self.geom.center_y = Some(n as i16); }
+            }
+            "waferflat" => {
+                let upper = value.to_ascii_uppercase();
+                self.geom.flat = match upper.as_str() { "U" => Some('U'), "D" => Some('D'), "L" => Some('L'), "R" => Some('R'), _ => return Err(format!("Invalid CSV wafer flat: {value}")) };
+            }
+            "softbinname" => {
+                let code = parse_u16(value);
+                if code == UNKNOWN_BIN { return Err(format!("Invalid CSV soft bin: {value}")); }
+                self.soft_bins.insert(code, (rec.get(2).unwrap_or("").trim().to_string(), code == 1));
+            }
+            _ => {}
+        }
+        Ok(())
     }
-    if let Ok(v) = t.parse::<f64>() {
-        return v.max(0.0) as u16;
+    fn apply(self, imp: &mut Imported) {
+        imp.wafer_geom.fill(self.geom);
+        imp.sbin_names.extend(self.soft_bins);
     }
-    1
 }
 
 fn parse_u32(s: &str) -> Option<u32> {
@@ -484,14 +513,13 @@ fn collect_metadata(
     out
 }
 
-fn read_text(path: &Path) -> Result<String, String> {
+fn mapped_text(path: &Path) -> Result<Mmap, String> {
     let file = File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
     let mmap = unsafe { Mmap::map(&file) }.map_err(|e| format!("Cannot map file: {e}"))?;
-    let text = decode(&mmap).into_owned();
-    if text.trim().is_empty() {
+    if mmap.is_empty() {
         return Err("File is empty".into());
     }
-    Ok(text)
+    Ok(mmap)
 }
 
 fn reader_for<'a>(text: &'a str, delim: u8) -> csv::Reader<&'a [u8]> {
@@ -543,7 +571,7 @@ fn find_header(
     let mut best: Option<(usize, usize, Vec<String>, usize)> = None; // idx, line, headers, score
     let mut fallback: Option<(usize, usize, Vec<String>, usize)> = None;
     for i in 0..200 {
-        if !rdr.read_record(&mut rec).unwrap_or(false) {
+        if !rdr.read_record(&mut rec).map_err(|e| format!("Invalid CSV record: {e}"))? {
             break;
         }
         if rec.iter().all(|s| s.trim().is_empty()) {
@@ -584,13 +612,13 @@ fn find_header(
 fn read_metadata_and_probe(
     rdr: &mut csv::Reader<&[u8]>,
     headers: &[String],
-) -> (Vec<csv::StringRecord>, Vec<csv::StringRecord>) {
+) -> Result<(Vec<csv::StringRecord>, Vec<csv::StringRecord>), String> {
     let mut metadata = Vec::new();
     let mut probe = Vec::new();
     let mut rec = csv::StringRecord::new();
     let mut data_started = false;
     while probe.len() < 200 {
-        if !rdr.read_record(&mut rec).unwrap_or(false) {
+        if !rdr.read_record(&mut rec).map_err(|e| format!("Invalid CSV record: {e}"))? {
             break;
         }
         if rec.iter().all(|s| s.trim().is_empty()) {
@@ -608,11 +636,12 @@ fn read_metadata_and_probe(
     // Keep the compiler/lint aware that headers participates in the caller's
     // contract; metadata rows are interpreted after numeric columns are known.
     let _ = headers;
-    (metadata, probe)
+    Ok((metadata, probe))
 }
 
 pub fn inspect_csv(path: &Path) -> Result<CsvInspection, String> {
-    let text = read_text(path)?;
+    let mapped = mapped_text(path)?;
+    let text = decode(&mapped);
     let delim = detect_delimiter(&text);
     let (headers, header_line, _header_idx) = find_header(&text, delim)?;
     let lay = layout_from_headers(&headers);
@@ -637,7 +666,8 @@ pub fn import_csv_with_mapping(
     progress: &mut dyn FnMut(f32, &str),
     mapping: Option<&CsvMapping>,
 ) -> Result<Imported, String> {
-    let text = read_text(path)?;
+    let mapped = mapped_text(path)?;
+    let text = decode(&mapped);
     let delim = detect_delimiter(&text);
     let (headers, _header_line, header_idx) = find_header(&text, delim)?;
     if headers.is_empty() {
@@ -646,12 +676,14 @@ pub fn import_csv_with_mapping(
     let lay = apply_mapping(layout_from_headers(&headers), mapping, headers.len())?;
     let mut rdr = reader_for(&text, delim);
     let mut header_rec = csv::StringRecord::new();
-    for _ in 0..=header_idx {
-        if !rdr.read_record(&mut header_rec).unwrap_or(false) {
+    let mut preamble = Preamble::default();
+    for index in 0..=header_idx {
+        if !rdr.read_record(&mut header_rec).map_err(|e| format!("Invalid CSV header: {e}"))? {
             return Err("CSV ended before the header row".into());
         }
+        if index < header_idx { preamble.read(&header_rec)?; }
     }
-    let (metadata_rows, probe) = read_metadata_and_probe(&mut rdr, &headers);
+    let (metadata_rows, probe) = read_metadata_and_probe(&mut rdr, &headers)?;
     let col_meta = collect_metadata(&metadata_rows, &headers);
 
     let long_format = lay.test.is_some() && lay.value.is_some();
@@ -706,8 +738,8 @@ pub fn import_csv_with_mapping(
                 let r = imp.new_row(lot, wafer);
                 imp.x[r] = x;
                 imp.y[r] = y;
-                imp.hbin[r] = lay.hbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(1);
-                imp.sbin[r] = lay.sbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(1);
+                imp.hbin[r] = lay.hbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(UNKNOWN_BIN);
+                imp.sbin[r] = lay.sbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(UNKNOWN_BIN);
                 r
             });
             let tname = rec.get(ti).unwrap_or("").trim();
@@ -728,8 +760,8 @@ pub fn import_csv_with_mapping(
                 row = imp.new_row(lot, wafer);
                 imp.x[row] = x;
                 imp.y[row] = y;
-                imp.hbin[row] = lay.hbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(1);
-                imp.sbin[row] = lay.sbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(1);
+                imp.hbin[row] = lay.hbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(UNKNOWN_BIN);
+                imp.sbin[row] = lay.sbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(UNKNOWN_BIN);
                 row_keys.insert(key, row);
             }
             measured.insert((row, id));
@@ -748,7 +780,7 @@ pub fn import_csv_with_mapping(
             push(rec, &mut imp);
         }
         let mut rec = csv::StringRecord::new();
-        while rdr.read_record(&mut rec).unwrap_or(false) {
+        while rdr.read_record(&mut rec).map_err(|e| format!("Invalid CSV record: {e}"))? {
             push(&rec, &mut imp);
         }
         // Give tests a stable order matching their ids.
@@ -767,6 +799,7 @@ pub fn import_csv_with_mapping(
         imp.cols = cols;
         imp.col_index.clear();
         push_meta_columns(&mut imp, meta);
+        preamble.apply(&mut imp);
         return Ok(imp.finish());
     }
 
@@ -859,11 +892,11 @@ pub fn import_csv_with_mapping(
         imp.hbin[r] = lay.hbin
             .and_then(|i| rec.get(i))
             .map(parse_u16)
-            .unwrap_or(1);
+            .unwrap_or(UNKNOWN_BIN);
         imp.sbin[r] = lay.sbin
             .and_then(|i| rec.get(i))
             .map(parse_u16)
-            .unwrap_or(1);
+            .unwrap_or(UNKNOWN_BIN);
         for (k, &ci) in numeric.iter().enumerate() {
             let v = parse_f32(rec.get(ci).unwrap_or(""));
             imp.cols[k].push(v);
@@ -875,7 +908,7 @@ pub fn import_csv_with_mapping(
         push_row(&mut imp, r, &mut meta);
     }
     let mut rec = csv::StringRecord::new();
-    while rdr.read_record(&mut rec).unwrap_or(false) {
+    while rdr.read_record(&mut rec).map_err(|e| format!("Invalid CSV record: {e}"))? {
         push_row(&mut imp, &rec, &mut meta);
         if imp.records % 200_000 == 0 {
             progress(0.0, "Reading CSV...");
@@ -883,12 +916,41 @@ pub fn import_csv_with_mapping(
     }
 
     push_meta_columns(&mut imp, meta);
+    preamble.apply(&mut imp);
     Ok(imp.finish())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn product_preamble_aliases_and_unknown_bins() {
+        let p = write_temp("product-metadata", "Wafer-Diameter,300\nWafer_Height,2.04\nWafer_Width,2.8\nWafer_Flat,U\nWafer_Center_X,12\nWafer_Center_Y,-2\nSoftBinName,7,Leakage\nLOT_ID,WAFER_ID,DIE_X,DIE_Y,SITE,SBIN,Current\nUnit,,,,,,uA\nLowL,,,,,,1.5\nHighL,,,,,,9.5\nL,W,1,2,3,7,4.2\nL,W,2,2,4,,5.6\n");
+        let imp = import_csv(&p, &mut |_, _| {}).unwrap();
+        assert_eq!(imp.wafer_geom[0].diameter_mm, Some(300.0));
+        assert_eq!(imp.wafer_geom[0].die_h_mm, Some(2.04));
+        assert_eq!(imp.wafer_geom[0].die_w_mm, Some(2.8));
+        assert_eq!(imp.wafer_geom[0].flat, Some('U'));
+        assert_eq!(imp.wafer_geom[0].center_x, Some(12)); assert_eq!(imp.wafer_geom[0].center_y, Some(-2));
+        assert_eq!(imp.hbin, vec![UNKNOWN_BIN, UNKNOWN_BIN]); assert_eq!(imp.sbin, vec![7, UNKNOWN_BIN]);
+        assert_eq!(imp.site, vec![Some(3), Some(4)]); assert_eq!(imp.sbin_names[&7].0, "Leakage");
+        assert_eq!(imp.tests[0].units, "uA"); assert_eq!(imp.tests[0].lo_spec, Some(1.5)); assert_eq!(imp.tests[0].hi_spec, Some(9.5));
+        assert_eq!(imp.cols[0], vec![4.2, 5.6]);
+        let mut ds = crate::model::Dataset::new(); ds.merge(imp);
+        let result = crate::query::pareto(&ds, &crate::query::ParetoRequest { category: crate::query::BinCategory::Soft, filter: Default::default(), top: None, group_by: None });
+        assert_eq!(result.unknown_total, 1); assert_eq!(result.fail_total, 1); assert_eq!(result.bars.len(), 1); assert_eq!(result.bars[0].pct, 50.0);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn invalid_preamble_rejected_and_empty_bins_remain_unknown() {
+        let p = write_temp("bad-geometry", "Wafer-Diameter,garbage\nLot,Wafer,X,Y,V\nL,W,1,2,3\n");
+        assert!(import_csv(&p, &mut |_, _| {}).err().unwrap().contains("Invalid CSV waferdiameter"));
+        assert_eq!(parse_u16(""), UNKNOWN_BIN); assert_eq!(parse_u16("bad"), UNKNOWN_BIN);
+        assert_eq!(parse_u16("-1"), UNKNOWN_BIN); assert_eq!(parse_u16("2.5"), UNKNOWN_BIN); assert_eq!(parse_u16("2.0"), 2);
+        let _ = std::fs::remove_file(p);
+    }
 
     #[test]
     fn long_csv_partial_retest_keeps_latest_bins_without_old_measurements() {

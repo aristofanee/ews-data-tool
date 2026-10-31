@@ -3,6 +3,7 @@ import type { MapResponse, PlotSpec } from "../types";
 import { fmtInt, testLabelWithUnits } from "../lib/format";
 import { WaferMapView, type MapExportApi } from "./WaferMapView";
 import { IconArrowLeft, IconChevronLeft, IconChevronRight } from "./Icons";
+import { binYieldText } from "../lib/theme";
 
 interface Props {
   maps: MapResponse[];
@@ -89,7 +90,7 @@ export function MapDetailView({ maps, labels, index, spec, mode, onBack, onIndex
         <div className="map-detail-stats">
           <div className="map-detail-stat">
             <span>Wafer yield (HBIN 1)</span>
-            <b className="yield-value">{md.yieldPct.toFixed(2)}%</b>
+            <b className="yield-value">{binYieldText(md.yieldPct, md.dice, 2, md.unknownBins)}</b>
           </div>
           {mode === "value" && md.testYieldPct != null && (
             <div className="map-detail-stat">

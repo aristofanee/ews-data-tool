@@ -21,6 +21,7 @@ pub fn run() {
             commands::pick_folder,
             commands::open_paths,
             commands::inspect_csv,
+            commands::import_product_metadata,
             commands::dataset_info,
             commands::add_custom_column,
             commands::remove_custom_column,

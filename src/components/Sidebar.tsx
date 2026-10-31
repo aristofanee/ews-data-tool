@@ -156,7 +156,7 @@ function FilterPanel() {
               title={`${b.name || `Bin ${b.code}`} · ${fmtInt(b.count)} dice`}
             >
               <span className="bin-dot" style={{ background: binColor(b.code, b.pass) }} />
-              {b.code}
+              {b.code === 65535 ? "Unknown" : b.code}
               <span className="bin-name">{b.name}</span>
             </button>
           ))}

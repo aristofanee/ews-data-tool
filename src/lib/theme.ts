@@ -1,5 +1,12 @@
 export type Theme = "light" | "dark";
 
+export function binYieldText(value: number, dice: { hbin: number }[], decimals = 2, unknown = 0): string {
+  return unknown > 0 || dice.some((d) => d.hbin === 65535) ? "N/A (unknown bins)" : `${value.toFixed(decimals)}%`;
+}
+export function overviewYieldText(value: number, wafers: { dice: { hbin: number }[] }[]): string {
+  return wafers.some((w) => w.dice.some((d) => d.hbin === 65535)) ? "N/A (unknown bins)" : `${value.toFixed(2)}%`;
+}
+
 export const colors = {
   blue: "#2563eb",
   blueSoft: "#3b82f6",
@@ -149,13 +156,16 @@ export function paletteColor(id: string, t: number): string {
 const FAILURE_COLORS = ["#2563eb", "#f5b301", "#ef4444", "#8b5cf6", "#f97316", "#06b6d4", "#ec4899", "#64748b", "#0ea5e9", "#a855f7", "#d97706", "#e11d48", "#4f46e5", "#db2777", "#c026d3", "#ea580c", "#475569"];
 
 export function binColor(code: number, _pass = code === 1): string {
+  if (code === 65535) return "#94a3b8";
   if (code === 1) return "#16c55e";
   return FAILURE_COLORS[Math.abs(code) % FAILURE_COLORS.length];
 }
 
 export function binLabel(category: "hard" | "soft", code: number, description?: string): string {
   if (code === 0xffff && description === "Others") return "Others";
+  if (code === 0xffff) return `${category === "soft" ? "SBIN" : "HBIN"} unknown`;
   const label = `${category === "soft" ? "SBIN" : "HBIN"} ${code}`;
+  if (category === "hard") return label;
   const text = description?.trim();
   if (!text || /^(?:[HS]?BIN)\s*\d+$/i.test(text)) return label;
   return `${label} · ${text}`;

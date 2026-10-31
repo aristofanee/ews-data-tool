@@ -13,6 +13,8 @@ fn limits_differ(a: Option<f32>, b: Option<f32>) -> bool {
 
 /// Data parsed from one file, keyed by local indices. Merged into `Dataset` afterwards.
 pub struct Imported {
+    lot_lookup: HashMap<String, u16>,
+    wafer_lookup: HashMap<u16, HashMap<String, u16>>,
     pub lots: Vec<String>,
     pub wafers: Vec<(u16, String)>,
     pub row_lot: Vec<u16>,
@@ -37,6 +39,8 @@ pub struct Imported {
 impl Imported {
     pub fn new() -> Self {
         Self {
+            lot_lookup: HashMap::new(),
+            wafer_lookup: HashMap::new(),
             lots: Vec::new(),
             wafers: Vec::new(),
             row_lot: Vec::new(),
@@ -58,22 +62,20 @@ impl Imported {
     }
 
     pub fn lot_index(&mut self, name: &str) -> u16 {
-        if let Some(i) = self.lots.iter().position(|l| l == name) {
-            return i as u16;
+        if let Some(&i) = self.lot_lookup.get(name) {
+            return i;
         }
         self.lots.push(name.to_string());
+        self.lot_lookup.insert(name.to_string(), (self.lots.len() - 1) as u16);
         (self.lots.len() - 1) as u16
     }
 
     pub fn wafer_index(&mut self, lot: u16, name: &str) -> u16 {
-        if let Some(i) = self
-            .wafers
-            .iter()
-            .position(|(l, n)| *l == lot && n == name)
-        {
-            return i as u16;
+        if let Some(&i) = self.wafer_lookup.get(&lot).and_then(|m| m.get(name)) {
+            return i;
         }
         self.wafers.push((lot, name.to_string()));
+        self.wafer_lookup.entry(lot).or_default().insert(name.to_string(), (self.wafers.len() - 1) as u16);
         self.wafer_geom.push(WaferGeom::default());
         (self.wafers.len() - 1) as u16
     }
@@ -141,6 +143,31 @@ impl Imported {
 }
 
 impl Dataset {
+    /// Fill missing fields only. Validate reference consistency before mutation.
+    pub fn fill_product_metadata(&mut self, source: Imported) -> Result<(), String> {
+        let mut geom = WaferGeom::default();
+        macro_rules! collect {
+            ($field:ident) => { for g in &source.wafer_geom { if let Some(v) = g.$field {
+                if geom.$field.is_some_and(|old| old != v) { return Err(format!("Reference STDF has conflicting {} values", stringify!($field))); }
+                geom.$field = Some(v);
+            } } };
+        }
+        collect!(diameter_mm); collect!(die_w_mm); collect!(die_h_mm); collect!(center_x); collect!(center_y); collect!(flat);
+        if source.wafer_geom.iter().all(|g| g.diameter_mm.is_none() && g.die_w_mm.is_none() && g.die_h_mm.is_none() && g.flat.is_none() && g.center_x.is_none() && g.center_y.is_none()) && source.sbin_names.is_empty() && source.hbin_names.is_empty() {
+            return Err("No wafer geometry or bin descriptions found in reference STDF".into());
+        }
+        for w in &mut self.wafers {
+            if w.diameter_mm.is_none() { w.diameter_mm = geom.diameter_mm; }
+            if w.die_w_mm.is_none() { w.die_w_mm = geom.die_w_mm; }
+            if w.die_h_mm.is_none() { w.die_h_mm = geom.die_h_mm; }
+            if w.center_x.is_none() { w.center_x = geom.center_x; }
+            if w.center_y.is_none() { w.center_y = geom.center_y; }
+            if w.flat.is_none() { w.flat = geom.flat.map(|v| v.to_string()); }
+        }
+        for (code, (name, _)) in source.sbin_names { if self.sbin_names.get(&code).is_none_or(|v| v.is_empty()) { self.sbin_names.insert(code, name); } }
+        for (code, (name, _)) in source.hbin_names { if self.hbin_names.get(&code).is_none_or(|v| v.is_empty()) { self.hbin_names.insert(code, name); } }
+        Ok(())
+    }
     /// Resolve retests once after all selected files have been merged. The
     /// complete last attempt wins, including missing/invalid measurements.
     pub fn resolve_retests(&mut self) {
@@ -431,7 +458,7 @@ impl Dataset {
             for code in names.keys() { counts.entry(*code).or_insert(0); }
             let mut out: Vec<_> = counts.into_iter().map(|(code, count)| BinInfo {
                 code, count,
-                name: names.get(&code).cloned().unwrap_or_else(|| format!("Bin {code}")),
+                name: if code == UNKNOWN_BIN { "Unknown".into() } else { names.get(&code).cloned().unwrap_or_else(|| format!("Bin {code}")) },
                 pass: pass[code as usize] || (code == 1 && !names.contains_key(&code)),
             }).collect();
             out.sort_by_key(|b| b.code);

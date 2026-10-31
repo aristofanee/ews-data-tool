@@ -45,7 +45,7 @@ export function useOpenFiles() {
           (pct, msg) => setProgress(pct, msg),
           mapping ?? null
         );
-        setInfo(info);
+        setInfo(info, { reset: true });
         setCsvPrompt(null);
         notify(`Loaded ${fmtInt(info.rows)} dice · ${info.tests.length} tests · ${info.lots.length} lot${info.lots.length > 1 ? "s" : ""}${info.retestCount ? ` · Retests: ${fmtInt(info.retestCount)} earlier attempts replaced; latest kept` : ""}`);
       } catch (e) {

@@ -1,3 +1,4 @@
+import { binYieldText, overviewYieldText } from "../lib/theme";
 import { useEffect, useMemo, useRef } from "react";
 import type { BinOverviewResponse, BinOverviewWafer, MapResponse, PlotSpec } from "../types";
 import {
@@ -50,11 +51,12 @@ function asMap(w: BinOverviewWafer): MapResponse {
 }
 
 export function BinMapView({ data, spec, onReady }: Props) {
+  const fontRevision = useStore((s) => s.demoFontRevision);
   const theme = useStore((s) => s.theme);
   const info = useStore((s) => s.info);
   const dataVersion = useStore((s) => s.dataVersion);
   const filters = useStore((s) => s.filters);
-  const [selected, setSelected] = useMapSelection("bin", [dataVersion, filters, spec.test, spec.binCategory]);
+  const [selected, setSelected] = useMapSelection("bin", [dataVersion, filters, spec.test]);
 
   const maps = useMemo(() => data.wafers.map(asMap), [data.wafers]);
 
@@ -89,9 +91,10 @@ export function BinMapView({ data, spec, onReady }: Props) {
       binCategory: spec.binCategory,
       binPass,
       presentation: false,
+      fontRevision,
       showLegend: false,
     }),
-    [theme, spec.palette, binNames, binPass, spec.binCategory]
+    [theme, spec.palette, binNames, binPass, spec.binCategory, fontRevision]
   );
 
 
@@ -117,7 +120,7 @@ export function BinMapView({ data, spec, onReady }: Props) {
         const idx = selectedRef.current;
         if (idx !== null && mapsRef.current[idx]) {
           const md = mapsRef.current[idx];
-          const subtitle = `${md.lotName} · Wafer ${md.wafer?.name ?? "?"} · Yield ${md.yieldPct.toFixed(2)}%`;
+          const subtitle = `${md.lotName} · Wafer ${md.wafer?.name ?? "?"} · Yield ${binYieldText(md.yieldPct, md.dice, 2, md.unknownBins)}`;
           return renderMapImage(
             md,
             { ...o, mode: "bin" },
@@ -132,7 +135,7 @@ export function BinMapView({ data, spec, onReady }: Props) {
         const totalFail = d.wafers.reduce((n, w) => n + w.fail, 0);
         const tested = totalPass + totalFail;
         const yieldPct = tested ? (totalPass * 100) / tested : 0;
-        const subtitle = `${d.wafers.length} wafers · Yield ${yieldPct.toFixed(2)}%`;
+        const subtitle = `${d.wafers.length} wafers · Yield ${overviewYieldText(yieldPct, d.wafers)}`;
         return renderBinOverviewImage(d.wafers, o, width, height, sp.title, subtitle, format);
       },
     });

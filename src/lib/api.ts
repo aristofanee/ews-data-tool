@@ -85,6 +85,13 @@ export async function inspectCsv(path: string): Promise<CsvInspection> {
   return invoke<CsvInspection>("inspect_csv", { path });
 }
 
+export async function importProductMetadata(path: string): Promise<DatasetInfo> {
+  if (!isTauri) throw new Error("STDF metadata import requires the desktop application.");
+  const info = await invoke<DatasetInfo>("import_product_metadata", { path });
+  invalidateMaps();
+  return info;
+}
+
 export async function datasetInfo(): Promise<DatasetInfo | null> {
   if (!isTauri) return null;
   return invoke<DatasetInfo | null>("dataset_info");

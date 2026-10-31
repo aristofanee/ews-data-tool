@@ -1,3 +1,4 @@
+import { binYieldText, overviewYieldText } from "./theme";
 import Plotly from "plotly.js-dist-min";
 import type { DatasetInfo, MapResponse, ReportItem } from "../types";
 import type { Theme } from "./theme";
@@ -187,7 +188,7 @@ export async function generateReport(opts: {
     const subtitle =
       scope +
       (md.test ? ` · ${testLabelWithUnits(md.test)}` : "") +
-      ` · Yield ${md.yieldPct.toFixed(2)}%`;
+      ` · Yield ${binYieldText(md.yieldPct, md.dice, 2, md.unknownBins)}`;
     return renderMapImage(md, mapOpts, 2400, 1500, title, subtitle, "jpeg");
   };
 
@@ -214,7 +215,7 @@ export async function generateReport(opts: {
       const pass = d.wafers.reduce((n, w) => n + w.pass, 0);
       const fail = d.wafers.reduce((n, w) => n + w.fail, 0);
       const tested = pass + fail;
-      const subtitle = `${d.wafers.length} wafers · ${spec.binCategory === "soft" ? "SBIN" : "HBIN"} · Yield ${tested ? ((pass * 100) / tested).toFixed(2) : "0.00"}%`;
+      const subtitle = `${d.wafers.length} wafers · ${spec.binCategory === "soft" ? "SBIN" : "HBIN"} · Yield ${overviewYieldText(tested ? pass * 100 / tested : 0, d.wafers)}`;
       await addImage(
         spec.title,
         subtitle,
@@ -288,7 +289,7 @@ export async function generateReport(opts: {
         const title = groups.length > 1 ? `${spec.title} · ${group.label}` : spec.title;
         await addImage(
           title,
-          `${group.label} · Yield ${md.yieldPct.toFixed(2)}%`,
+          `${group.label} · Yield ${binYieldText(md.yieldPct, md.dice, 2, md.unknownBins)}`,
           mapImage(md, title, spec),
           groups.length > 1 ? spec.title : undefined
         );
@@ -350,7 +351,7 @@ export async function generateReport(opts: {
                 : `${d.groups.length} ${d.groupLabel} groups`;
             await addImage(
               title,
-              `${group.label} · ${detail} · yield ${d.yieldPct.toFixed(2)}%`,
+              `${group.label} · ${detail} · yield ${d.unknownTotal ? "N/A (unknown bins)" : d.yieldPct.toFixed(2) + "%"}`,
               await renderFigure(fig, 2400, 1500),
               spec.title
             );
@@ -366,8 +367,8 @@ export async function generateReport(opts: {
         fig = figurePareto(d, { theme, spec, title: spec.title });
         subtitle =
           d.mode === "global"
-            ? `${d.failTotal.toLocaleString("en-US")} failures · ${spec.binCategory === "soft" ? "SBIN" : "HBIN"} · yield ${d.yieldPct.toFixed(2)}%`
-            : `${d.groups.length} ${d.groupLabel} groups · yield ${d.yieldPct.toFixed(2)}%`;
+            ? `${d.failTotal.toLocaleString("en-US")} failures · ${spec.binCategory === "soft" ? "SBIN" : "HBIN"} · yield ${d.unknownTotal ? "N/A (unknown bins)" : d.yieldPct.toFixed(2) + "%"}`
+            : `${d.groups.length} ${d.groupLabel} groups · yield ${d.unknownTotal ? "N/A (unknown bins)" : d.yieldPct.toFixed(2) + "%"}`;
         break;
       }
       case "hist": {

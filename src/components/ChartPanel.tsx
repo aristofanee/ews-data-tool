@@ -21,7 +21,7 @@ import { ParetoFacetView, type ParetoFacetExportApi } from "./ParetoFacetView";
 import { EmptyState } from "./EmptyState";
 import { EXPORT_CONFIG } from "../charts/plotlyTheme";
 import type { Theme } from "../lib/theme";
-import { binLabel } from "../lib/theme";
+import { binLabel, binYieldText } from "../lib/theme";
 import * as api from "../lib/api";
 import { fmt, fmtInt, safeName } from "../lib/format";
 import {
@@ -97,7 +97,7 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
       const out: Stat[] = [
         {
           k: "Wafer yield (HBIN 1)",
-          v: `${d.yieldPct.toFixed(2)}%`,
+          v: binYieldText(d.yieldPct, d.dice, 2, d.unknownBins),
           tone: "good",
         },
         { k: "Bin 1", v: fmtInt(d.pass) },
@@ -124,13 +124,13 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
       return [
         {
           k: "Wafer yield (HBIN 1)",
-          v: `${tested ? ((pass * 100) / tested).toFixed(2) : "0.00"}%`,
+          v: d.wafers.some((w) => w.dice.some((die) => die.hbin === 65535)) ? "N/A (unknown bins)" : `${(tested ? pass * 100 / tested : 0).toFixed(2)}%`,
           tone: "good",
         },
         { k: "Bin", v: spec.binCategory === "soft" ? "SBIN" : "HBIN" },
         { k: "Wafers", v: fmtInt(d.wafers.length) },
         { k: "Pass", v: fmtInt(pass) },
-        { k: "Fail", v: fmtInt(fail) },
+        { k: "Other / unknown bins", v: fmtInt(fail) },
       ];
     }
     case "pareto": {
@@ -145,7 +145,7 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
         },
         {
           k: "Yield",
-          v: `${d.yieldPct.toFixed(2)}%`,
+          v: d.unknownTotal ? "N/A (unknown bins)" : `${d.yieldPct.toFixed(2)}%`,
           tone: "good",
         },
       ];

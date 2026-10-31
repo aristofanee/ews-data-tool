@@ -77,6 +77,8 @@ impl TestInfo {
 }
 
 /// Wafer geometry from an STDF WCR record (or inferred by a CSV import).
+pub const UNKNOWN_BIN: u16 = u16::MAX;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WaferGeom {
     pub diameter_mm: Option<f32>,

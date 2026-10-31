@@ -69,7 +69,7 @@ npm run tauri build    # release build + NSIS installer
 Build output:
 
 - `src-tauri\target\release\ews-data-tool.exe`
-- `src-tauri\target\release\bundle\nsis\EWS Data Tool_0.4.0_x64-setup.exe`
+- `src-tauri\target\release\bundle\nsis\EWS Data Tool_0.4.1_x64-setup.exe`
 
 ### Browser preview
 

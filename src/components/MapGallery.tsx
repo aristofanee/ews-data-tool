@@ -3,6 +3,7 @@ import type { MapResponse, PlotSpec } from "../types";
 import { mapColorLimits, WaferMapRenderer, type MapOptions } from "../charts/waferMap";
 import { useStore } from "../store";
 import { fmtInt } from "../lib/format";
+import { binYieldText } from "../lib/theme";
 export { usePlotSelection as useMapSelection } from "../lib/usePlotMemory";
 
 // Retain only small thumbnail bitmaps, never enlarged canvases. Data identity
@@ -62,6 +63,7 @@ export function MapGallery({ entries, spec, mode, onOpen }: {
   entries: GalleryMap[]; spec: PlotSpec; mode: "value" | "bin"; onOpen: (index: number) => void;
 }) {
   const theme = useStore((s) => s.theme);
+  const fontRevision = useStore((s) => s.demoFontRevision);
   const groups = useMemo(() => {
     const out = new Map<string, { entry: GalleryMap; index: number }[]>();
     entries.forEach((entry, index) => {
@@ -72,7 +74,7 @@ export function MapGallery({ entries, spec, mode, onOpen }: {
   }, [entries]);
   const opts = useMemo<MapOptions>(() => ({ theme, mode, palette: spec.palette,
     lsl: spec.lsl, usl: spec.usl, binCategory: spec.binCategory, showLegend: false,
-    presentation: false }), [theme, mode, spec.palette, spec.lsl, spec.usl, spec.binCategory]);
+    presentation: false, fontRevision }), [theme, mode, spec.palette, spec.lsl, spec.usl, spec.binCategory, fontRevision]);
   return <div className="binmap-wrap map-gallery">
     {groups.map(([lot, maps]) => <section className="binmap-group" key={lot}>
       {lot && <h4 className="binmap-lot">{lot}</h4>}
@@ -81,7 +83,7 @@ export function MapGallery({ entries, spec, mode, onOpen }: {
           <button className="binmap-open" onClick={() => onOpen(index)} title={`Open ${label}`}>
             <div className="binmap-canvas-wrap"><MapThumb data={md} opts={mode === "value" ? { ...opts, ...mapColorLimits(spec, md) } : opts} /></div>
             <div className="binmap-label"><span className="binmap-name">{label}</span>
-              <span className="binmap-yield">{md.yieldPct.toFixed(1)}%</span></div>
+              <span className="binmap-yield">{binYieldText(md.yieldPct, md.dice, 1, md.unknownBins)}</span></div>
             <div className="binmap-meta">{fmtInt(md.pass)} bin 1 · {fmtInt(md.fail)} other bins</div>
           </button>
         </div>)}

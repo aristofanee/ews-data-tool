@@ -127,6 +127,7 @@ export interface MapDie {
 }
 
 export interface MapResponse {
+  unknownBins?: number;
   testPass?: number;
   testFail?: number;
   testYieldPct?: number | null;
@@ -158,6 +159,7 @@ export interface ParetoBar {
 }
 
 export interface ParetoGroup {
+  unknownTotal?: number;
   key: number;
   label: string;
   total: number;
@@ -175,6 +177,7 @@ export interface ParetoSeries {
 }
 
 export interface ParetoResponse {
+  unknownTotal?: number;
   mode: "global" | "grouped";
   bars: ParetoBar[];
   groups: ParetoGroup[];
@@ -356,7 +359,7 @@ export const defaultSpec = (type: PlotType, test: number | null, title: string):
   palette: "brand",
   edgeExclusion: 0,
   binCategory: "hard",
-  top: 20,
+  top: 10,
   bins: null,
   showNormal: true,
   showBand: true,
@@ -364,7 +367,7 @@ export const defaultSpec = (type: PlotType, test: number | null, title: string):
   yMax: null,
   limitMode: "auto",
   limitK: 3,
-  presentation: true,
+  presentation: false,
   scatterX: null,
   scatterY: null,
   scatterZMode: "none",

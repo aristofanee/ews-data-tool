@@ -2,9 +2,11 @@ import type { BinOverviewWafer, MapDie, MapResponse, PlotSpec } from "../types";
 import { fmtMap } from "../lib/format";
 import { quantileSorted } from "../lib/stats";
 import type { Theme } from "../lib/theme";
-import { binColor, binLabel, paletteColor } from "../lib/theme";
+import { binColor, binLabel, paletteColor, binYieldText } from "../lib/theme";
+import { graphFontOffset } from "../lib/demoFonts";
 
 export interface MapOptions {
+  fontRevision?: number;
   theme: Theme;
   palette: string;
   mode: "value" | "bin";
@@ -661,13 +663,13 @@ export class WaferMapRenderer {
 
     const units = this.data?.test?.units || "value";
     const maxUnits = pres ? 11 : 14;
-    ctx.font = `600 ${Math.round(10 * k)}px ${FONT}`;
+    ctx.font = `600 ${Math.round(10 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
     ctx.fillStyle = t.muted;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
     ctx.fillText(units.length > maxUnits ? units.slice(0, maxUnits - 1) + "…" : units, x, barY - 7 * k);
 
-    ctx.font = `${Math.round(10 * k)}px ${FONT}`;
+    ctx.font = `${Math.round(10 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
     ctx.textBaseline = "middle";
     for (let i = 0; i <= 4; i++) {
       const f = i / 4;
@@ -694,7 +696,7 @@ export class WaferMapRenderer {
       ctx.moveTo(x - 2 * k, yy);
       ctx.lineTo(x + width + 2 * k, yy);
       ctx.stroke();
-      ctx.font = `700 ${Math.round(9 * k)}px ${FONT}`;
+      ctx.font = `700 ${Math.round(9 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
       ctx.fillStyle = "#e11d48";
       ctx.textAlign = "right";
       ctx.fillText(label, x - 5 * k, yy);
@@ -727,13 +729,14 @@ export class WaferMapRenderer {
     const shown = entries.slice(0, 12);
     const rest = entries.slice(12);
 
-    ctx.font = `600 ${Math.round(10 * k)}px ${FONT}`;
+    ctx.font = `600 ${Math.round(10 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
     ctx.fillStyle = t.muted;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
     ctx.fillText(soft ? "SBIN" : "HBIN", x, y);
-    let yy = y + 16 * k;
-    ctx.font = `${Math.round(10 * k)}px ${FONT}`;
+    let yy = y + 16 * k + (pres ? 0 : graphFontOffset());
+    const lineHeight = 13 * k + (pres ? 0 : graphFontOffset());
+    ctx.font = `${Math.round(10 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
     for (const [code, count] of shown) {
       const pass = this.opts?.binPass
         ? this.opts.binPass.includes(code)
@@ -752,11 +755,11 @@ export class WaferMapRenderer {
         else line = line ? `${line} ${word}` : word;
       }
       if (line) lines.push(line);
-      lines.forEach((text, i) => ctx.fillText(text, x + 15 * k, yy + 5 * k + i * 13 * k, maxWidth));
+      lines.forEach((text, i) => ctx.fillText(text, x + 15 * k, yy + 5 * k + i * lineHeight, maxWidth));
       ctx.fillStyle = t.muted;
       ctx.textAlign = "right";
       ctx.fillText(fmtCount(count), x + width, yy + 5 * k);
-      yy += Math.max(18, lines.length * 13 + 5) * k;
+      yy += Math.max(18 * k, lines.length * lineHeight + 5 * k);
     }
     if (rest.length > 0) {
       const total = rest.reduce((a, [, c]) => a + c, 0);
@@ -808,10 +811,10 @@ export function renderMapImage(
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = t.text;
-  ctx.font = `600 ${Math.round(30 * k)}px ${FONT}`;
+  ctx.font = `600 ${Math.round(30 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
   ctx.fillText(title, 42, Math.round(50 * k));
   ctx.fillStyle = t.muted;
-  ctx.font = `${Math.round(15 * k)}px ${FONT}`;
+  ctx.font = `${Math.round(15 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
   ctx.fillText(subtitle, 42, Math.round(78 * k));
   ctx.fillStyle = "#2563eb";
   ctx.fillRect(42, Math.round(94 * k), Math.round(74 * k), Math.round(4 * k));
@@ -844,10 +847,10 @@ export function renderBinOverviewImage(
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = t.text;
-  ctx.font = `600 ${Math.round(pres ? 32 : 26)}px ${FONT}`;
+  ctx.font = `600 ${Math.round(pres ? 32 : 28 + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
   ctx.fillText(title, 42, Math.round(pres ? 54 : 46));
   ctx.fillStyle = t.muted;
-  ctx.font = `${Math.round(pres ? 17 : 14)}px ${FONT}`;
+  ctx.font = `${Math.round(pres ? 17 : 16 + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
   ctx.fillText(subtitle, 42, Math.round(pres ? 84 : 72));
   ctx.fillStyle = "#2563eb";
   ctx.fillRect(42, Math.round(pres ? 102 : 86), Math.round(pres ? 82 : 64), 4);
@@ -893,14 +896,14 @@ export function renderBinOverviewImage(
 
     const label = multiLot ? `${w.lotName} / ${w.wafer.name}` : w.wafer.name;
     ctx.fillStyle = t.text;
-    ctx.font = `600 ${Math.round(pres ? 18 : 14)}px ${FONT}`;
+    ctx.font = `600 ${Math.round(pres ? 18 : 16 + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
     ctx.fillText(label, x + 2, y + Math.round(pres ? 20 : 15));
     ctx.fillStyle = binColor(1);
-    ctx.font = `${Math.round(pres ? 15 : 12)}px ${FONT}`;
+    ctx.font = `${Math.round(pres ? 15 : 14 + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
     ctx.textAlign = "right";
-    ctx.fillText(`${w.yieldPct.toFixed(1)}%`, x + cellW - 2, y + Math.round(pres ? 20 : 15));
+    ctx.fillText(binYieldText(w.yieldPct, w.dice, 1), x + cellW - 2, y + Math.round(pres ? 20 : 15));
     ctx.drawImage(mapCanvas, x, y + labelH, cellW, mapH);
   });
 

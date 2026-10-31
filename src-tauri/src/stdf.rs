@@ -343,6 +343,41 @@ pub fn import_stdf(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<I
     import_stdf_bytes(&mmap, &path.display().to_string(), progress)
 }
 
+/// Read only product geometry and bin dictionaries. Measurement records are
+/// validated for length and skipped without constructing die/test columns.
+pub fn import_metadata(path: &Path) -> Result<Imported, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    if file.metadata().map_err(|e| e.to_string())?.len() == 0 { return Err("Empty STDF metadata file".into()); }
+    let mapped = unsafe { Mmap::map(&file) }.map_err(|e| e.to_string())?;
+    let decoded;
+    let bytes = if mapped.starts_with(&[0x1f, 0x9d]) {
+        decoded = crate::z_decode::decompress(&mapped).map_err(|e| e.to_string())?;
+        decoded.as_slice()
+    } else { &mapped[..] };
+    metadata_bytes(bytes)
+}
+
+fn metadata_bytes(bytes: &[u8]) -> Result<Imported, String> {
+    if bytes.len() < 6 || bytes[2..4] != [0, 10] || bytes[5] != 4 { return Err("Expected STDF V4 FAR header".into()); }
+    let be = bytes[..2] == [0, 2];
+    if !be && bytes[..2] != [2, 0] { return Err("Invalid FAR length".into()); }
+    let mut records = Vec::new();
+    let mut off = 0;
+    while off < bytes.len() {
+        if bytes.len() - off < 4 { return Err("Truncated STDF metadata record header".into()); }
+        let end = off + 4 + read_u16(bytes, off, be) as usize;
+        if end > bytes.len() { return Err("Truncated STDF metadata record".into()); }
+        if matches!((bytes[off + 2], bytes[off + 3]), (0, 10) | (1, 10) | (2, 10) | (2, 20) | (2, 30) | (1, 40) | (1, 50)) {
+            records.extend_from_slice(&bytes[off..end]);
+        }
+        off = end;
+    }
+    // Materialize the final WCR even in a reference file with no WIR/dice.
+    records.extend_from_slice(if be { &[0, 7, 2, 10] } else { &[7, 0, 2, 10] });
+    records.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0]);
+    parse_stdf_bytes(&records, &mut |_, _| {})
+}
+
 /// Shared by standalone files and ZIP members; no temporary extraction or
 /// Read-adapter copies are needed for either plain STDF or Unix compress.
 pub fn import_stdf_bytes(bytes: &[u8], source: &str, progress: &mut dyn FnMut(f32, &str)) -> Result<Imported, String> {
@@ -978,6 +1013,35 @@ fn limits_differ(a: Option<f32>, b: Option<f32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_only_skips_measurements_and_fills_missing_fields() {
+        let mut bytes = rec(0, 10, &[2, 4]);
+        let mut wcr = Vec::new();
+        wcr.extend_from_slice(&300f32.to_le_bytes()); wcr.extend_from_slice(&2.04f32.to_le_bytes()); wcr.extend_from_slice(&2.8f32.to_le_bytes());
+        wcr.extend_from_slice(&[3, b'D']); wcr.extend_from_slice(&0i16.to_le_bytes()); wcr.extend_from_slice(&0i16.to_le_bytes()); wcr.extend_from_slice(&[b'R', b'U']);
+        bytes.extend(rec(2, 30, &wcr));
+        // Valid record framing, deliberately not a full PTR: metadata path
+        // must not inspect or allocate measurement values.
+        bytes.extend(rec(15, 10, &[0; 8]));
+        let mut sbr = vec![1, 1, 7, 0, 0, 0, 0, 0, b'F', 4]; sbr.extend(b"Leak");
+        bytes.extend(rec(1, 50, &sbr));
+        let source = metadata_bytes(&bytes).unwrap();
+        assert!(source.cols.is_empty()); assert!(source.row_lot.is_empty());
+        assert_eq!(source.wafer_geom.last().unwrap().diameter_mm, Some(300.0));
+        let mut imp = Imported::new(); let l = imp.lot_index("CSV"); let w = imp.wafer_index(l, "1"); let row = imp.new_row(l, w);
+        imp.column((1, 0), row, 42.0); imp.wafer_geom[0].center_x = Some(10);
+        let mut ds = crate::model::Dataset::new(); ds.merge(imp);
+        let before = ds.cols.clone(); let bins = ds.hbin.clone(); let files = ds.files.clone();
+        ds.fill_product_metadata(source).unwrap();
+        assert_eq!(ds.rows, 1); assert_eq!(ds.cols, before); assert_eq!(ds.hbin, bins); assert_eq!(ds.files, files);
+        assert_eq!(ds.wafers[0].diameter_mm, Some(300.0)); assert_eq!(ds.wafers[0].die_w_mm, Some(2.8));
+        assert_eq!(ds.wafers[0].center_x, Some(10)); assert_eq!(ds.sbin_names[&7], "Leak");
+        let mut conflicting = Imported::new();
+        conflicting.wafer_geom = vec![WaferGeom { diameter_mm: Some(200.0), ..Default::default() }, WaferGeom { diameter_mm: Some(300.0), ..Default::default() }];
+        assert!(ds.fill_product_metadata(conflicting).is_err());
+        assert_eq!(ds.cols, before); assert_eq!(ds.wafers[0].diameter_mm, Some(300.0));
+    }
 
     fn rec(typ: u8, sub: u8, body: &[u8]) -> Vec<u8> {
         let mut v = Vec::with_capacity(4 + body.len());

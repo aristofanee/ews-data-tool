@@ -1,3 +1,4 @@
+import { binYieldText } from "../lib/theme";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Filter, MapResponse, PlotSpec } from "../types";
 import * as api from "../lib/api";
@@ -152,7 +153,7 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
           const subtitle =
             `${label}` +
             (md.test ? ` · ${testLabelWithUnits(md.test)}` : "") +
-            ` · Yield ${md.yieldPct.toFixed(2)}%`;
+            ` · Yield ${binYieldText(md.yieldPct, md.dice, 2, md.unknownBins)}`;
           return {
             label,
             url: renderMapImage(md, opts, width, height, title, subtitle, format),

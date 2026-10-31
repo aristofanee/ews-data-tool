@@ -28,6 +28,13 @@ in that CSV; values and limits remain in the units stated by the file.
 
 DIE_X, DIE_Y, SITE, WAFER_ID, LOT_ID, HighL and LowL already match the normalized
 alias rules. Metadata immediately beneath the header remains column-aligned.
+Unused Pattern/descriptive rows before the first die do not end the metadata
+section. Data begins with a non-empty lot/wafer identity and valid integer
+coordinates. Invalid die identities after data starts reject the import.
+When both OCR and Wafer are present, OCR is the default identity independent
+of column order. The Wafer column is retained as a `Wafer number` custom
+grouping category instead of being treated as a test. STDF uses its existing
+WAFER_ID behavior unchanged.
 Interspersed metadata and extended long-table metadata are outside this change.
 
 Missing/blank/invalid bins use reserved internal code 65535 and appear as

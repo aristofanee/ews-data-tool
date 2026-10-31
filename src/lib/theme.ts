@@ -161,10 +161,10 @@ export function binColor(code: number, _pass = code === 1): string {
   return FAILURE_COLORS[Math.abs(code) % FAILURE_COLORS.length];
 }
 
-export function binLabel(category: "hard" | "soft", code: number, description?: string): string {
+export function binLabel(category: "hard" | "soft", code: number, description?: string, prefix = true): string {
   if (code === 0xffff && description === "Others") return "Others";
-  if (code === 0xffff) return `${category === "soft" ? "SBIN" : "HBIN"} unknown`;
-  const label = `${category === "soft" ? "SBIN" : "HBIN"} ${code}`;
+  if (code === 0xffff) return prefix ? `${category === "soft" ? "SBIN" : "HBIN"} unknown` : "Unknown";
+  const label = prefix ? `${category === "soft" ? "SBIN" : "HBIN"} ${code}` : String(code);
   if (category === "hard") return label;
   const text = description?.trim();
   if (!text || /^(?:[HS]?BIN)\s*\d+$/i.test(text)) return label;

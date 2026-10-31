@@ -574,7 +574,7 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
     for (const s of data.series) {
       traces.push({
         type: "bar",
-        name: binLabel(spec.binCategory, s.code, s.name),
+        name: binLabel(spec.binCategory, s.code, s.name, false),
         x: labels,
         y: s.pcts,
         customdata: s.counts,
@@ -692,7 +692,7 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
   }
 
   const bars = data.bars;
-  const labels = bars.map((b) => binLabel(spec.binCategory, b.code, b.name));
+  const labels = bars.map((b) => binLabel(spec.binCategory, b.code, b.name, false));
   const pcts = bars.map((b) => b.pct);
   const angle = labels.some((l) => l.length > 8) ? -38 : 0;
   traces.push({
@@ -753,7 +753,7 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
   if (preview) {
     layout.xaxis.tickmode = "array";
     layout.xaxis.tickvals = labels;
-    layout.xaxis.ticktext = bars.map((b) => b.name === "Others" ? "Others" : `${spec.binCategory === "soft" ? "SBIN" : "HBIN"} ${b.code}`);
+    layout.xaxis.ticktext = bars.map((b) => b.name === "Others" ? "Others" : String(b.code));
     layout.xaxis.tickangle = -30;
   }
   return previewFigure(traces, layout, preview, spec.binCategory === "soft" ? "SBIN" : "HBIN", "Fail [%]");

@@ -293,6 +293,7 @@ pub struct CsvInspection {
 
 #[derive(Default)]
 struct Layout {
+    wafer_number: Option<usize>,
     site: Option<usize>,
     lot: Option<usize>,
     wafer: Option<usize>,
@@ -339,7 +340,36 @@ fn layout_from_headers(headers: &[String]) -> Layout {
             }
         }
     }
+    // Prefer a physical ID/OCR regardless of header order. Retain the numeric
+    // wafer/slot column as a grouping label rather than a measurement.
+    let preferred = headers.iter().enumerate().filter_map(|(i, h)| {
+        let rank = match norm(h).as_str() {
+            "ocr" | "ocrnumber" | "waferocr" => 3,
+            "waferid" => 2,
+            _ => 0,
+        };
+        (rank > 0).then_some((rank, i))
+    }).max_by_key(|(rank, i)| (*rank, std::cmp::Reverse(*i)));
+    if let Some((_, index)) = preferred {
+        lay.wafer = Some(index);
+        lay.wafer_number = headers.iter().position(|h| matches!(norm(h).as_str(), "wafer" | "wafernumber" | "wf" | "wfr" | "slot"));
+    }
     lay
+}
+
+fn has_die_identity(rec: &csv::StringRecord, lay: &Layout) -> bool {
+    let text_key = |index: Option<usize>| index.map_or(true, |i| rec.get(i).is_some_and(|v| !v.trim().is_empty()));
+    let coordinate = |index: Option<usize>| index.map_or(true, |i| {
+        rec.get(i).and_then(|v| v.trim().parse::<f64>().ok())
+            .is_some_and(|v| v.is_finite() && v.fract() == 0.0 && v >= i16::MIN as f64 && v <= i16::MAX as f64)
+    });
+    text_key(lay.lot) && text_key(lay.wafer) && coordinate(lay.x) && coordinate(lay.y)
+}
+
+fn validate_die_record(rec: &csv::StringRecord, lay: &Layout) -> Result<(), String> {
+    if has_die_identity(rec, lay) { return Ok(()); }
+    let line = rec.position().map(|p| p.line()).unwrap_or(0);
+    Err(format!("CSV data row at line {line} has missing lot/wafer identity or invalid die coordinates"))
 }
 
 fn apply_mapping(mut lay: Layout, mapping: Option<&CsvMapping>, n: usize) -> Result<Layout, String> {
@@ -611,7 +641,7 @@ fn find_header(
 
 fn read_metadata_and_probe(
     rdr: &mut csv::Reader<&[u8]>,
-    headers: &[String],
+    lay: &Layout,
 ) -> Result<(Vec<csv::StringRecord>, Vec<csv::StringRecord>), String> {
     let mut metadata = Vec::new();
     let mut probe = Vec::new();
@@ -625,17 +655,22 @@ fn read_metadata_and_probe(
             continue;
         }
         if !data_started {
-            if let Some(_) = metadata_kind(&rec) {
+            if metadata_kind(&rec).is_some() {
                 metadata.push(rec.clone());
                 continue;
             }
-            data_started = true;
+            if rec.iter().find(|v| !v.trim().is_empty()).is_some_and(|v| norm(v) == "pattern") { continue; }
+            if has_die_identity(&rec, lay) {
+                data_started = true;
+            } else {
+                // Unneeded descriptive rows do not terminate metadata.
+                // Only a valid die identity starts the data section.
+                continue;
+            }
         }
+        validate_die_record(&rec, lay)?;
         probe.push(rec.clone());
     }
-    // Keep the compiler/lint aware that headers participates in the caller's
-    // contract; metadata rows are interpreted after numeric columns are known.
-    let _ = headers;
     Ok((metadata, probe))
 }
 
@@ -683,7 +718,7 @@ pub fn import_csv_with_mapping(
         }
         if index < header_idx { preamble.read(&header_rec)?; }
     }
-    let (metadata_rows, probe) = read_metadata_and_probe(&mut rdr, &headers)?;
+    let (metadata_rows, probe) = read_metadata_and_probe(&mut rdr, &lay)?;
     let col_meta = collect_metadata(&metadata_rows, &headers);
 
     let long_format = lay.test.is_some() && lay.value.is_some();
@@ -713,7 +748,7 @@ pub fn import_csv_with_mapping(
             .collect();
         let mut meta: Vec<MetaColumn> = meta_indices
             .iter()
-            .map(|&i| MetaColumn::new(meta_name(&headers[i])))
+            .map(|&i| MetaColumn::new(if Some(i) == lay.wafer_number { "Wafer number".into() } else { meta_name(&headers[i]) }))
             .collect();
 
         let mut push = |rec: &csv::StringRecord, imp: &mut Imported| {
@@ -781,6 +816,8 @@ pub fn import_csv_with_mapping(
         }
         let mut rec = csv::StringRecord::new();
         while rdr.read_record(&mut rec).map_err(|e| format!("Invalid CSV record: {e}"))? {
+            if rec.iter().all(|v| v.trim().is_empty()) { continue; }
+            validate_die_record(&rec, &lay)?;
             push(&rec, &mut imp);
         }
         // Give tests a stable order matching their ids.
@@ -826,7 +863,7 @@ pub fn import_csv_with_mapping(
     let mut meta_indices: Vec<usize> = Vec::new();
     for &i in sample.iter() {
         let n = norm(&headers[i]);
-        if is_meta_header(&n) {
+        if is_meta_header(&n) || Some(i) == lay.wafer_number {
             if !meta_name(&headers[i]).is_empty() {
                 meta_indices.push(i);
             }
@@ -872,7 +909,7 @@ pub fn import_csv_with_mapping(
     imp.col_index.clear();
     let mut meta: Vec<MetaColumn> = meta_indices
         .iter()
-        .map(|&i| MetaColumn::new(meta_name(&headers[i])))
+        .map(|&i| MetaColumn::new(if Some(i) == lay.wafer_number { "Wafer number".into() } else { meta_name(&headers[i]) }))
         .collect();
 
     let push_row = |imp: &mut Imported,
@@ -909,6 +946,8 @@ pub fn import_csv_with_mapping(
     }
     let mut rec = csv::StringRecord::new();
     while rdr.read_record(&mut rec).map_err(|e| format!("Invalid CSV record: {e}"))? {
+        if rec.iter().all(|v| v.trim().is_empty()) { continue; }
+        validate_die_record(&rec, &lay)?;
         push_row(&mut imp, &rec, &mut meta);
         if imp.records % 200_000 == 0 {
             progress(0.0, "Reading CSV...");
@@ -923,6 +962,35 @@ pub fn import_csv_with_mapping(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pattern_and_unknown_metadata_do_not_create_dice_or_hide_units_labels() {
+        let p = write_temp("pattern-ocr", "Wafer-Diameter,300\nWafer_Height,2.04\nWafer_Width,2.8\nLot,Wafer,OCR,DIE_X,DIE_Y,SBIN,Current,Vt,Split\nPattern,,,,,,unused,unused,unused\nVendor note,,,,,,ignored,ignored,ignored\nLSL,,,,,,1.5,0.3,\nHighL,,,,,,9.5,0.7,\nUnit,,,,,,uA,V,\nLOT42,03,OCR42,1,2,1,4.2,0.4,Group A\nLOT42,03,OCR42,2,2,7,5.6,0.5,Group A\n");
+        let imp = import_csv(&p, &mut |_, _| {}).unwrap();
+        assert_eq!(imp.lots, vec!["LOT42"]); assert_eq!(imp.wafers, vec![(0, "OCR42".into())]);
+        assert_eq!(imp.x, vec![1, 2]); assert_eq!(imp.y, vec![2, 2]);
+        assert_eq!(imp.tests.len(), 2); assert_eq!(imp.cols[0], vec![4.2, 5.6]);
+        assert_eq!(imp.tests[0].units, "uA"); assert_eq!(imp.tests[1].units, "V");
+        assert_eq!(imp.tests[0].lo_spec, Some(1.5)); assert_eq!(imp.tests[1].hi_spec, Some(0.7));
+        let split = imp.custom_cols.iter().find(|c| c.name == "Split").unwrap();
+        assert_eq!(split.label(split.wafer_values[0]), "Group A");
+        let number = imp.custom_cols.iter().find(|c| c.name == "Wafer number").unwrap();
+        assert_eq!(number.label(number.wafer_values[0]), "03");
+        assert!(!imp.tests.iter().any(|t| t.name == "Wafer"));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn ocr_priority_is_independent_of_column_order_and_invalid_dice_are_rejected() {
+        for headers in [vec!["Wafer", "WAFER_ID", "OCR"], vec!["OCR", "Wafer", "WAFER_ID"]] {
+            let values: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
+            let lay = layout_from_headers(&values);
+            assert_eq!(values[lay.wafer.unwrap()], "OCR"); assert_eq!(values[lay.wafer_number.unwrap()], "Wafer");
+        }
+        let p = write_temp("invalid-after-data", "Lot,Wafer,X,Y,V\nL,W,1,2,4\nL,W,invalid,2,5\n");
+        assert!(import_csv(&p, &mut |_, _| {}).err().unwrap().contains("invalid die coordinates"));
+        let _ = std::fs::remove_file(p);
+    }
 
     #[test]
     fn product_preamble_aliases_and_unknown_bins() {

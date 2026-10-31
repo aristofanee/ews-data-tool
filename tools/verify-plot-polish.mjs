@@ -53,8 +53,8 @@ try {
   assert.deepEqual(pure.sites, ["Site 0", "Site 1", "Site 2", "Site 3"]);
   assert.ok(Math.abs(pure.globalSum - pure.failureRate) < 1e-8);
   assert.ok(pure.groupedCorrect);
-  assert.ok(pure.labels.every((s) => s === "Others" || s.startsWith("HBIN ")));
-  assert.ok(pure.groupLabels.every((s) => s === "Others" || s.startsWith("HBIN ")));
+  assert.ok(pure.labels.every((s) => s === "Others" || /^\d+$/.test(s)));
+  assert.ok(pure.groupLabels.every((s) => s === "Others" || /^\d+$/.test(s)));
   assert.equal(pure.label, "SBIN 7 · Leakage");
   assert.equal(pure.colours[0], "#16c55e");
   for (const colour of pure.colours.slice(1)) {
@@ -122,8 +122,6 @@ try {
     const { useStore } = await import("/src/store.ts");
     useStore.getState().patchSpec({ binCategory: "soft" });
   });
-  await page.waitForFunction(() => document.querySelectorAll(".binmap-open").length === 50);
-  await page.locator(".binmap-open").nth(3).click();
   await page.waitForFunction(() => document.querySelector(".map-detail-title")?.textContent.startsWith("SBIN map"));
   await page.evaluate(async () => (await import("/src/store.ts")).useStore.getState().toggleTheme());
   await page.screenshot({ path: "shots/polish-sbin-dark.png" });

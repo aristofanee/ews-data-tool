@@ -149,7 +149,7 @@ function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
           tone: "good",
         },
       ];
-      if (top) out.push({ k: "Top bin", v: `${binLabel(spec.binCategory, top.code, top.name)} · ${top.pct.toFixed(1)}%` });
+      if (top) out.push({ k: "Top bin", v: `${binLabel(spec.binCategory, top.code, top.name, false)} · ${top.pct.toFixed(1)}%` });
       if (d.mode === "grouped") out.push({ k: "Groups", v: fmtInt(d.groups.length) });
       if (spec.groupBy !== "none") {
         out.unshift({ k: "View", v: `Split by ${categoryLabel(spec.groupBy)}` });

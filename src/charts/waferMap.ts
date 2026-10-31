@@ -649,8 +649,11 @@ export class WaferMapRenderer {
     pres = false
   ): void {
     const k = pres ? 1.55 : 1;
-    const barH = Math.max(80, height - (pres ? 40 : 26));
-    const barY = y + (pres ? 34 : 22);
+    const textSize = Math.round(10 * k + (pres ? 0 : 2 + graphFontOffset()));
+    // Reserve separate vertical bands for the units and the upper tick.
+    // The old 7px gap let their bounding boxes overlap after larger fonts.
+    const barY = y + textSize * 2 + 12;
+    const barH = Math.max(20, height - (barY - y) - textSize / 2);
     const grad = ctx.createLinearGradient(0, barY + barH, 0, barY);
     for (let i = 0; i <= 24; i++) {
       grad.addColorStop(i / 24, this.colorFor(i / 24));
@@ -662,14 +665,18 @@ export class WaferMapRenderer {
     ctx.strokeRect(x + 0.5, barY + 0.5, width - 1, barH - 1);
 
     const units = this.data?.test?.units || "value";
-    const maxUnits = pres ? 11 : 14;
-    ctx.font = `600 ${Math.round(10 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
+    ctx.font = `600 ${textSize}px ${FONT}`;
     ctx.fillStyle = t.muted;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
-    ctx.fillText(units.length > maxUnits ? units.slice(0, maxUnits - 1) + "…" : units, x, barY - 7 * k);
+    // Fit to the actual reserved legend width, not a character count.
+    const maxUnitsWidth = Math.max(20, this.w / this.scale - x - 8);
+    let unitsLabel = units;
+    while (unitsLabel.length > 1 && ctx.measureText(unitsLabel).width > maxUnitsWidth) unitsLabel = unitsLabel.slice(0, -1);
+    if (unitsLabel !== units) { unitsLabel = unitsLabel.slice(0, -1) + "…"; }
+    ctx.fillText(unitsLabel, x, y + textSize);
 
-    ctx.font = `${Math.round(10 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
+    ctx.font = `${textSize}px ${FONT}`;
     ctx.textBaseline = "middle";
     for (let i = 0; i <= 4; i++) {
       const f = i / 4;
@@ -746,7 +753,7 @@ export class WaferMapRenderer {
       ctx.fillStyle = t.text;
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
-      const label = binLabel(soft ? "soft" : "hard", code, this.opts?.binNames?.[code]);
+      const label = binLabel(soft ? "soft" : "hard", code, this.opts?.binNames?.[code], false);
       const maxWidth = width - 55 * k;
       const lines: string[] = [];
       let line = "";

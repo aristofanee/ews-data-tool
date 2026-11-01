@@ -876,6 +876,14 @@ select.input {
   font-size: 11px;
 }
 
+.test-combobox { position: relative; min-width: 0; }
+.test-combobox-list { position: fixed; z-index: 1000;
+  max-height: 240px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; box-shadow: var(--shadow-md); }
+.test-combobox-list button { display: block; width: 100%; padding: 8px; border: 0;
+  background: transparent; color: var(--text); text-align: left; cursor: pointer; overflow-wrap: anywhere; line-height: 1.4; }
+.test-combobox-list button:hover, .test-combobox-list button[aria-selected="true"] { background: var(--blue-soft); }
+
 .demo-font-controls {
   display: flex;
   flex: 0 0 auto;

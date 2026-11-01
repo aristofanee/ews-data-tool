@@ -87,6 +87,11 @@ try {
   await page.waitForTimeout(450);
   const reset = await page.evaluate(() => document.querySelector(".chart-body .js-plotly-plot")._fullLayout.yaxis.range);
   assert.deepEqual(reset, original);
+  for (let i = 0; i < 3; i++) {
+    await page.locator(".chart-body .nsewdrag").dblclick({ position: { x: 150, y: 150 }, delay: 80 });
+    await page.waitForTimeout(350);
+    assert.deepEqual(await page.evaluate(() => document.querySelector(".chart-body .js-plotly-plot")._fullLayout.yaxis.range), reset);
+  }
 
   const selected = {};
   for (const type of ["box", "hist", "scatter", "pareto"]) {

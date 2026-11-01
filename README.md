@@ -69,7 +69,7 @@ npm run tauri build    # release build + NSIS installer
 Build output:
 
 - `src-tauri\target\release\ews-data-tool.exe`
-- `src-tauri\target\release\bundle\nsis\EWS Data Tool_0.4.2_x64-setup.exe`
+- `src-tauri\target\release\bundle\nsis\EWS Data Tool_0.4.3_x64-setup.exe`
 
 ### Browser preview
 
@@ -127,6 +127,8 @@ report export and real file parsing require the desktop app.
 
 Map interaction: scroll to zoom, drag to pan, double-click to reset. Plotly
 charts support hover, box zoom and pan from the mode bar.
+Hold the middle mouse button (wheel) and drag to pan any interactive plot or map;
+the selected left-button tool is preserved.
 
 ## Data formats
 
@@ -192,7 +194,7 @@ rows in attempt order so a partial retest cannot inherit older measurements.
 
 Column mapping is automatic for common names. If Lot, Wafer/OCR, X or Y cannot
 be detected, a manual picker maps those columns before import. The CSV exporter
-writes header + `Tests#`/`Unit`/`LowL`/`HighL` + data, so exported files round-trip
+writes test number/name/units in headers, then `LSL`/`USL` rows and data, so exported files round-trip
 through this importer; very small or large values use scientific notation.
 
 ### Synthetic sample data

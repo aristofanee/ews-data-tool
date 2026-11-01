@@ -519,19 +519,22 @@ export async function boxPlot(req: {
   const summary = summarize(all);
   const test = ds.tests[req.test];
   const { cp, cpk } = cpCpk(all, test?.loSpec ?? null, test?.hiSpec ?? null);
-  return delay({
-    groups: ordered.map((g) => ({
-      summary: summarize(g.values),
-      positiveSummary: summarize(g.values.filter((v) => v > 0)),
-      xKey: g.xKey,
-      xLabel: g.xLabel,
-      groupKey: g.groupKey,
-      groupLabel: g.groupLabel,
-      values: g.values,
-      xs: g.xs,
-      ys: g.ys,
-      n: g.values.length,
-    })),
+  return Promise.resolve({
+    groups: ordered.map((g) => {
+      const summary = summarize(g.values);
+      return {
+        summary,
+        positiveSummary: g.values.every((v) => v > 0) ? summary : summarize(g.values.filter((v) => v > 0)),
+        xKey: g.xKey,
+        xLabel: g.xLabel,
+        groupKey: g.groupKey,
+        groupLabel: g.groupLabel,
+        values: g.values,
+        xs: g.xs,
+        ys: g.ys,
+        n: g.values.length,
+      };
+    }),
     summary,
     test:
       test ??
@@ -1014,10 +1017,11 @@ export async function histogram(req: {
   }
   let nBins = req.bins ?? 0;
   if (!nBins) {
+    const cap = Math.max(1, Math.min(80, Math.ceil(2 * (Math.log2(vals.length) + 1)), Math.ceil(Math.sqrt(vals.length))));
     const iqr = summary.q3 - summary.q1;
     const w = iqr > 0 ? (2 * iqr) / Math.cbrt(vals.length) : 0;
     nBins = w > 0 ? Math.ceil((summary.max - summary.min) / w) : Math.ceil(Math.sqrt(vals.length));
-    nBins = Math.min(120, Math.max(8, nBins));
+    nBins = summary.max <= summary.min ? 1 : Math.min(cap, Math.max(Math.min(8, cap), nBins));
   }
   const lo = summary.min;
   const hi = summary.max;
@@ -1061,49 +1065,17 @@ export async function histogram(req: {
 export async function trend(req: {
   test: number;
   by: string;
+  groupBy?: string | null;
   filter: Filter;
 }): Promise<TrendResponse> {
-  const ds = dataset();
-  const buckets = new Map<string, { label: string; values: number[] }>();
-  for (const w of ds.wafers) {
-    if (!waferAllowed(w, req.filter)) continue;
-    const col = w.cols[req.test];
-    if (!col) continue;
-    for (let i = 0; i < col.length; i++) {
-      if (!binAllowed(w, i, req.filter)) continue;
-      const v = col[i];
-      if (!Number.isFinite(v)) continue;
-      const c = categoryFor(ds, w, i, req.by || "wafer");
-      let b = buckets.get(c.name);
-      if (!b) {
-        b = { label: c.name, values: [] };
-        buckets.set(c.name, b);
-      }
-      b.values.push(v);
-    }
-  }
-  const points = [...buckets.values()]
-    .sort((a, b) => naturalCompare(a.label, b.label))
-    .map((b) => {
-      const m = mean(b.values);
-      const sd = stdDev(b.values, m);
-      let min = Infinity;
-      let max = -Infinity;
-      for (const v of b.values) {
-        if (v < min) min = v;
-        if (v > max) max = v;
-      }
-      return {
-        label: b.label,
-        mean: m,
-        min,
-        max,
-        sd,
-        n: b.values.length,
-      };
-    });
-  const test = ds.tests[req.test];
-  return delay({ points, test, lsl: test?.loSpec ?? null, usl: test?.hiSpec ?? null });
+  // Reuse the same categories and exact filtered summaries as the box plot.
+  // Marker sampling does not affect summaries.
+  const box = await boxPlot({ test: req.test, xAxis: req.by, groupBy: req.groupBy,
+    filter: req.filter, maxPoints: 1 });
+  return { points: box.groups.map((g) => ({ label: g.xLabel,
+    groupKey: g.groupKey, groupLabel: g.groupLabel, mean: g.summary.mean,
+    sd: g.summary.sd, min: g.summary.min, max: g.summary.max, n: g.summary.n })),
+    test: box.test, lsl: box.lsl, usl: box.usl };
 }
 
 export async function scatter(req: {

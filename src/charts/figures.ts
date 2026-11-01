@@ -319,6 +319,26 @@ function applyAxisRange(
 /* Box plot                                                            */
 /* ------------------------------------------------------------------ */
 
+/** Shared outer grouping: contiguous categories with headings, never a legend. */
+function addGroupBlocks(t: ChartTheme, groups: { groupLabel: string }[], spec: PlotSpec,
+  style: ChartStyle, shapes: any[], annotations: any[]) {
+  const groupLabels = [...new Set(groups.map((g) => g.groupLabel).filter(Boolean))];
+  let start = 0;
+  for (const label of groupLabels) {
+    const length = groups.filter((g) => g.groupLabel === label).length;
+    const heading = spec.groupBy === "wafer" ? shortTick(label) : label;
+    const dense = groupLabels.length > 8;
+    annotations.push({ xref: "x", x: start + (length - 1) / 2,
+      yref: "paper", y: 1.02, xanchor: "center", yanchor: "bottom",
+      text: heading, textangle: dense && heading.length > 3 ? (groupLabels.length > 20 ? -75 : -55) : 0,
+      showarrow: false, font: { size: dense ? Math.min(spec.presentation ? 11 : 13 + graphFontOffset(), style.annotation) : style.annotation, color: t.text, family: CHART_FONT } });
+    if (start > 0) shapes.push({ type: "line", xref: "x", x0: start - 0.5, x1: start - 0.5,
+      yref: "paper", y0: 0, y1: 1, line: { color: t.axis, width: 1, dash: "dot" } });
+    start += length;
+  }
+
+}
+
 export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
@@ -405,9 +425,9 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
           (k) => xPos + (pseudo(idx[k] + xIndex * 977) - 0.5) * width * 0.72
         );
         const py = pick.map((k) => ys[k]);
-        const cd = pick.map((k) => [g.xs[idx[k]], g.ys[idx[k]]]);
+        const cd = pick.map((k) => [g.xs[idx[k]], g.ys[idx[k]], `${g.xLabel}${hasGrouping ? " · " + g.groupLabel : ""}`]);
         traces.push({
-          type: mode === "all" ? "scattergl" : "scatter",
+          type: preview ? "scatter" : "scattergl",
           mode: "markers",
           name: label,
           x: px,
@@ -428,7 +448,7 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
           hovertemplate:
             `<b>%{y:.5~g}${units ? " " + units : ""}</b><br>` +
             `die (%{customdata[0]}, %{customdata[1]})<br>` +
-            `${g.xLabel}${hasGrouping ? " · " + g.groupLabel : ""}<extra></extra>`,
+            `%{customdata[2]}<extra></extra>`,
         });
       }
     }
@@ -461,21 +481,7 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
   layout.boxgap = 0.32;
   layout.boxgroupgap = 0;
   layout.showlegend = false;
-  if (hasGrouping) {
-    let start = 0;
-    for (const label of groupLabels) {
-      const length = groups.filter((g) => g.groupLabel === label).length;
-      const heading = spec.groupBy === "wafer" ? shortTick(label) : label;
-      const dense = groupLabels.length > 8;
-      limits.annotations.push({ xref: "x", x: start + (length - 1) / 2,
-        yref: "paper", y: 1.02, xanchor: "center", yanchor: "bottom",
-        text: heading, textangle: dense && heading.length > 3 ? (groupLabels.length > 20 ? -75 : -55) : 0,
-        showarrow: false, font: { size: dense ? Math.min(spec.presentation ? 11 : 13 + graphFontOffset(), style.annotation) : style.annotation, color: t.text, family: CHART_FONT } });
-      if (start > 0) limits.shapes.push({ type: "line", xref: "x", x0: start - 0.5, x1: start - 0.5,
-        yref: "paper", y0: 0, y1: 1, line: { color: t.axis, width: 1, dash: "dot" } });
-      start += length;
-    }
-  }
+  if (hasGrouping) addGroupBlocks(t, groups, spec, style, limits.shapes, limits.annotations);
   layout.xaxis = {
     ...layout.xaxis,
     title: preview
@@ -523,7 +529,21 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
   }
   layout.shapes = limits.shapes;
   layout.annotations = limits.annotations;
-  return previewFigure(traces, layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${units ? ` [${units}]` : ""}`);
+  // Both point modes use WebGL interactively, so switching to fewer outliers
+  // does not switch back to costly SVG point elements. Static previews use SVG.
+  // Keep native boxes separate: Plotly box hovers use trace.name, not per-box
+  // hovertemplate/customdata. Point layers can be batched without losing identity.
+  const boxes: any[] = [];
+  const batches = new Map<string, any>();
+  for (const trace of traces) {
+    if (trace.type === "box") { boxes.push(trace); continue; }
+    const key = JSON.stringify([trace.type, trace.line, trace.fillcolor, trace.width, trace.marker]);
+    const batch = batches.get(key);
+    if (!batch) { batches.set(key, trace); continue; }
+    const columns = ["x", "y", "customdata"];
+    for (const column of columns) for (const value of trace[column]) batch[column].push(value);
+  }
+  return previewFigure([...boxes, ...batches.values()], layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${units ? ` [${units}]` : ""}`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -593,9 +613,9 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
       x: labels,
       y: groups.map((g) => g.unknownTotal ? null : g.yieldPct),
       yaxis: "y2",
-      line: { color: t.green, width: style.line * 2.2 },
+      line: { color: t.green, width: 2.4 * 2.2 },
       marker: {
-        size: style.marker,
+        size: Math.max(10, style.marker),
         color: t.green,
         line: { color: t.paper, width: Math.max(1, style.line * 0.5) },
       },
@@ -629,6 +649,7 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
     };
     layout.xaxis = {
       ...layout.xaxis,
+      type: "category",
       title: preview
         ? { text: "" }
         : {
@@ -731,6 +752,7 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
   layout.showlegend = false;
   layout.xaxis = {
     ...layout.xaxis,
+    type: "category",
     tickangle: angle,
     showticklabels: !preview,
     tickfont: { size: style.tick, color: t.muted, family: CHART_FONT },
@@ -930,121 +952,74 @@ export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
 /* ------------------------------------------------------------------ */
 
 export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
-  const t = chartTheme(opts.theme);
-  const spec = opts.spec;
-  const style = chartStyle(spec.presentation);
-  const labels = data.points.map((p) => p.label);
-  const means = data.points.map((p) => p.mean);
-  const lo = data.points.map((p) => p.mean - p.sd);
-  const hi = data.points.map((p) => p.mean + p.sd);
+  const t = chartTheme(opts.theme), spec = opts.spec;
+  const preview = opts.preview === true;
+  const style = chartStyle(preview ? false : spec.presentation);
+  let points = opts.facetLabel === undefined ? data.points
+    : data.points.filter((p) => p.groupLabel === opts.facetLabel);
+  const groupLabels = [...new Set(points.map((p) => p.groupLabel).filter(Boolean))];
+  const hasGrouping = opts.facetLabel === undefined && groupLabels.length > 0;
+  if (hasGrouping) points = groupLabels.flatMap((label) => points.filter((p) => p.groupLabel === label));
+  const labels = points.map((p) => p.label), n = points.length;
   const traces: any[] = [];
-
-  if (spec.showBand) {
-    traces.push({
-      type: "scatter",
-      mode: "lines",
-      x: labels,
-      y: lo,
-      line: { width: 0 },
-      hoverinfo: "skip",
-      showlegend: false,
-    });
-    traces.push({
-      type: "scatter",
-      mode: "lines",
-      x: labels,
-      y: hi,
-      line: { width: 0 },
-      fill: "tonexty",
-      fillcolor: t.blueFill,
-      hoverinfo: "skip",
-      showlegend: false,
-    });
+  // Separate traces per outer block prevent lines/bands crossing group boundaries.
+  const blocks = hasGrouping ? groupLabels : [opts.facetLabel ?? ""];
+  let offset = 0;
+  for (const label of blocks) {
+    const block = hasGrouping ? points.filter((p) => p.groupLabel === label) : points;
+    const color = hasGrouping ? categoricalColor(t, block[0].groupKey, label) : t.blue;
+    const fill = hasGrouping ? categoricalFill(t, block[0].groupKey, label) : t.blueFill;
+    const x = block.map((_, i) => offset + i);
+    const safe = (v: number) => spec.logY && v <= 0 ? null : v;
+    if (spec.showBand) {
+      traces.push({ type: "scatter", mode: "lines", x, y: block.map((p) => safe(p.mean - p.sd)),
+        line: { width: 0 }, hoverinfo: "skip", showlegend: false });
+      traces.push({ type: "scatter", mode: "lines", x, y: block.map((p) => safe(p.mean + p.sd)),
+        line: { width: 0 }, fill: "tonexty", fillcolor: fill, hoverinfo: "skip", showlegend: false });
+    }
+    traces.push({ type: "scatter", mode: "lines+markers", x, y: block.map((p) => safe(p.mean)),
+      line: { color, width: style.line * 1.8 },
+      marker: { size: style.marker, color, line: { color: t.paper, width: Math.max(1, style.line * 0.5) } },
+      customdata: block.map((p) => [p.sd, p.n, p.label, p.groupLabel]),
+      hovertemplate: `<b>%{customdata[2]}</b>${label ? " · %{customdata[3]}" : ""}<br>mean %{y:.5~g}${data.test.units ? " " + data.test.units : ""}<br>` +
+        "sd %{customdata[0]:.4~g} · n %{customdata[1]}<extra></extra>", showlegend: false });
+    offset += block.length;
   }
-
-  traces.push({
-    type: "scatter",
-    mode: "lines+markers",
-    x: labels,
-    y: means,
-    line: { color: t.blue, width: style.line * 1.8 },
-    marker: {
-      size: style.marker,
-      color: t.blue,
-      line: { color: t.paper, width: Math.max(1, style.line * 0.5) },
-    },
-    customdata: data.points.map((p) => [p.sd, p.n]),
-    hovertemplate:
-      `<b>%{x}</b><br>mean %{y:.5~g}${data.test.units ? " " + data.test.units : ""}<br>` +
-      "sd %{customdata[0]:.4~g} · n %{customdata[1]}<extra></extra>",
-  });
-
   const lsl = spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null;
   const usl = spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null;
   const { shapes, annotations } = limitLines(t, lsl, usl, "y", style, spec.logY);
   const short = labels.map(shortTick);
-  const n = labels.length;
   const stride = n > (spec.presentation ? 30 : 40) ? 2 : 1;
   const angle = n > (spec.presentation ? 10 : 12) && short.some((s) => s.length > 5) ? -45 : 0;
   const ticks = tickSubset(labels, stride);
-
-  const layout = baseLayout(t, opts.title, spec.presentation);
-  layout.margin = {
-    ...layout.margin,
-    l: style.margin.l,
-    r: style.margin.r,
+  const layout = baseLayout(t, preview ? "" : opts.title, spec.presentation);
+  layout.margin = { ...layout.margin, l: style.margin.l, r: style.margin.r,
     b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.2) : 0),
-  };
-  layout.xaxis = {
-    ...layout.xaxis,
-    tickmode: "array",
-    tickvals: ticks.map((i) => labels[i]),
-    ticktext: ticks.map((i) => short[i]),
-    tickangle: angle,
-    tickfont: {
-      size: style.tick,
-      color: t.muted,
-      family: CHART_FONT,
-    },
-    showgrid: false,
-    zeroline: false,
-    type: "category",
-  };
-  layout.yaxis = {
-    ...layout.yaxis,
-    title: {
-      text: axisTitle(testLabel(data.test), data.test.units, scaledFont(style.axisTitle, 0.62, spec.presentation)),
-      font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
-    },
-    type: spec.logY ? "log" : "linear",
-  };
-  const all = [...lo, ...hi].filter((v) => Number.isFinite(v));
-  let min = Infinity;
-  let max = -Infinity;
-  for (const v of all) {
-    if (v < min) min = v;
-    if (v > max) max = v;
+    t: layout.margin.t + (hasGrouping ? Math.round(style.annotation * (groupLabels.length > 8 ? 5 : 1.2)) : 0) };
+  layout.showlegend = false;
+  layout.xaxis = { ...layout.xaxis,
+    title: { text: categoryTitle(spec.xAxis), font: { size: style.axisTitle, color: t.muted, family: CHART_FONT } },
+    tickmode: "array", tickvals: ticks, ticktext: ticks.map((i) => short[i]), tickangle: angle,
+    tickfont: { size: style.tick, color: t.muted, family: CHART_FONT },
+    showgrid: false, zeroline: false, type: "linear", range: [-0.65, Math.max(0.65, n - 0.35)] };
+  layout.yaxis = { ...layout.yaxis,
+    title: { text: axisTitle(testLabel(data.test), data.test.units, scaledFont(style.axisTitle, 0.62, spec.presentation)),
+      font: { size: style.axisTitle, color: t.muted, family: CHART_FONT } }, type: spec.logY ? "log" : "linear" };
+  let min = Infinity, max = -Infinity;
+  for (const p of points) {
+    for (const v of spec.showBand ? [p.mean - p.sd, p.mean, p.mean + p.sd] : [p.mean]) {
+      if (Number.isFinite(v) && (!spec.logY || v > 0)) { min = Math.min(min, v); max = Math.max(max, v); }
+    }
   }
-  const meanStats = {
-    mean: data.points.reduce((a, p) => a + p.mean, 0) / Math.max(1, data.points.length),
-    sd: Math.sqrt(
-      data.points.reduce((a, p) => a + p.sd * p.sd, 0) / Math.max(1, data.points.length)
-    ),
-    min,
-    max,
-    q1: min,
-    q3: max,
-  };
-  applyAxisRange(layout, "y", spec, meanStats, lsl, usl, meanStats.min, meanStats.max);
-  if (addLabelBlocks(t, labels, shapes, annotations, style)) {
-    layout.margin.t = Math.max(
-      layout.margin.t,
-      style.margin.t + Math.round(style.annotation * 1.1)
-    );
+  const meanStats = { mean: points.reduce((a, p) => a + p.mean, 0) / Math.max(1, points.length),
+    sd: Math.sqrt(points.reduce((a, p) => a + p.sd * p.sd, 0) / Math.max(1, points.length)), min, max, q1: min, q3: max };
+  applyAxisRange(layout, "y", spec, meanStats, lsl, usl, min, max);
+  if (hasGrouping) addGroupBlocks(t, points, spec, style, shapes, annotations);
+  else if (addLabelBlocks(t, labels, shapes, annotations, style)) {
+    layout.margin.t = Math.max(layout.margin.t, style.margin.t + Math.round(style.annotation * 1.1));
   }
-  layout.shapes = shapes;
-  layout.annotations = annotations;
-  return { data: traces, layout };
+  layout.shapes = shapes; layout.annotations = annotations;
+  return previewFigure(traces, layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${data.test.units ? ` [${data.test.units}]` : ""}`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1173,7 +1148,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
           legendgroup: s.name || undefined,
           legendrank: i,
           marker: {
-            size: style.marker,
+            size: style.marker * 2,
             color: finite.map((p) => p.z as number),
             colorscale: [
               [0, t.heat[0]],
@@ -1204,7 +1179,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
           showlegend: false,
           legendgroup: s.name || undefined,
           marker: {
-            size: Math.max(3, style.marker * 0.7),
+            size: Math.max(3, style.marker * 0.7) * 2,
             color: t.gray,
             opacity: 0.45,
             line: { width: 0 },
@@ -1234,7 +1209,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
         legendgroup: s.name,
         legendrank: rank,
         marker: {
-          size: style.marker,
+          size: style.marker * 2,
           color: facet ? t.blue : categoricalColor(t, s.key, s.name),
           symbol: facet ? "circle" : symbols[rank % symbols.length],
           opacity: 0.85,
@@ -1260,7 +1235,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
         customdata: arr.customdata,
         showlegend: false,
         marker: {
-          size: style.marker,
+          size: style.marker * 2,
           color: t.blue,
           opacity: 0.8,
           line: { width: 0 },
@@ -1311,7 +1286,7 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
           y0: intercept + slope * lo,
           x1: hi,
           y1: intercept + slope * hi,
-          line: { color: t.red, width: Math.max(2.5, style.line * 2.2) },
+          line: { color: t.red, width: style.line },
           layer: "above",
         };
         if (data.r !== null && Number.isFinite(data.r)) {

@@ -4,6 +4,7 @@ import type { CustomColumn, Filter } from "../types";
 import * as api from "../lib/api";
 import { binColor } from "../lib/theme";
 import { fmtInt, tidyName } from "../lib/format";
+import { fuzzyMatch } from "../lib/search";
 import {
   IconChevronDown,
   IconChevronUp,
@@ -15,18 +16,6 @@ import {
   IconX,
 } from "./Icons";
 
-function fuzzyMatch(text: string, needle: string): boolean {
-  if (!needle) return true;
-  const hay = text.toLowerCase();
-  if (hay.includes(needle)) return true;
-  let pos = 0;
-  for (const ch of needle) {
-    pos = hay.indexOf(ch, pos);
-    if (pos < 0) return false;
-    pos++;
-  }
-  return true;
-}
 
 function FilterPanel() {
   const info = useStore((s) => s.info);
@@ -508,6 +497,19 @@ function TestList() {
         return tokens.every((token) => fuzzyMatch(hay, token));
       });
   }, [info, q]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || !["ArrowDown", "ArrowUp"].includes(e.key)) return;
+      const el = e.target as HTMLElement;
+      if (el.closest("input,select,textarea,[contenteditable=true],.modal-backdrop") || useStore.getState().busy || !rows.length) return;
+      const current = rows.findIndex((row) => row.i === selected);
+      const next = current < 0 ? 0 : Math.max(0, Math.min(rows.length - 1, current + (e.key === "ArrowDown" ? 1 : -1)));
+      e.preventDefault(); selectTest(rows[next].i);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [rows, selected, selectTest]);
 
   useEffect(() => {
     activeRef.current?.scrollIntoView({ block: "nearest" });

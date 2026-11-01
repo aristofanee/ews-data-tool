@@ -1,0 +1,40 @@
+import { chromium } from "playwright-core";
+import { spawn } from "node:child_process";
+import assert from "node:assert/strict";
+const server = spawn(process.execPath, ["node_modules/vite/bin/vite.js", "--host", "127.0.0.1", "--port", "1421"], { stdio: "ignore", windowsHide: true });
+let browser;
+try {
+  for (let i=0;i<80;i++) { try { if ((await fetch("http://127.0.0.1:1421")).ok) break; } catch {} await new Promise(r=>setTimeout(r,250)); }
+  browser=await chromium.launch({channel:"msedge",headless:true});
+  const page=await browser.newPage({viewport:{width:1560,height:980}});
+  const errors=[]; page.on("pageerror",e=>errors.push(e.message));
+  await page.goto("http://127.0.0.1:1421"); await page.getByText("Load demo data").click(); await page.waitForSelector(".boxlayer path.box");
+  const selected=()=>page.evaluate(async()=>(await import("/src/store.ts")).useStore.getState().spec.test);
+  assert.equal(await selected(),0); await page.keyboard.press("ArrowDown"); assert.equal(await selected(),1);
+  await page.keyboard.press("ArrowUp"); assert.equal(await selected(),0);
+  await page.locator(".test-panel input").focus(); await page.keyboard.press("ArrowDown"); assert.equal(await selected(),0);
+  await page.locator(".tab").filter({hasText:"Scatter"}).click();
+  await page.getByRole("combobox",{name:"Y test"}).fill("rds");
+  const option=page.getByRole("listbox",{name:"Y test matches"}).getByRole("option");
+  assert.equal(await option.count(),1); await option.click();
+  assert.equal(await selected(),0);
+  await page.waitForTimeout(250);
+  const scatter=await page.evaluate(()=>{const g=document.querySelector(".js-plotly-plot");return {marker:g.data[0].marker.size,line:g.layout.shapes.find(s=>s.type==="line").line.width};});
+  assert.equal(scatter.marker,8); assert.equal(scatter.line,1.4);
+  await page.locator(".tab").filter({hasText:"Pareto"}).click(); await page.waitForTimeout(200);
+  assert.equal(await page.evaluate(()=>document.querySelector(".js-plotly-plot")._fullLayout.xaxis.type),"category");
+  await page.evaluate(async()=> (await import("/src/store.ts")).useStore.getState().patchSpec({xAxis:"site"}));
+  await page.waitForTimeout(200);
+  assert.ok(await page.evaluate(()=>document.querySelector(".js-plotly-plot").data.find(t=>t.name==="Yield").marker.size>=10));
+  await page.locator(".tab").filter({hasText:"Wafer map"}).click(); await page.waitForSelector(".map-canvas"); await page.waitForTimeout(300);
+  const canvas=page.locator(".map-canvas"), bounds=await canvas.boundingBox();
+  const before=await canvas.evaluate(c=>c.toDataURL());
+  const cdp=await page.context().newCDPSession(page);
+  await cdp.send("Input.synthesizePinchGesture",{x:bounds.x+bounds.width*0.4,y:bounds.y+bounds.height*0.5,scaleFactor:1.5,gestureSourceType:"mouse"});
+  await page.waitForTimeout(200);
+  assert.notEqual(await canvas.evaluate(c=>c.toDataURL()),before,"browser pinch gesture must zoom the map");
+  assert.equal(await page.evaluate(()=>window.visualViewport.scale),1,"pinch must not scale the page");
+  const white=await canvas.evaluate(c=>{const px=c.getContext("2d").getImageData(c.width-8,Math.floor(c.height/2),1,1).data;return [...px];});
+  assert.deepEqual(white,[255,255,255,255]);
+  assert.deepEqual(errors,[]); console.log(JSON.stringify({keyboard:true,search:true,scatter,pareto:"category",enginePinch:true,legendPixel:white,errors}));
+} finally {await browser?.close();server.kill();}

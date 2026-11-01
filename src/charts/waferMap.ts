@@ -83,6 +83,20 @@ interface MapColors {
 
 const FONT = '"Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif';
 
+class LegendBounds {
+  left = Infinity; top = Infinity; right = -Infinity; bottom = -Infinity;
+  include(x: number, y: number, width: number, height: number) {
+    this.left = Math.min(this.left, x); this.top = Math.min(this.top, y);
+    this.right = Math.max(this.right, x + width); this.bottom = Math.max(this.bottom, y + height);
+  }
+  text(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth?: number) {
+    const m = ctx.measureText(text), factor = maxWidth ? Math.min(1, maxWidth / Math.max(1, m.width)) : 1;
+    this.include(x - m.actualBoundingBoxLeft * factor, y - m.actualBoundingBoxAscent,
+      (m.actualBoundingBoxLeft + m.actualBoundingBoxRight) * factor, m.actualBoundingBoxAscent + m.actualBoundingBoxDescent);
+    if (maxWidth === undefined) ctx.fillText(text, x, y); else ctx.fillText(text, x, y, maxWidth);
+  }
+}
+
 function mapColors(theme: Theme): MapColors {
   return theme === "dark"
     ? {
@@ -137,6 +151,8 @@ export class WaferMapRenderer {
   private h = 0;
   private dpr = 1;
   private scale = 1;
+  private legendLeft = Infinity;
+  private legendCanvas: HTMLCanvasElement | null = null;
   private colorCache = new Map<number, string>();
   private colorPalette = "";
   /**
@@ -262,6 +278,7 @@ export class WaferMapRenderer {
   hitTest(clientX: number, clientY: number): MapHit | null {
     if (!this.data) return null;
     const rect = this.canvas.getBoundingClientRect();
+    if ((clientX - rect.left) / this.scale >= this.legendLeft) return null;
     const px = clientX - rect.left;
     const py = clientY - rect.top;
     const gx = (px - this.cx - this.panX) / this.zoom / this.cellW + this.dieCx;
@@ -388,11 +405,10 @@ export class WaferMapRenderer {
       !showLegend
         ? 0
         : mode === "bin"
-          ? Math.min(pres ? 290 : 196, Math.max(pres ? 190 : 120, w * (pres ? 0.34 : 0.3)))
-          : pres
-            ? 164
-            : 108;
+          ? Math.min(290, Math.max(190, w * 0.34))
+          : 164;
     const pad = !showLegend ? 4 : pres ? 20 : 14;
+    this.legendLeft = showLegend ? w - cbarW : Infinity;
     const availW = Math.max(40, w - cbarW - pad * 2);
     const availH = Math.max(40, h - pad * 2);
     const cx = pad + availW / 2;
@@ -516,24 +532,44 @@ export class WaferMapRenderer {
     ctx.restore();
 
     const barX = w - cbarW + (pres ? 14 : 10);
+    const legendColors = mapColors("light");
+    const bounds = new LegendBounds();
+    let legendCtx: CanvasRenderingContext2D | null = null;
+    if (showLegend) {
+      this.legendCanvas ??= document.createElement("canvas");
+      if (this.legendCanvas.width !== base.width || this.legendCanvas.height !== base.height) {
+        this.legendCanvas.width = base.width; this.legendCanvas.height = base.height;
+      }
+      legendCtx = this.legendCanvas.getContext("2d");
+      legendCtx?.setTransform(dpr * this.scale, 0, 0, dpr * this.scale, 0, 0);
+      legendCtx?.clearRect(0, 0, w, h);
+    }
 
-    if (showLegend && mode === "value") {
+    if (legendCtx && mode === "value") {
       this.drawColorbar(
-        ctx,
-        t,
+        legendCtx,
+        legendColors,
         barX,
         pad + 8,
-        Math.min(pres ? 26 : 16, cbarW * 0.16),
+        26,
         Math.min(availH, h - pad * 2 - 20),
         lo,
         hi,
-        pres
+        pres, bounds
       );
-    } else if (showLegend) {
+    } else if (legendCtx) {
       // Keep the bin counts off the canvas edge. The bin legend uses the full
       // reserved width, unlike the colour bar whose labels sit inside it.
       const legendRightPad = pres ? 24 : 20;
-      this.drawBinLegend(ctx, t, barX, pad + 10, cbarW - 14 - legendRightPad, pres);
+      this.drawBinLegend(legendCtx, legendColors, barX, pad + 24, cbarW - 14 - legendRightPad, pres, bounds);
+    }
+    if (legendCtx && this.legendCanvas && Number.isFinite(bounds.left)) {
+      const padding = 16;
+      this.legendLeft = bounds.left - padding;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(bounds.left - padding, bounds.top - padding,
+        bounds.right - bounds.left + padding * 2, bounds.bottom - bounds.top + padding * 2);
+      ctx.drawImage(this.legendCanvas, 0, 0, w, h);
     }
 
     this.baseDirty = false;
@@ -551,6 +587,9 @@ export class WaferMapRenderer {
 
     ctx.setTransform(dpr * this.scale, 0, 0, dpr * this.scale, 0, 0);
     ctx.save();
+    if (Number.isFinite(this.legendLeft)) {
+      ctx.beginPath(); ctx.rect(0, 0, this.legendLeft, this.h / this.scale); ctx.clip();
+    }
     ctx.translate(this.cx + this.panX, this.cy + this.panY);
     ctx.scale(this.zoom, this.zoom);
 
@@ -646,7 +685,7 @@ export class WaferMapRenderer {
     height: number,
     lo: number,
     hi: number,
-    pres = false
+    pres = false, bounds = new LegendBounds()
   ): void {
     const k = pres ? 1.55 : 1;
     const textSize = Math.round(10 * k + (pres ? 0 : 2 + graphFontOffset()));
@@ -654,6 +693,7 @@ export class WaferMapRenderer {
     // The old 7px gap let their bounding boxes overlap after larger fonts.
     const barY = y + textSize * 2 + 12;
     const barH = Math.max(20, height - (barY - y) - textSize / 2);
+    bounds.include(x - 1, barY - 1, width + 2, barH + 2);
     const grad = ctx.createLinearGradient(0, barY + barH, 0, barY);
     for (let i = 0; i <= 24; i++) {
       grad.addColorStop(i / 24, this.colorFor(i / 24));
@@ -670,11 +710,11 @@ export class WaferMapRenderer {
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
     // Fit to the actual reserved legend width, not a character count.
-    const maxUnitsWidth = Math.max(20, this.w / this.scale - x - 8);
+    const maxUnitsWidth = Math.max(20, this.w / this.scale - x - 24);
     let unitsLabel = units;
     while (unitsLabel.length > 1 && ctx.measureText(unitsLabel).width > maxUnitsWidth) unitsLabel = unitsLabel.slice(0, -1);
     if (unitsLabel !== units) { unitsLabel = unitsLabel.slice(0, -1) + "…"; }
-    ctx.fillText(unitsLabel, x, y + textSize);
+    bounds.text(ctx, unitsLabel, x, y + textSize);
 
     ctx.font = `${textSize}px ${FONT}`;
     ctx.textBaseline = "middle";
@@ -689,7 +729,8 @@ export class WaferMapRenderer {
       ctx.stroke();
       ctx.fillStyle = t.text;
       ctx.textAlign = "left";
-      ctx.fillText(fmtMap(v), x + width + 7 * k, yy);
+      bounds.include(x + width, yy - 1, 4 * k, 2);
+      bounds.text(ctx, fmtMap(v), x + width + 7 * k, yy);
     }
 
     const mark = (v: number, label: string) => {
@@ -706,7 +747,8 @@ export class WaferMapRenderer {
       ctx.font = `700 ${Math.round(9 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
       ctx.fillStyle = "#e11d48";
       ctx.textAlign = "right";
-      ctx.fillText(label, x - 5 * k, yy);
+      bounds.include(x - 2 * k, yy - k, width + 4 * k, 2 * k);
+      bounds.text(ctx, label, x - 5 * k, yy);
     };
     if (this.opts) {
       mark(this.opts.lsl ?? NaN, "LSL");
@@ -720,7 +762,7 @@ export class WaferMapRenderer {
     x: number,
     y: number,
     width: number,
-    pres = false
+    pres = false, bounds = new LegendBounds()
   ): void {
     const k = pres ? 1.55 : 1;
     const soft = this.opts?.binCategory === "soft";
@@ -740,9 +782,9 @@ export class WaferMapRenderer {
     ctx.fillStyle = t.muted;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
-    ctx.fillText(soft ? "SBIN" : "HBIN", x, y);
-    let yy = y + 16 * k + (pres ? 0 : graphFontOffset());
-    const lineHeight = 13 * k + (pres ? 0 : graphFontOffset());
+    bounds.text(ctx, soft ? "SBIN" : "HBIN", x, y);
+    let yy = y + 25;
+    const lineHeight = Math.max(21, 13 * k + (pres ? 0 : graphFontOffset()));
     ctx.font = `${Math.round(10 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
     for (const [code, count] of shown) {
       const pass = this.opts?.binPass
@@ -750,6 +792,7 @@ export class WaferMapRenderer {
         : code === 1;
       ctx.fillStyle = binColor(code, pass);
       ctx.fillRect(x, yy, 10 * k, 10 * k);
+      bounds.include(x, yy, 10 * k, 10 * k);
       ctx.fillStyle = t.text;
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
@@ -762,19 +805,19 @@ export class WaferMapRenderer {
         else line = line ? `${line} ${word}` : word;
       }
       if (line) lines.push(line);
-      lines.forEach((text, i) => ctx.fillText(text, x + 15 * k, yy + 5 * k + i * lineHeight, maxWidth));
+      lines.forEach((text, i) => bounds.text(ctx, text, x + 15 * k, yy + 5 * k + i * lineHeight, maxWidth));
       ctx.fillStyle = t.muted;
       ctx.textAlign = "right";
-      ctx.fillText(fmtCount(count), x + width, yy + 5 * k);
-      yy += Math.max(18 * k, lines.length * lineHeight + 5 * k);
+      bounds.text(ctx, fmtCount(count), x + width, yy + 5 * k);
+      yy += Math.max(18 * 1.55, lines.length * lineHeight + 5 * 1.55);
     }
     if (rest.length > 0) {
       const total = rest.reduce((a, [, c]) => a + c, 0);
       ctx.fillStyle = t.muted;
       ctx.textAlign = "left";
-      ctx.fillText(`+ ${rest.length} more bins`, x + 15 * k, yy + 5 * k);
+      bounds.text(ctx, `+ ${rest.length} more bins`, x + 15 * k, yy + 5 * k);
       ctx.textAlign = "right";
-      ctx.fillText(fmtCount(total), x + width, yy + 5 * k);
+      bounds.text(ctx, fmtCount(total), x + width, yy + 5 * k);
     }
     ctx.textBaseline = "alphabetic";
   }

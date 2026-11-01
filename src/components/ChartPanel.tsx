@@ -228,6 +228,9 @@ function facetsFor(data: PlotData, spec: PlotSpec): Facet[] {
       (label) => ({ label })
     );
   }
+  if (data.kind === "trend") {
+    return [...new Set(data.data.points.map((p) => p.groupLabel).filter(Boolean))].map((label) => ({ label }));
+  }
   if (data.kind === "hist") {
     return data.data.groups.map((g) => ({ key: g.key, label: g.label }));
   }
@@ -275,7 +278,7 @@ function buildFigure(
         preview,
       });
     case "trend":
-      return figureTrend(data.data, { theme, spec, title });
+      return figureTrend(data.data, { theme, spec, title, facetLabel: facet?.label, preview });
     case "scatter":
       return figureScatter(data.data, {
         theme,
@@ -807,8 +810,11 @@ export function ChartPanel() {
             />
           ) : splitActive && currentData ? (
             <SplitPlotView data={currentData} spec={spec} theme={theme} facets={facets} />
-          ) : figure ? (
-            <PlotlyChart figure={figure} hostRef={plotRef} cacheKey={viewKey} />
+          ) : figure || (!spec.splitPlots && ["box", "hist", "scatter", "trend", "pareto"].includes(spec.type)) ? (
+            <>
+              <PlotlyChart key={spec.type} figure={figure} hostRef={plotRef} cacheKey={viewKey} />
+              {!figure && <div className="chart-placeholder" style={{ position: "absolute", inset: 0 }}><div className="spinner" /><span>Preparing plot…</span></div>}
+            </>
           ) : (
             <div className="chart-placeholder">
               <div className="spinner" />

@@ -395,44 +395,13 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
     }
     writeln!(w).map_err(|e| e.to_string())?;
 
-    // Metadata rows understood by the importer. Keeping test numbers, units
-    // and limits here makes an exported CSV a complete round-trip instead of
-    // losing everything except the measurements.
-    let mut meta = String::from("Tests#");
-    for _ in 0..6 {
-        meta.push(',');
-    }
-    for t in ds.tests.iter() {
-        meta.push(',');
-        if let Some(n) = t.number {
-            meta.push_str(&n.to_string());
-        }
-    }
-    for _ in ds.custom_cols.iter() {
-        meta.push(',');
-    }
-    writeln!(w, "{meta}").map_err(|e| e.to_string())?;
-
-    let mut units = String::from("Unit");
-    for _ in 0..6 {
-        units.push(',');
-    }
-    for t in ds.tests.iter() {
-        units.push(',');
-        units.push_str(&csv_escape(&t.units));
-    }
-    for _ in ds.custom_cols.iter() {
-        units.push(',');
-    }
-    writeln!(w, "{units}").map_err(|e| e.to_string())?;
-
-    let mut lows = String::from("LowL");
+    let mut lows = String::from("LSL");
     for _ in 0..6 {
         lows.push(',');
     }
     for t in ds.tests.iter() {
         lows.push(',');
-        if let Some(v) = t.lo_limit.or(t.lo_spec) {
+        if let Some(v) = t.lo_spec.or(t.lo_limit) {
             lows.push_str(&fmt_csv_num(v));
         }
     }
@@ -441,13 +410,13 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
     }
     writeln!(w, "{lows}").map_err(|e| e.to_string())?;
 
-    let mut highs = String::from("HighL");
+    let mut highs = String::from("USL");
     for _ in 0..6 {
         highs.push(',');
     }
     for t in ds.tests.iter() {
         highs.push(',');
-        if let Some(v) = t.hi_limit.or(t.hi_spec) {
+        if let Some(v) = t.hi_spec.or(t.hi_limit) {
             highs.push_str(&fmt_csv_num(v));
         }
     }
@@ -574,11 +543,22 @@ mod tests {
         assert_eq!(imp.site, vec![Some(0), Some(3)]);
         assert_eq!(imp.tests.len(), 1, "site must not become a measurement test");
         let mut ds = crate::model::Dataset::new(); ds.merge(imp);
+        ds.tests[0].number = Some(1001); ds.tests[0].lo_spec = Some(1.0); ds.tests[0].hi_spec = Some(3.0);
+        ds.tests[0].lo_limit = Some(0.5); ds.tests[0].hi_limit = Some(4.0);
+        ds.custom_cols.push(crate::model::CustomColumn { name: "Split".into(), categories: vec!["".into(), "Group A".into()], wafer_values: vec![1] });
         super::write_csv(&ds, output.to_str().unwrap(), &crate::model::Filter::default()).unwrap();
+        let text = std::fs::read_to_string(&output).unwrap();
+        assert!(text.lines().next().unwrap().contains("1001 - V [V]"));
+        assert!(text.lines().nth(1).unwrap().starts_with("LSL,"));
+        assert!(text.lines().nth(2).unwrap().starts_with("USL,"));
+        assert!(!text.contains("Tests#") && !text.contains("\nUnit,"));
         let roundtrip = crate::csv_io::import_csv(&output, &mut |_, _| {}).unwrap();
         assert_eq!(roundtrip.site, ds.site);
         assert_eq!(roundtrip.cols, ds.cols);
         assert_eq!(roundtrip.tests[0].units, "V");
+        assert_eq!(roundtrip.tests[0].number, Some(1001)); assert_eq!(roundtrip.tests[0].lo_spec, Some(1.0));
+        let split = roundtrip.custom_cols.iter().find(|c| c.name == "Split").unwrap();
+        assert_eq!(split.label(split.wafer_values[0]), "Group A");
         let _ = std::fs::remove_file(source); let _ = std::fs::remove_file(output);
     }
 

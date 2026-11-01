@@ -888,9 +888,15 @@ pub fn import_csv_with_mapping(
     for &i in numeric.iter() {
         let (name, unit) = split_units(&headers[i]);
         let mut t = TestInfo::new(name);
+        if let Some((number, name)) = t.name.split_once(" - ") {
+            if let Ok(number) = number.trim().parse::<u32>() {
+                let name = name.trim().to_string();
+                if !name.is_empty() { t.number = Some(number); t.name = name; }
+            }
+        }
         t.units = unit;
         if let Some(m) = col_meta.get(&i) {
-            t.number = m.number;
+            t.number = m.number.or(t.number);
             if let Some(u) = &m.unit {
                 if !u.is_empty() {
                     t.units = u.clone();

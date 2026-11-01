@@ -3,6 +3,7 @@ import { defaultSpec, type LimitMode, type PlotType } from "../types";
 import { PALETTES, paletteGradient } from "../lib/theme";
 import { fmt, fmtInt, testLabelWithUnits } from "../lib/format";
 import type { ReactNode } from "react";
+import { TestCombobox } from "./TestCombobox";
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -375,7 +376,7 @@ export function Inspector() {
 
       {spec.type === "trend" && (
         <Section title="Trend">
-          <Row label="Group by">
+          <Row label="X axis">
             <select
               className="input"
               value={spec.xAxis}
@@ -384,6 +385,14 @@ export function Inspector() {
               {categoryOptions()}
             </select>
           </Row>
+          <Row label="Group by">
+            <select className="input" value={spec.groupBy}
+              onChange={(e) => patch({ groupBy: e.target.value })}>
+              {categoryOptions("None")}
+            </select>
+          </Row>
+          <Check label="Split into different plots" checked={spec.splitPlots}
+            onChange={(v) => patch({ splitPlots: v })} />
           <Check label="±1 σ band" checked={spec.showBand} onChange={(v) => patch({ showBand: v })} />
         </Section>
       )}
@@ -391,14 +400,7 @@ export function Inspector() {
       {isScatter && (
         <Section title="Scatter">
           <Row label="Y test">
-            <select
-              className="input"
-              value={spec.scatterY ?? ""}
-              onChange={(e) => patch({ scatterY: e.target.value === "" ? null : Number(e.target.value) })}
-            >
-              {spec.scatterY === null && <option value="">Select…</option>}
-              {testOptions}
-            </select>
+            <TestCombobox tests={info.tests} value={spec.scatterY} onChange={(value) => patch({ scatterY: value })} />
           </Row>
           <Row label="Group by">
             <select

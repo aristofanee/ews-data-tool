@@ -153,7 +153,9 @@ export function paletteColor(id: string, t: number): string {
   return rgbToHex(r, g, b);
 }
 
-const FAILURE_COLORS = ["#2563eb", "#f5b301", "#ef4444", "#8b5cf6", "#f97316", "#06b6d4", "#ec4899", "#64748b", "#0ea5e9", "#a855f7", "#d97706", "#e11d48", "#4f46e5", "#db2777", "#c026d3", "#ea580c", "#475569"];
+// Discrete hues, interleaved with dark/light alternatives. Green is reserved
+// for bin 1; a bin's color stays stable across filters, maps and Pareto charts.
+const FAILURE_COLORS = ["#2563eb", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#92400e", "#475569", "#f97316", "#c084fc", "#1e3a8a", "#eab308", "#831843", "#38bdf8", "#fda4af", "#a16207"];
 
 export function binColor(code: number, _pass = code === 1): string {
   if (code === 65535) return "#94a3b8";

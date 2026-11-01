@@ -1022,6 +1022,17 @@ pub struct HistResponse {
     pub excluded: usize,
 }
 
+fn auto_hist_bins(n: usize, s: &Summary) -> usize {
+    if n <= 1 || s.max <= s.min { return 1; }
+    // Bound FD's sensitivity to distant extremes by population size.
+    let cap = ((2.0 * ((n as f64).log2() + 1.0)).ceil() as usize)
+        .min((n as f64).sqrt().ceil() as usize).clamp(1, 80);
+    let iqr = (s.q3 as f64 - s.q1 as f64).max(0.0);
+    let width = 2.0 * iqr / (n as f64).cbrt();
+    let proposed = if width > 0.0 { ((s.max as f64 - s.min as f64) / width).ceil() as usize } else { cap };
+    proposed.clamp(8.min(cap), cap)
+}
+
 pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
     let test = ds
         .tests
@@ -1076,18 +1087,7 @@ pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
         };
     }
     let (lo, hi) = (summary.min, summary.max);
-    let n_bins = req.bins.unwrap_or_else(|| {
-        let n = vals.len() as f64;
-        let iqr = (summary.q3 - summary.q1) as f64;
-        if iqr > 0.0 && n > 0.0 {
-            let w = 2.0 * iqr / n.cbrt();
-            if w > 0.0 {
-                let b = ((hi - lo) as f64 / w).ceil() as usize;
-                return b.clamp(8, 120);
-            }
-        }
-        (n.sqrt() as usize).clamp(8, 80)
-    });
+    let n_bins = req.bins.unwrap_or_else(|| auto_hist_bins(vals.len(), &summary));
     let n_bins = n_bins.max(1);
     let width = if hi > lo {
         (hi - lo) / n_bins as f32
@@ -1147,6 +1147,8 @@ pub struct TrendRequest {
     #[serde(default)]
     pub by: String,
     #[serde(default)]
+    pub group_by: Option<String>,
+    #[serde(default)]
     pub filter: Filter,
 }
 
@@ -1154,6 +1156,8 @@ pub struct TrendRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TrendPoint {
     pub label: String,
+    pub group_key: u16,
+    pub group_label: String,
     pub mean: f32,
     pub min: f32,
     pub max: f32,
@@ -1185,28 +1189,33 @@ pub fn trend(ds: &Dataset, req: &TrendRequest) -> TrendResponse {
         };
     }
     let mask = ds.base_mask(&req.filter);
+    let (stat_keep, _) = stat_keep_rows(ds, req.test, &req.filter, None)
+        .unwrap_or((vec![true; ds.rows], 0));
     let col = &ds.cols[req.test];
     let multi_lot = ds.lots.len() > 1;
     let by = if req.by.is_empty() { "wafer" } else { req.by.as_str() };
-    let mut buckets: HashMap<u16, (String, Vec<f32>)> = HashMap::new();
+    let group_by = req.group_by.as_deref().filter(|s| !s.is_empty() && *s != "none");
+    let mut buckets: HashMap<(u16, u16), (String, String, Vec<f32>)> = HashMap::new();
     for r in 0..ds.rows {
-        if !mask[r] || !col[r].is_finite() {
+        if !mask[r] || !stat_keep[r] || !col[r].is_finite() {
             continue;
         }
         let (key, label) = category_for_row(ds, by, r, multi_lot);
-        buckets.entry(key).or_insert((label, Vec::new())).1.push(col[r]);
+        let (group_key, group_label) = group_by
+            .map(|cat| category_for_row(ds, cat, r, multi_lot))
+            .unwrap_or((0, String::new()));
+        buckets.entry((key, group_key)).or_insert((label, group_label, Vec::new())).2.push(col[r]);
     }
-    let mut rows: Vec<(u16, String, Vec<f32>)> = buckets
-        .into_iter()
-        .map(|(key, (label, values))| (key, label, values))
-        .collect();
-    rows.sort_by(|a, b| natural_cmp(&a.1, &b.1));
+    let mut rows: Vec<_> = buckets.into_iter().collect();
+    rows.sort_by(|a, b| natural_cmp(&a.1.1, &b.1.1).then_with(|| natural_cmp(&a.1.0, &b.1.0)));
     let mut points = Vec::new();
-    for (_, label, v) in rows {
+    for ((_, group_key), (label, group_label, v)) in rows {
         let m = mean(&v);
         let sd = std_dev(&v, m);
         points.push(TrendPoint {
             label,
+            group_key,
+            group_label,
             mean: m,
             min: v.iter().copied().fold(f32::INFINITY, f32::min),
             max: v.iter().copied().fold(f32::NEG_INFINITY, f32::max),
@@ -1590,6 +1599,16 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn automatic_histogram_bins_handle_extremes_and_small_populations() {
+        let values: Vec<f32> = (0..10000).map(|i| 1.0 + (i % 100) as f32 * 0.001).chain([100000.0]).collect();
+        let s = crate::stats::summarize(&values);
+        let bins = super::auto_hist_bins(values.len(), &s);
+        assert!(bins <= 30);
+        assert_eq!(super::auto_hist_bins(1, &crate::stats::summarize(&[1.0])), 1);
+        assert_eq!(super::auto_hist_bins(1000, &crate::stats::summarize(&vec![1.0; 1000])), 1);
+        assert!(super::auto_hist_bins(2, &crate::stats::summarize(&[1.0, 2.0])) <= 2);
+    }
     use super::*;
     use crate::model::{StatFilter, StatKind, TestInfo, WaferInfo};
     use crate::stdf::import_stdf;
@@ -1624,6 +1643,37 @@ mod tests {
         assert_eq!(b.groups[0].summary.q1, 1.0);
         assert_eq!(b.groups[0].summary.whisker_hi, 3.0);
         assert_eq!(b.groups[0].positive_summary.median, 2.5);
+    }
+
+    #[test]
+    fn trend_categories_and_filtered_statistics_match_box_plot() {
+        let mut ds = small_dataset(&[1.0, 2.0, 3.0, 100.0, 5.0, 6.0, 7.0, 8.0]);
+        ds.wafers.push(ds.wafers[0].clone());
+        ds.wafers[1].name = "W2".into();
+        ds.wafer_of_row = vec![0, 0, 0, 0, 1, 1, 1, 1];
+        ds.site = vec![Some(0), Some(1), Some(0), Some(1), Some(0), Some(1), Some(0), None];
+        for stat in [None, Some(StatFilter { kind: StatKind::Sigma, k: 1.0, per_wafer: false }),
+            Some(StatFilter { kind: StatKind::Sigma, k: 1.0, per_wafer: true })] {
+            let filter = Filter { stat, ..Filter::default() };
+            for by in ["site", "wafer", "hbin"] {
+                for group in ["none", "wafer", "site"] {
+                    let b = box_plot(&ds, &BoxRequest { test: 0, x_axis: by.into(),
+                        group_by: Some(group.into()), filter: filter.clone(), max_points: Some(1) });
+                    let t = trend(&ds, &TrendRequest { test: 0, by: by.into(),
+                        group_by: Some(group.into()), filter: filter.clone() });
+                    assert_eq!(t.points.len(), b.groups.len());
+                    for p in &t.points {
+                        let g = b.groups.iter().find(|g| g.x_label == p.label && g.group_label == p.group_label).unwrap();
+                        assert_eq!(p.group_key, g.group_key);
+                        assert_eq!(p.n, g.summary.n);
+                        assert!((p.mean - g.summary.mean).abs() < 1e-5);
+                        assert!((p.sd - g.summary.sd).abs() < 1e-5);
+                        assert_eq!(p.min, g.summary.min);
+                        assert_eq!(p.max, g.summary.max);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1868,6 +1918,7 @@ mod tests {
             &TrendRequest {
                 test,
                 by: "wafer".to_string(),
+                group_by: None,
                 filter: filter.clone(),
             },
         );

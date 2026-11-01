@@ -147,10 +147,12 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
     // overlay instead of the canvas itself.
     const onPinch = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
+      const bounds = wrap.getBoundingClientRect();
+      if (e.clientX < bounds.left || e.clientX > bounds.right || e.clientY < bounds.top || e.clientY > bounds.bottom) return;
       e.stopPropagation();
       onWheel(e);
     };
-    wrap.addEventListener("wheel", onPinch, { passive: false, capture: true });
+    document.addEventListener("wheel", onPinch, { passive: false, capture: true });
 
     readyRef.current?.({
       toDataURL: (format = "jpeg", themeOverride, width = 1600, height = 1000) => {
@@ -172,7 +174,7 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
     return () => {
       ro.disconnect();
       canvas.removeEventListener("wheel", onWheel);
-      wrap.removeEventListener("wheel", onPinch, true);
+      document.removeEventListener("wheel", onPinch, true);
       rendererRef.current = null;
       readyRef.current?.(null);
     };
@@ -186,7 +188,8 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
   }, [data, opts]);
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 && (e.button !== 1 || preview)) return;
+    if (e.button === 1) e.preventDefault();
     dragRef.current = { x: e.clientX, y: e.clientY, moved: false };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
@@ -223,7 +226,7 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
   const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const moved = dragRef.current?.moved ?? false;
     endDrag(e);
-    if (!moved && onOpen) onOpen();
+    if (e.button === 0 && !moved && onOpen) onOpen();
   };
 
   const onLeave = () => {

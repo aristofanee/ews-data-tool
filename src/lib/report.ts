@@ -399,7 +399,16 @@ export async function generateReport(opts: {
       }
       case "trend": {
         if (spec.test === null) continue;
-        const d = await api.trend({ test: spec.test, by: spec.xAxis, filter: item.filters });
+        const d = await api.trend({ test: spec.test, by: spec.xAxis, groupBy: spec.groupBy, filter: item.filters });
+        if (spec.splitPlots && spec.groupBy !== "none") {
+          for (const block of [...new Set(d.points.map((p) => p.groupLabel).filter(Boolean))]) {
+            const title = `${spec.title} · ${block}`;
+            fig = figureTrend(d, { theme, spec, title, facetLabel: block });
+            await addImage(title, `${testLabelWithUnits(test)} · ${block}`,
+              await renderFigure(fig, 2400, 1500), spec.title);
+          }
+          continue;
+        }
         fig = figureTrend(d, { theme, spec, title: spec.title });
         subtitle = `${testLabelWithUnits(test)} · X ${spec.xAxis} · ${d.points.length} points`;
         break;

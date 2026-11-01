@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import Plotly from "plotly.js-dist-min";
 import type { Figure } from "../charts/figures";
 import { PLOTLY_CONFIG } from "../charts/plotlyTheme";
 import { rasterScatterPreview } from "../charts/scatterPreview";
 
 interface Props {
-  figure: Figure;
+  figure: Figure | null;
   hostRef?: { current: HTMLDivElement | null };
   /** Thumbnails must not pan, zoom, hover or show a mode bar. */
   staticPlot?: boolean;
@@ -28,16 +28,52 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
             doubleClick: false,
             showTips: false,
           }
-        : PLOTLY_CONFIG,
+        : { ...PLOTLY_CONFIG, doubleClick: false },
     [isStatic]
   );
 
   useEffect(() => {
     const el = targetRef.current;
+    if (!el || isStatic) return;
+    const pan = (e: MouseEvent) => {
+      if (e.button !== 1 || !(e.target instanceof Element) || !e.target.closest(".nsewdrag")) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      // Let Plotly prepare its native pan gesture (log/multiple axes included).
+      // Restore the selected mode immediately after preparation, so the next
+      // left drag still zooms/selects normally and no relayout is needed here.
+      const layout = (el as any)._fullLayout;
+      if (!layout) return;
+      const mode = layout.dragmode;
+      try {
+        layout.dragmode = "pan";
+        e.target.dispatchEvent(new MouseEvent("mousedown", {
+          bubbles: true, cancelable: true, view: window, button: 0, buttons: 1,
+          clientX: e.clientX, clientY: e.clientY,
+        }));
+      } finally { layout.dragmode = mode; }
+    };
+    const suppressAutoScroll = (e: MouseEvent) => { if (e.button === 1) e.preventDefault(); };
+    el.addEventListener("mousedown", pan, true);
+    el.addEventListener("auxclick", suppressAutoScroll);
+    return () => {
+      el.removeEventListener("mousedown", pan, true);
+      el.removeEventListener("auxclick", suppressAutoScroll);
+    };
+  }, [targetRef, isStatic]);
+
+  useLayoutEffect(() => {
+    const el = targetRef.current;
     if (!el) return;
+    el.style.visibility = "hidden";
+    if (!figure) return;
     let alive = true;
     const graph = el as any;
     const saved = cacheKey ? views.get(cacheKey) : undefined;
+    const defaults: Record<string, unknown> = {};
+    const reset = () => {
+      void Plotly.relayout(el, defaults);
+    };
     const capture = () => {
       if (!cacheKey || isStatic || !graph._fullLayout) return;
       const axes: Record<string, { range: number[]; autorange: unknown }> = {};
@@ -53,7 +89,16 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     const rendered = isStatic && figure.rasterScatter
       ? rasterScatterPreview(figure, el.clientWidth, el.clientHeight) : figure;
     void Plotly.react(el, rendered.data, structuredClone(rendered.layout), config).then(async () => {
-      if (!alive || isStatic || !cacheKey) return;
+      if (!alive) return;
+      if (!isStatic) {
+        for (const [key, axis] of Object.entries(graph._fullLayout) as [string, any][]) {
+          if (/^[xy]axis\d*$/.test(key) && Array.isArray(axis.range)) {
+            defaults[`${key}.range`] = [...axis.range]; defaults[`${key}.autorange`] = false;
+          }
+        }
+        graph.on?.("plotly_doubleclick", reset);
+      }
+      if (isStatic || !cacheKey) { el.style.visibility = "visible"; return; }
       if (saved) {
         const update: Record<string, unknown> = {};
         for (const [key, axis] of Object.entries(saved.axes)) {
@@ -64,11 +109,13 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
         if (saved.visible.length === figure.data.length) await Plotly.restyle(el, { visible: saved.visible });
       }
       if (!alive) return;
+      el.style.visibility = "visible";
       graph.on?.("plotly_relayout", capture);
       graph.on?.("plotly_restyle", capture);
     }).catch((error: unknown) => { if (alive) console.error("Unable to render plot", error); });
     return () => {
       alive = false;
+      graph.removeListener?.("plotly_doubleclick", reset);
       capture();
       graph.removeListener?.("plotly_relayout", capture);
       graph.removeListener?.("plotly_restyle", capture);
@@ -109,5 +156,5 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     };
   }, [targetRef]);
 
-  return <div className="plotly-host" ref={targetRef} />;
+  return <div className="plotly-host" ref={targetRef} style={{ visibility: figure ? "visible" : "hidden" }} />;
 }

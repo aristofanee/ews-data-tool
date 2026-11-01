@@ -129,7 +129,7 @@ export function usePlotData(): PlotDataState {
             if (spec.test === null) throw new Error("Select a test to plot.");
             result = {
               kind: "trend",
-              data: await api.trend({ test: spec.test, by: spec.xAxis, filter: filters }),
+              data: await api.trend({ test: spec.test, by: spec.xAxis, groupBy: spec.groupBy, filter: filters }),
             };
             break;
           }

@@ -206,6 +206,7 @@ export async function histogram(req: {
 export async function trend(req: {
   test: number;
   by: string;
+  groupBy?: string | null;
   filter: Filter;
 }): Promise<TrendResponse> {
   return cachedPlot("trend", req, () => !isTauri ? mock.trend(req) : invoke<TrendResponse>("trend", { req }), (d) => 1024 + d.points.length * 128);

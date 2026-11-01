@@ -238,6 +238,8 @@ export interface HistResponse {
 
 export interface TrendPoint {
   label: string;
+  groupKey: number;
+  groupLabel: string;
   mean: number;
   min: number;
   max: number;

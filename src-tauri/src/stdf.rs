@@ -603,6 +603,10 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 out.sbin[r] = soft;
                 out.x[r] = x;
                 out.y[r] = y;
+                c.take(4); // TEST_T
+                let part_id=c.cn();let part_text=c.cn();
+                if !part_id.is_empty(){out.write_text("Part ID",r,&part_id);}
+                if !part_text.is_empty(){out.write_text("Part text",r,&part_text);}
             }
             // PTR - parametric test record
             (15, 10) => {
@@ -1013,6 +1017,40 @@ fn limits_differ(a: Option<f32>, b: Option<f32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_die_stdf_text_is_preserved_and_detected_as_a_category(){
+        let mut bytes=rec(0,10,&[2,4]);let mut mir=vec![0;15];mir.extend(cn("L"));bytes.extend(rec(1,10,&mir));let mut wir=vec![0;6];wir.extend(cn("W"));bytes.extend(rec(2,10,&wir));
+        for x in 0..30{
+            bytes.extend(rec(5,10,&[1,0]));bytes.extend(rec(15,10,&ptr_body(1001,x as f32/10.0,0,Some(0),Some(0.0),Some(10.0),Some("V"),Some(""))));
+            let mut prr=prr_body(x,0);prr.extend(0u32.to_le_bytes());prr.extend(cn(&format!("part-{x}")));prr.extend(cn(if x%2==0{"Mode A"}else{"Mode B"}));bytes.extend(rec(5,20,&prr));
+        }
+        let mut ds=crate::model::Dataset::new();ds.append_import(import_stdf_bytes(&bytes,"test",&mut|_,_|{}).unwrap());ds.resolve_retests();ds.detect_numeric_labels();ds.detect_data_categories();
+        assert_eq!(ds.rows,30);assert_eq!(ds.cols[0][3],0.3);
+        assert!(ds.data_category("data:text:Part ID").is_none());
+        let category=ds.data_category("data:text:Part text").unwrap();assert_eq!(category.values,vec!["","Mode A","Mode B"]);assert_eq!(category.counts,vec![0,15,15]);
+        assert!(ds.custom_column("Part text").is_none());
+    }
+
+    #[test]
+    fn numeric_labels_span_individual_stdf_wafer_files() {
+        let mut ds=crate::model::Dataset::new();
+        for (wafer,value) in [("W1",1.0),("W2",2.0)] {
+            let mut bytes=rec(0,10,&[2,4]);
+            let mut mir=vec![0;15];mir.extend(cn("Lot"));bytes.extend(rec(1,10,&mir));
+            let mut wir=vec![0;6];wir.extend(cn(wafer));bytes.extend(rec(2,10,&wir));
+            for x in 0..3 {
+                bytes.extend(rec(5,10,&[1,0]));
+                bytes.extend(rec(15,10,&ptr_body(1001,value,0,Some(0),Some(0.0),Some(10.0),Some(""),Some(""))));
+                bytes.extend(rec(5,20,&prr_body(x,0)));
+            }
+            ds.append_import(import_stdf_bytes(&bytes,wafer,&mut |_,_|{}).unwrap());
+        }
+        ds.resolve_retests();ds.detect_numeric_labels();
+        assert_eq!(ds.tests.len(),1);assert_eq!(ds.cols[0],vec![1.0,1.0,1.0,2.0,2.0,2.0]);
+        assert_eq!(ds.custom_cols[0].name,"Leak test");
+        assert_eq!(ds.custom_cols[0].wafer_values,vec![1,2]);
+    }
 
     #[test]
     fn metadata_only_skips_measurements_and_fills_missing_fields() {

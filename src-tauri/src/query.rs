@@ -63,6 +63,7 @@ fn category_for_row(ds: &Dataset, category: &str, row: usize, multi_lot: bool) -
             (code, format!("SBIN {code}"))
         }
         other => {
+            if let Some(c)=ds.data_category(other){let code=c.codes[row];return (code,c.label(code));}
             let wi = ds.wafer_of_row[row] as usize;
             if let Some(cc) = ds.custom_column(other) {
                 let code = cc.wafer_values.get(wi).copied().unwrap_or(0);
@@ -93,6 +94,75 @@ fn category_for_wafer(ds: &Dataset, category: &str, wi: u16, multi_lot: bool) ->
             }
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitCountsRequest {
+    pub test: usize,
+    #[serde(default)] pub paired_test: Option<usize>,
+    #[serde(default)] pub filter: Filter,
+    pub lsl: Option<f32>,
+    pub usl: Option<f32>,
+    pub group_by: Option<String>,
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitCount {
+    pub label: String,
+    pub total: usize,
+    pub in_limits: Option<usize>,
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitCountsResponse {
+    pub total: usize,
+    pub in_limits: Option<usize>,
+    pub groups: Vec<LimitCount>,
+}
+
+/// Exact export counts over source measurements, never sampled markers or histogram bins.
+pub fn limit_counts(ds: &Dataset, req: &LimitCountsRequest) -> LimitCountsResponse {
+    let has_limits = req.lsl.is_some() || req.usl.is_some();
+    let mut result = LimitCountsResponse { in_limits: has_limits.then_some(0), ..Default::default() };
+    let Some(col) = ds.cols.get(req.test).filter(|c| !c.is_empty()) else { return result; };
+    let mut mask = ds.base_mask(&req.filter);
+    let mut keep = vec![true; ds.rows];
+    if let Some(paired) = req.paired_test {
+        let Some(other) = ds.cols.get(paired).filter(|c| !c.is_empty()) else { return result; };
+        for r in 0..ds.rows { mask[r] &= col[r].is_finite() && other[r].is_finite(); }
+        if let Some(sf) = &req.filter.stat {
+            let mut buckets: HashMap<u16,Vec<usize>> = HashMap::new();
+            for r in 0..ds.rows { if mask[r] { buckets.entry(if sf.per_wafer {ds.wafer_of_row[r]} else {0}).or_default().push(r); } }
+            for rows in buckets.values() {
+                let a=keep_mask(&rows.iter().map(|r|col[*r]).collect::<Vec<_>>(),sf);
+                let b=keep_mask(&rows.iter().map(|r|other[*r]).collect::<Vec<_>>(),sf);
+                for (i,r) in rows.iter().enumerate() { keep[*r]=a[i]&&b[i]; }
+            }
+        }
+    } else {
+        keep = stat_keep_rows(ds, req.test, &req.filter, None).map(|(k,_)|k).unwrap_or(keep);
+    }
+    let group = req.group_by.as_deref().filter(|g| !g.is_empty() && *g != "none");
+    let mut groups: HashMap<u16, LimitCount> = HashMap::new();
+    for r in 0..ds.rows {
+        let v = col[r];
+        if !mask[r] || !keep[r] || !v.is_finite() { continue; }
+        let inside = req.lsl.map_or(true, |l| v >= l) && req.usl.map_or(true, |u| v <= u);
+        result.total += 1;
+        if let Some(n) = result.in_limits.as_mut() { *n += usize::from(inside); }
+        if let Some(category) = group {
+            let (key, label) = category_for_row(ds, category, r, ds.lots.len() > 1);
+            let g = groups.entry(key).or_insert(LimitCount { label, total: 0, in_limits: has_limits.then_some(0) });
+            g.total += 1;
+            if let Some(n) = g.in_limits.as_mut() { *n += usize::from(inside); }
+        }
+    }
+    result.groups = groups.into_values().collect();
+    result.groups.sort_by(|a, b| natural_cmp(&a.label, &b.label));
+    result
 }
 
 #[derive(Deserialize)]
@@ -284,6 +354,7 @@ pub struct MapDie {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MapResponse {
+    pub test_total: usize,
     pub unknown_bins: usize,
     pub test_pass: usize,
     pub test_fail: usize,
@@ -528,6 +599,7 @@ fn wafer_map_prepared(ds: &Dataset, req: &MapRequest, keep_ref: Option<&[bool]>,
         && lsl.zip(usl).map_or(true, |(l, u)| l <= u);
     let col = req.test.and_then(|t| ds.cols.get(t));
     let (mut pass, mut fail, mut test_pass, mut test_fail) = (0, 0, 0, 0);
+    let mut test_total = 0;
     let mut unknown_bins = 0;
     for &r in rows {
         if req.wafer.is_some_and(|w| ds.wafer_of_row[r] != w)
@@ -536,11 +608,14 @@ fn wafer_map_prepared(ds: &Dataset, req: &MapRequest, keep_ref: Option<&[bool]>,
         // Physical wafer yield never changes with a test/outlier/bin filter.
         if ds.hbin[r] == UNKNOWN_BIN { unknown_bins += 1; }
         if ds.hbin[r] == 1 { pass += 1; } else { fail += 1; }
-        if valid_limits && considered[r] && keep_ref.map_or(true, |k| k[r]) {
+        if considered[r] && keep_ref.map_or(true, |k| k[r]) {
             if let Some(v) = col.and_then(|c| c.get(r)).copied().filter(|v| v.is_finite()) {
-                if lsl.map_or(true, |l| v >= l) && usl.map_or(true, |u| v <= u) {
-                    test_pass += 1;
-                } else { test_fail += 1; }
+                test_total += 1;
+                if valid_limits {
+                    if lsl.map_or(true, |l| v >= l) && usl.map_or(true, |u| v <= u) {
+                        test_pass += 1;
+                    } else { test_fail += 1; }
+                }
             }
         }
     }
@@ -585,6 +660,7 @@ fn wafer_map_prepared(ds: &Dataset, req: &MapRequest, keep_ref: Option<&[bool]>,
     };
 
     MapResponse {
+        test_total,
         unknown_bins,
         test_pass,
         test_fail,
@@ -763,6 +839,7 @@ fn pareto_group_title(ds: &Dataset, group_by: &str) -> String {
         "site" => "Site".to_string(),
         "hbin" => "HBIN".to_string(),
         "sbin" => "SBIN".to_string(),
+        other if ds.data_category(other).is_some()=>ds.data_category(other).unwrap().name.clone(),
         other => ds
             .custom_column(other)
             .map(|c| c.name.clone())
@@ -1291,6 +1368,7 @@ pub struct ScatterResponse {
     pub z_col_label: String,
     pub group_by: Option<String>,
     pub group_label: String,
+    pub group_totals: HashMap<String, usize>,
     pub z_min: f32,
     pub z_max: f32,
     pub total: usize,
@@ -1341,6 +1419,7 @@ fn scatter_col_label(ds: &Dataset, col: &str) -> String {
         "site" => "Site".to_string(),
         "hbin" => "HBIN".to_string(),
         "sbin" => "SBIN".to_string(),
+        other if ds.data_category(other).is_some()=>ds.data_category(other).unwrap().name.clone(),
         other => ds
             .custom_column(other)
             .map(|c| c.name.clone())
@@ -1372,6 +1451,7 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
             .map(|c| scatter_col_label(ds, c))
             .unwrap_or_default(),
         group_by: req.group_by.clone(),
+        group_totals: HashMap::new(),
         group_label: req
             .group_by
             .as_deref()
@@ -1453,7 +1533,7 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
     } else {
         1
     };
-    let sampled: Vec<usize> = kept.iter().step_by(stride).copied().collect();
+    let mut sampled: Vec<usize> = kept.iter().step_by(stride).copied().collect();
     let truncated = stride > 1;
 
     let kept_x: Vec<f32> = kept.iter().map(|r| xcol[*r]).collect();
@@ -1483,6 +1563,18 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
             .map(str::trim)
             .filter(|c| !c.is_empty() && *c != "none"),
     };
+    let mut group_totals = HashMap::new();
+    if let Some(category) = group_col {
+        let mut representatives=HashMap::new();
+        for row in &kept {
+            let (key, label) = category_for_row(ds, category, *row, multi_lot);
+            representatives.entry(key).or_insert(*row);
+            *group_totals.entry(label).or_insert(0usize) += 1;
+        }
+        let present:HashSet<_>=sampled.iter().map(|&row|category_for_row(ds,category,row,multi_lot).0).collect();
+        for (key,row)in representatives {if !present.contains(&key){sampled.push(row);}}
+        sampled.sort_unstable();
+    }
     let group_label = group_col
         .map(|c| scatter_col_label(ds, c))
         .unwrap_or_default();
@@ -1584,6 +1676,7 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
         z_col_label,
         group_by: req.group_by.clone(),
         group_label,
+        group_totals,
         z_min,
         z_max,
         total,
@@ -1599,6 +1692,19 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mean_map_averages_available_measurements_at_matching_coordinates() {
+        let mut imp=crate::dataset::Imported::new();let lot=imp.lot_index("L");
+        let source=[vec![(0,0.0),(1,f32::NAN),(2,20.0)],vec![(0,10.0),(1,100.0),(3,300.0)],vec![(0,20.0),(1,200.0),(2,40.0)]];
+        for (w,dice)in source.iter().enumerate(){let wi=imp.wafer_index(lot,&format!("W{w}"));for &(x,v)in dice{let r=imp.new_row(lot,wi);imp.x[r]=x;imp.y[r]=0;imp.hbin[r]=if w==2{2}else{1};imp.column((100,0),r,v);}}
+        let mut ds=Dataset::new();ds.merge(imp.finish());
+        let req=MapRequest{test:Some(0),wafer:None,mode:MapMode::Value,filter:Filter::default(),lsl:None,usl:None};
+        let result=wafer_map(&ds,&req);assert_eq!(result.test_total,8);assert_eq!(result.wafer_count,3);
+        assert_eq!(result.dice.iter().map(|d|(d.x,d.v)).collect::<Vec<_>>(),vec![(0,10.0),(1,150.0),(2,30.0),(3,300.0)]);
+        let mut filtered=req;filtered.filter.hbins=vec![1];let result=wafer_map(&ds,&filtered);
+        assert_eq!(result.test_total,5);assert_eq!(result.dice.iter().map(|d|(d.x,d.v)).collect::<Vec<_>>(),vec![(0,5.0),(1,100.0),(2,20.0),(3,300.0)]);
+        filtered.filter.wafers=vec![0];let result=wafer_map(&ds,&filtered);assert_eq!(result.dice.iter().map(|d|(d.x,d.v)).collect::<Vec<_>>(),vec![(0,0.0),(2,20.0)]);
+    }
     #[test]
     fn automatic_histogram_bins_handle_extremes_and_small_populations() {
         let values: Vec<f32> = (0..10000).map(|i| 1.0 + (i % 100) as f32 * 0.001).chain([100000.0]).collect();
@@ -1628,6 +1734,36 @@ mod tests {
         let mut ds = Dataset::new();
         ds.merge(imp.finish());
         ds
+    }
+
+    #[test]
+    fn export_limit_counts_use_source_values_and_inclusive_single_or_double_limits() {
+        let mut ds = small_dataset(&[0.0, 1.0, 2.0, 3.0, 100.0, f32::NAN]);
+        ds.site = vec![Some(0), Some(0), Some(1), Some(1), Some(1), Some(0)];
+        let mut req = LimitCountsRequest {test:0,paired_test:None,filter:Filter::default(),lsl:Some(1.0),usl:Some(3.0),group_by:Some("site".into())};
+        let counts = limit_counts(&ds,&req);
+        assert_eq!((counts.total,counts.in_limits),(5,Some(3)));
+        assert_eq!((counts.groups[0].total,counts.groups[0].in_limits),(2,Some(1)));
+        assert_eq!((counts.groups[1].total,counts.groups[1].in_limits),(3,Some(2)));
+        req.lsl = None;
+        assert_eq!(limit_counts(&ds,&req).in_limits,Some(4));
+        req.usl = None;
+        assert_eq!(limit_counts(&ds,&req).in_limits,None);
+        req.filter.sites = vec![1]; req.lsl=Some(2.0); req.usl=Some(3.0);
+        let c=limit_counts(&ds,&req); assert_eq!((c.total,c.in_limits),(3,Some(2)));
+        req.filter.stat=Some(StatFilter {kind:StatKind::Sigma,k:1.0,per_wafer:false});
+        let c=limit_counts(&ds,&req); assert_eq!((c.total,c.in_limits),(2,Some(2)));
+        let bx=box_plot(&ds,&BoxRequest {test:0,x_axis:"site".into(),group_by:None,filter:req.filter.clone(),max_points:Some(1)});
+        assert_eq!(c.total,bx.summary.n);
+        let scatter = scatter(&ds, &ScatterRequest {x_test:0,y_test:0,z_mode:ScatterZMode::None,z_test:None,z_col:None,
+            group_by:Some("site".into()),filter:Filter::default(),max_points:Some(1)});
+        assert_eq!(scatter.group_totals.values().sum::<usize>(),5);
+        assert_eq!(scatter.group_totals["Site 0"],2);
+        assert_eq!(scatter.group_totals["Site 1"],3);
+        req.filter=Filter::default();req.paired_test=Some(0);req.lsl=Some(1.0);req.usl=Some(3.0);
+        let pair=limit_counts(&ds,&req);assert_eq!((pair.total,pair.in_limits),(5,Some(3)));
+        req.filter.stat=Some(StatFilter {kind:StatKind::Sigma,k:1.0,per_wafer:true});
+        let pair=limit_counts(&ds,&req);assert_eq!((pair.total,pair.in_limits),(4,Some(3)));
     }
 
     #[test]

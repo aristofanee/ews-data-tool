@@ -1,22 +1,23 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { ReportResolver } from "./ReportResolver";
+import { bindReportItem } from "../lib/reportReferences";
+import { reportItemDescription } from "../lib/reportDescription";
 import { PLOT_LABELS, useStore } from "../store";
-import type { DatasetInfo, Filter, ReportItem } from "../types";
+import type { ReportItem } from "../types";
 import * as api from "../lib/api";
 import { generateReport } from "../lib/report";
 import { tidyName } from "../lib/format";
 import { useLoadTemplate, useSaveTemplate } from "../lib/useData";
 import {
+  IconAlert,
   IconBox,
   IconChevronDown,
   IconChevronUp,
-  IconFolder,
-  IconGrid,
   IconHist,
   IconLayers,
   IconMap,
   IconOpen,
   IconPareto,
-  IconPlus,
   IconReport,
   IconSave,
   IconScatter,
@@ -45,46 +46,6 @@ function iconFor(type: ReportItem["spec"]["type"]) {
   }
 }
 
-function summarizeFilters(f: Filter, info: DatasetInfo): string {
-  const parts: string[] = [];
-  if (f.lots.length) {
-    parts.push(f.lots.map((l) => info.lots[l] ?? `L${l}`).join(", "));
-  }
-  if (f.wafers.length) parts.push(`${f.wafers.length} wafers`);
-  if (f.hbins.length) parts.push(`HBIN ${f.hbins.join(",")}`);
-  if (f.stat) parts.push(f.stat.kind === "sigma" ? `${f.stat.k}σ` : `IQR×${f.stat.k}`);
-  return parts.length ? parts.join(" · ") : "all data";
-}
-
-function subtitleFor(it: ReportItem, info: DatasetInfo): string {
-  const s = it.spec;
-  const test = s.test !== null ? info.tests[s.test] : null;
-  const parts: string[] = [];
-  if (s.type === "map") {
-    parts.push(s.groupBy === "none" ? "All wafers (mean)" : `Grouped by ${s.groupBy}`);
-  }
-  if (s.type === "scatter") {
-    const x = s.scatterX !== null ? info.tests[s.scatterX] : null;
-    const y = s.scatterY !== null ? info.tests[s.scatterY] : null;
-    parts.push(`${x ? tidyName(x.name) : "X"} vs ${y ? tidyName(y.name) : "Y"}`);
-    if (s.groupBy !== "none") {
-      parts.push(`Grouped by ${s.groupBy}`);
-    } else if (s.scatterZMode === "continuous") {
-      const z = s.scatterZTest !== null ? info.tests[s.scatterZTest] : null;
-      if (z) parts.push(`Z ${tidyName(z.name)}`);
-    }
-  } else if (test) {
-    const name = tidyName(test.name);
-    parts.push(test.units ? `${name} [${test.units}]` : name);
-  }
-  if (s.type === "box" || s.type === "trend") {
-    parts.push(`X ${s.xAxis}`);
-    if (s.type === "box" && s.groupBy !== "none") parts.push(`Group ${s.groupBy}`);
-  }
-  parts.push(summarizeFilters(it.filters, info));
-  return parts.join(" · ");
-}
-
 export function ReportDrawer() {
   const open = useStore((s) => s.reportOpen);
   const setOpen = useStore((s) => s.setReportOpen);
@@ -95,7 +56,6 @@ export function ReportDrawer() {
   const theme = useStore((s) => s.theme);
   const templateName = useStore((s) => s.templateName);
   const setTemplateName = useStore((s) => s.setTemplateName);
-  const addReport = useStore((s) => s.addReport);
   const addReportItems = useStore((s) => s.addReportItems);
   const removeReport = useStore((s) => s.removeReport);
   const moveReport = useStore((s) => s.moveReport);
@@ -107,46 +67,14 @@ export function ReportDrawer() {
   const saveTemplate = useSaveTemplate();
   const loadTemplate = useLoadTemplate();
 
-  const [folder, setFolder] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem("ews-report-folder");
-    } catch {
-      return null;
-    }
-  });
+  const [resolving,setResolving]=useState(false);
+  const bound=useMemo(()=>report.map(item=>bindReportItem(item,info)),[report,info]);
+  const failed=bound.filter(b=>b.issues.length).length;
+  const ready=report.length-failed;
+  const editing=useStore(s=>s.editingReportId);
+  const [generating,setGenerating]=useState(false);
 
   if (!open) return null;
-
-  const chooseFolder = async () => {
-    const f = await api.pickFolder();
-    if (f) {
-      setFolder(f);
-      try {
-        localStorage.setItem("ews-report-folder", f);
-      } catch {
-        /* ignore */
-      }
-    }
-  };
-
-  const addAllWafers = () => {
-    if (!info) return;
-    if (spec.type !== "map") {
-      notify("Switch to a wafer map first.");
-      return;
-    }
-    const test = spec.test !== null ? info.tests[spec.test] : null;
-    addReportItems([
-      {
-        spec: {
-          ...spec,
-          groupBy: "wafer",
-          title: `${test ? tidyName(test.name) : "Wafer"} · all selected wafers`,
-        },
-        filters,
-      },
-    ]);
-  };
 
   const addAllTests = () => {
     if (!info) return;
@@ -165,13 +93,8 @@ export function ReportDrawer() {
   };
 
   const editItem = (it: ReportItem) => {
-    const nextSpec = structuredClone(it.spec);
-    useStore.setState((s) => ({
-      spec: nextSpec,
-      specs: { ...s.specs, [nextSpec.type]: nextSpec },
-      filters: structuredClone(it.filters),
-    }));
-    setOpen(false);
+    if(bindReportItem(it,info).issues.length){setResolving(true);return;}
+    useStore.getState().activateReport(it.id);
   };
 
   const generate = async () => {
@@ -180,23 +103,12 @@ export function ReportDrawer() {
       notify("Add at least one plot to the report.");
       return;
     }
-    if (!api.isTauri) {
-      notify("Batch export is available in the desktop app — use Save JPG here in the browser demo.");
-      return;
-    }
-    let dest = folder;
-    if (!dest) {
-      dest = await api.pickFolder();
-      if (!dest) return;
-      setFolder(dest);
-      try {
-        localStorage.setItem("ews-report-folder", dest);
-      } catch {
-        /* ignore */
-      }
-    }
+    if(generating)return;
+    setGenerating(true);
     try {
-      setBusy(true, 1, "Preparing report…");
+      const dest=await api.pickFolder();
+      if(!dest)return;
+      setBusy(true, 0, "Preparing report…");
       const res = await generateReport({
         items: report,
         info,
@@ -204,13 +116,12 @@ export function ReportDrawer() {
         folder: dest,
         templateName: templateName || "EWS report",
         onProgress: (pct, msg) => setProgress(pct, msg),
+        onItemError:(id,error)=>useStore.getState().setReportItemError(id,error),
       });
-      setBusy(false);
-      notify(`Report ready · ${res.files.length} JPGs + index.html`);
+      notify(res.indexHtml?`Report ready · ${res.files.length} JPGs${res.skipped.length?` · ${res.skipped.length} items skipped`:""}`:"No images exported. Resolve the report errors first.");
     } catch (e) {
-      setBusy(false);
       setError(`Report generation failed. ${String(e)}`);
-    }
+    } finally {setBusy(false);setGenerating(false);}
   };
 
   return (
@@ -248,14 +159,7 @@ export function ReportDrawer() {
             </button>
           </div>
           <div className="batch-row">
-            <button className="btn" onClick={addReport} title="Add the plot currently on screen">
-              <IconPlus size={14} /> Add current plot
-            </button>
-            {spec.type === "map" && (
-              <button className="btn" onClick={addAllWafers} title="One map per selected wafer">
-                <IconGrid size={14} /> All selected wafers
-              </button>
-            )}
+            {editing&&report.some(r=>r.id===editing)&&<button className="btn" onClick={()=>useStore.getState().updateReportItem(editing)}>Update loaded item</button>}
             {(spec.type === "box" || spec.type === "hist" || spec.type === "trend") && (
               <button className="btn" onClick={addAllTests} title="One plot per test">
                 <IconLayers size={14} /> All tests
@@ -264,7 +168,11 @@ export function ReportDrawer() {
           </div>
         </div>
 
-        <div className="report-list">
+        <div className="report-validation-summary">
+          <span>{ready} ready · {failed} with errors</span>
+          <button className="link-btn" onClick={()=>setResolving(!resolving)}>{resolving?"Show items":`Resolve errors${failed?` (${failed})`:""}`}</button>
+        </div>
+        {resolving?<ReportResolver onBack={()=>setResolving(false)}/>:<div className="report-list">
           {report.length === 0 && (
             <div className="report-empty">
               <div className="report-empty-icon">
@@ -273,13 +181,16 @@ export function ReportDrawer() {
               <b>No plots yet</b>
             </div>
           )}
-          {report.map((it, i) => (
-            <div className="report-item" key={it.id}>
-              <button className="ri-main" onClick={() => editItem(it)} title="Load this plot into the viewer">
-                <span className="ri-icon">{iconFor(it.spec.type)}</span>
+          {bound.map(({item:it,issues}, i) => {
+            const description=info?reportItemDescription(it,info):{title:it.spec.title,subtitle:""};
+            return (
+            <div className={`report-item${issues.length?" invalid":""}`} key={it.id} data-report-id={it.id}>
+              <button className="ri-main" onClick={() => editItem(it)} title={issues.length?"Resolve this report item":"Load this plot into the viewer"}>
+                <span className="ri-icon">{issues.length?<IconAlert size={16}/>:iconFor(it.spec.type)}</span>
                 <span className="ri-text">
-                  <span className="ri-title">{it.spec.title}</span>
-                  <span className="ri-sub">{info ? subtitleFor(it, info) : ""}</span>
+                  <span className="ri-title" title={description.title}>{description.title}</span>
+                  <span className="ri-sub" title={description.subtitle}>{description.subtitle}</span>
+                  {issues.length>0&&<span className="ri-error">{issues.map(issue=>`${issue.kind}: ${issue.label}`).join(" · ")}</span>}
                 </span>
               </button>
               <div className="ri-actions">
@@ -304,30 +215,16 @@ export function ReportDrawer() {
                 </button>
               </div>
             </div>
-          ))}
-        </div>
+          );})}
+        </div>}
 
         <div className="drawer-foot">
-          <div className="folder-row">
-            <IconFolder size={14} />
-            <span className="folder-path" title={folder ?? ""}>
-              {folder ?? "Choose an output folder"}
-            </span>
-            {folder && (
-              <button className="link-btn" onClick={() => void api.openInExplorer(folder)}>
-                Open
-              </button>
-            )}
-            <button className="link-btn" onClick={chooseFolder}>
-              {folder ? "Change" : "Browse"}
-            </button>
-          </div>
           <div className="foot-actions">
             <button className="link-btn" onClick={clearReport} disabled={!report.length}>
               Clear
             </button>
-            <button className="btn primary wide" onClick={generate} disabled={!report.length}>
-              <IconReport size={15} /> Generate {report.length || ""} JPG{report.length === 1 ? "" : "s"}
+            <button className="btn primary wide" onClick={generate} disabled={!ready||generating}>
+              <IconReport size={15} /> Generate report ({ready} ready)
             </button>
           </div>
         </div>

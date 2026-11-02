@@ -3,6 +3,8 @@ mod archive;
 mod csv_io;
 mod dataset;
 mod model;
+mod numeric_labels;
+mod data_categories;
 mod query;
 mod stats;
 mod stdf;
@@ -23,6 +25,7 @@ pub fn run() {
             commands::inspect_csv,
             commands::import_product_metadata,
             commands::dataset_info,
+            commands::set_data_category,
             commands::add_custom_column,
             commands::remove_custom_column,
             commands::restore_custom_columns,
@@ -33,9 +36,12 @@ pub fn run() {
             commands::pareto,
             commands::histogram,
             commands::trend,
+            commands::limit_counts,
             commands::scatter,
             commands::export_csv,
             commands::save_binary,
+            commands::create_report_folder,
+            commands::remove_report_images,
             commands::save_text,
             commands::read_text,
             commands::file_name,

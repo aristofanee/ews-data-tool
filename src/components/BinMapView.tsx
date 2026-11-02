@@ -1,6 +1,8 @@
+import { useRestorePlotSelection } from "../lib/usePlotMemory";
+import { IMAGE_WIDTH, BIN_OVERVIEW_WIDTH, imageHeight, imageScope } from "../charts/imageExport";
 import { binYieldText, overviewYieldText } from "../lib/theme";
 import { useEffect, useMemo, useRef } from "react";
-import type { BinOverviewResponse, BinOverviewWafer, MapResponse, PlotSpec } from "../types";
+import type { BinOverviewResponse, BinOverviewWafer, MapResponse, PlotSpec, PlotSelection } from "../types";
 import {
   renderBinOverviewImage,
   renderMapImage,
@@ -9,9 +11,11 @@ import {
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
 import { MapGallery, useMapSelection } from "./MapGallery";
+import type { ImageExportJob } from "../lib/exportJobs";
 import { MapDetailView } from "./MapDetailView";
 
 export interface BinMapExportApi {
+  jobs: (theme?: Theme, selectedOnly?: boolean) => ImageExportJob[];
   toDataURL: (
     format?: "jpeg" | "png",
     theme?: Theme,
@@ -24,6 +28,7 @@ interface Props {
   data: BinOverviewResponse;
   spec: PlotSpec;
   onReady?: (api: BinMapExportApi | null) => void;
+  onSelection?: (selection:PlotSelection|null)=>void;
 }
 
 const binMaps = new WeakMap<BinOverviewWafer, MapResponse>();
@@ -50,13 +55,14 @@ function asMap(w: BinOverviewWafer): MapResponse {
   return md;
 }
 
-export function BinMapView({ data, spec, onReady }: Props) {
+export function BinMapView({ data, spec, onReady, onSelection }: Props) {
   const fontRevision = useStore((s) => s.demoFontRevision);
   const theme = useStore((s) => s.theme);
   const info = useStore((s) => s.info);
   const dataVersion = useStore((s) => s.dataVersion);
   const filters = useStore((s) => s.filters);
   const [selected, setSelected] = useMapSelection("bin", [dataVersion, filters, spec.test]);
+  useRestorePlotSelection(data.wafers.map(w=>`${w.lotName} / ${w.wafer.name}`),setSelected);
 
   const maps = useMemo(() => data.wafers.map(asMap), [data.wafers]);
 
@@ -111,36 +117,35 @@ export function BinMapView({ data, spec, onReady }: Props) {
   const mapsRef = useRef(maps);
   mapsRef.current = maps;
 
-  useEffect(() => {
+  useEffect(()=>{
+    const md=selected!==null?maps[selected]:undefined;
+    const wafer=md?info?.wafers.findIndex(w=>w.lot===md.wafer?.lot&&w.name===md.wafer?.name):undefined;
+    onSelection?.(md?{label:`${md.lotName} / ${md.wafer?.name}`,wafer}:null);
+  },[selected,maps,info,onSelection]);
+  useEffect(()=>()=>onSelection?.(null),[onSelection]);
+
+  useEffect(()=>{
+    const single=(md:MapResponse,sp:PlotSpec,o:MapOptions,format:"jpeg"|"png",width=IMAGE_WIDTH,height=imageHeight("binmap"))=>
+      renderMapImage(md,{...o,exportSpec:{...sp,groupBy:"wafer"},exportGroupLabel:`${md.lotName} / ${md.wafer?.name}`,mode:"bin"},width,height,sp.title,"",format);
+    const overview=(d:BinOverviewResponse,sp:PlotSpec,o:MapOptions,format:"jpeg"|"png")=>
+      renderBinOverviewImage(d.wafers,{...o,exportSpec:sp},BIN_OVERVIEW_WIDTH,Math.round(BIN_OVERVIEW_WIDTH*9/16),sp.title,"",format);
     readyRef.current?.({
-      toDataURL: (format = "jpeg", themeOverride, width = 2400, height = 1500) => {
-        const d = dataRef.current;
-        const sp = specRef.current;
-        const o = themeOverride ? { ...optsRef.current, theme: themeOverride } : optsRef.current;
-        const idx = selectedRef.current;
-        if (idx !== null && mapsRef.current[idx]) {
-          const md = mapsRef.current[idx];
-          const subtitle = `${md.lotName} · Wafer ${md.wafer?.name ?? "?"} · Yield ${binYieldText(md.yieldPct, md.dice, 2, md.unknownBins)}`;
-          return renderMapImage(
-            md,
-            { ...o, mode: "bin" },
-            width,
-            height,
-            sp.title,
-            subtitle,
-            format
-          );
-        }
-        const totalPass = d.wafers.reduce((n, w) => n + w.pass, 0);
-        const totalFail = d.wafers.reduce((n, w) => n + w.fail, 0);
-        const tested = totalPass + totalFail;
-        const yieldPct = tested ? (totalPass * 100) / tested : 0;
-        const subtitle = `${d.wafers.length} wafers · Yield ${overviewYieldText(yieldPct, d.wafers)}`;
-        return renderBinOverviewImage(d.wafers, o, width, height, sp.title, subtitle, format);
+      toDataURL:(format="jpeg",themeOverride,width=IMAGE_WIDTH,height=imageHeight("binmap"))=>{
+        const d=dataRef.current,sp=specRef.current,o={...optsRef.current,theme:themeOverride??optsRef.current.theme};
+        const idx=selectedRef.current;
+        return idx!==null&&mapsRef.current[idx]?single(mapsRef.current[idx],sp,o,format,width,height):overview(d,sp,o,format);
       },
+      jobs:(themeOverride,selectedOnly=false)=>{
+        const d=dataRef.current,sp={...specRef.current},maps=mapsRef.current,o={...optsRef.current,theme:themeOverride??optsRef.current.theme};
+        const index=selectedRef.current;
+        const entries=selectedOnly&&index!==null?[maps[index]]:maps;
+        const jobs:ImageExportJob[]=entries.filter(Boolean).map(md=>({label:`${md.lotName} / ${md.wafer?.name}`,render:async(format)=>{await document.fonts.ready;return single(md,sp,o,format);}}));
+        if(!selectedOnly)jobs.unshift({label:"Overview",render:async(format)=>{await document.fonts.ready;return overview(d,sp,o,format);}});
+        return jobs;
+      }
     });
-    return () => readyRef.current?.(null);
-  }, []);
+    return ()=>readyRef.current?.(null);
+  },[]);
 
   if (selected !== null && maps[selected]) {
     return (

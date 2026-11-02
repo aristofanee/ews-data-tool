@@ -15,6 +15,19 @@ export function usePlotSelection(kind: string, query: unknown) {
   return [selected, select] as const;
 }
 
+/** Report activation overrides remembered detail/grid state once data is ready. */
+export function useRestorePlotSelection(labels: string[], select: (index:number|null)=>void, ready=true) {
+  const requested=useStore(s=>s.requestedPlotSelection);
+  const identity=JSON.stringify(labels);
+  useEffect(()=>{
+    if(!requested||!ready)return;
+    const index=requested.label===null?null:labels.indexOf(requested.label);
+    if(index===-1)return;
+    select(index);
+    useStore.setState({requestedPlotSelection:null});
+  },[requested,identity,select,ready]);
+}
+
 export function usePlotViewKey(spec: PlotSpec) {
   const filters = useStore((s) => s.filters);
   const version = useStore((s) => s.dataVersion);

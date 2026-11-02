@@ -8,7 +8,6 @@ export function DemoFontControls() {
     setOffset(value);
     setDemoFontOffset(value);
     const store = useStore.getState();
-    store.setPresentation(false);
     store.patchSpec({});
     // Maps also observe this revision to redraw their canvas text.
     useStore.setState({ demoFontRevision: value });
@@ -19,6 +18,5 @@ export function DemoFontControls() {
       onChange={(e) => apply(Number(e.target.value))} />
     <output htmlFor="demo-font-size">{18 + offset}px ticks · {19 + offset}px axis titles ({offset >= 0 ? "+" : ""}{offset}px)</output>
     <button className="btn" onClick={() => apply(0)}>Reset</button>
-    <span>Adjusting switches off slide-sized fonts.</span>
   </div>;
 }

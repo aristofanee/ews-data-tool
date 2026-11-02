@@ -1,16 +1,18 @@
+import { IMAGE_WIDTH, imageHeight, imageScope } from "../charts/imageExport";
 import { binYieldText } from "../lib/theme";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MapResponse, PlotSpec } from "../types";
 import {
   mapColorLimits,
   renderMapImage,
+  mapExportFooter,
   WaferMapRenderer,
   type MapHit,
   type MapOptions,
 } from "../charts/waferMap";
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
-import { fmtMap, tidyName } from "../lib/format";
+import { fmtMap, testLabelWithUnits } from "../lib/format";
 import { binLabel } from "../lib/theme";
 
 export interface MapExportApi {
@@ -19,7 +21,7 @@ export interface MapExportApi {
     theme?: Theme,
     width?: number,
     height?: number
-  ) => string;
+  ) => Promise<string>;
 }
 
 interface Props {
@@ -155,10 +157,10 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
     document.addEventListener("wheel", onPinch, { passive: false, capture: true });
 
     readyRef.current?.({
-      toDataURL: (format = "jpeg", themeOverride, width = 1600, height = 1000) => {
+      toDataURL: async (format = "jpeg", themeOverride, width = IMAGE_WIDTH, height = imageHeight("map")) => {
         const d = dataRef.current;
         const sp = specRef.current;
-        const test = d.test ? tidyName(d.test.name) : "";
+        const test = d.test ? testLabelWithUnits(d.test) : "";
         const scope = d.isMean
           ? `All wafers (mean) · ${d.waferCount} wafer${d.waferCount === 1 ? "" : "s"}`
           : `${d.lotName} · Wafer ${d.wafer?.name ?? "?"}`;
@@ -167,7 +169,10 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
         const opts = themeOverride
           ? { ...optsRef.current, theme: themeOverride }
           : optsRef.current;
-        return renderMapImage(d, opts, width, height, sp.title, subtitle, format);
+        const state = useStore.getState();
+        const exported = {...opts,exportSpec:sp};
+        const footer=await mapExportFooter(d,exported,state.filters);
+        return renderMapImage(d,{...exported,exportFooter:footer},width,height,sp.title,subtitle,format);
       },
     });
 
@@ -287,10 +292,10 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
               </span>
             </div>
           )}
-          <div className="map-tip-row">
+          {!data.isMean && <><div className="map-tip-row">
             {binLabel("hard", hover.die.hbin, info?.hbins.find((b) => b.code === hover.die.hbin)?.name)}
           </div>
-          <div className="map-tip-row">{binLabel("soft", hover.die.sbin, info?.sbins.find((b) => b.code === hover.die.sbin)?.name)}</div>
+          <div className="map-tip-row">{binLabel("soft", hover.die.sbin, info?.sbins.find((b) => b.code === hover.die.sbin)?.name)}</div></>}
           {outOfSpec && <div className="map-tip-flag">Out of spec</div>}
         </div>
       )}

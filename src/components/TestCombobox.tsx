@@ -5,8 +5,8 @@ import { testLabelWithUnits } from "../lib/format";
 import { matchesSearch } from "../lib/search";
 
 /** One editable selection field, with the same fuzzy search as the test list. */
-export function TestCombobox({ tests, value, onChange }: {
-  tests: TestInfo[]; value: number | null; onChange: (value: number) => void;
+export function TestCombobox({ tests, value, onChange, label:fieldLabel="Y test" }: {
+  tests: TestInfo[]; value: number | null; onChange: (value: number) => void; label?:string;
 }) {
   const id = useId();
   const [open, setOpen] = useState(false), [query, setQuery] = useState("");
@@ -40,7 +40,7 @@ export function TestCombobox({ tests, value, onChange }: {
   return <div className="test-combobox" ref={root} onBlur={(e) => {
     if (!e.currentTarget.contains(e.relatedTarget as Node)) { setOpen(false); setQuery(""); }
   }}>
-    <input className="input" role="combobox" aria-label="Y test" aria-expanded={open}
+    <input className="input" role="combobox" aria-label={fieldLabel} aria-expanded={open}
       aria-autocomplete="list" aria-controls={id} aria-activedescendant={open && rows[active] ? `${id}-${rows[active].i}` : undefined}
       value={open ? query : label} placeholder="Select or type to search…"
       onFocus={() => { setOpen(true); setQuery(""); setActive(0); }}
@@ -53,7 +53,7 @@ export function TestCombobox({ tests, value, onChange }: {
         }
         if (e.key === "Enter" && open && rows[active]) { e.preventDefault(); choose(rows[active].i); }
       }} />
-    {open && createPortal(<div ref={list} id={id} role="listbox" aria-label="Y test matches" className="test-combobox-list" style={position}>
+    {open && createPortal(<div ref={list} id={id} role="listbox" aria-label={`${fieldLabel} matches`} className="test-combobox-list" style={position}>
       {rows.map((row, index) => <button type="button" tabIndex={-1} role="option" id={`${id}-${row.i}`} key={row.i}
         title={row.label} aria-selected={index === active} onMouseDown={(e) => e.preventDefault()}
         onClick={() => choose(row.i)}>{row.label}</button>)}

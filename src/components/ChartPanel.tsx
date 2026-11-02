@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { useRestorePlotSelection } from "../lib/usePlotMemory";
+import { useEffect, useMemo, useRef, useState, useCallback, type ComponentType } from "react";
 import Plotly from "plotly.js-dist-min";
 import { PLOT_LABELS, useStore } from "../store";
-import type { PlotSpec, PlotType } from "../types";
+import type { PlotSpec, PlotType, PlotSelection } from "../types";
 import { usePlotData, type PlotData } from "../lib/usePlotData";
 import {
   figureBox,
@@ -19,10 +20,11 @@ import { BinMapView, type BinMapExportApi } from "./BinMapView";
 import { MapFacetView, type MapFacetExportApi } from "./MapFacetView";
 import { ParetoFacetView, type ParetoFacetExportApi } from "./ParetoFacetView";
 import { EmptyState } from "./EmptyState";
-import { EXPORT_CONFIG } from "../charts/plotlyTheme";
+import { renderExportFigure, splitImageName, imageScope, IMAGE_WIDTH, IMAGE_HEIGHT, imageHeight } from "../charts/imageExport";
 import type { Theme } from "../lib/theme";
 import { binLabel, binYieldText } from "../lib/theme";
 import * as api from "../lib/api";
+import { paintExportProgress, type ImageExportJob } from "../lib/exportJobs";
 import { fmt, fmtInt, safeName } from "../lib/format";
 import {
   IconArrowLeft,
@@ -387,15 +389,20 @@ function SplitPlotView({
   spec,
   theme,
   facets,
+  onSelection,
 }: {
   data: PlotData;
   spec: PlotSpec;
   theme: Theme;
   facets: Facet[];
+  onSelection: (selection: PlotSelection | null) => void;
 }) {
   const viewKey = usePlotViewKey(spec);
   const [selected, setSelected] = usePlotSelection(`split:${spec.type}`, viewKey);
+  useRestorePlotSelection(facets.map(f=>f.label),setSelected);
   const facet = selected !== null ? facets[selected] : undefined;
+  useEffect(()=>{onSelection(facet??null);},[facet,onSelection]);
+  useEffect(()=>()=>onSelection(null),[onSelection]);
   const detail = useMemo(
     () =>
       data && facet
@@ -494,40 +501,6 @@ function SplitPlotView({
   );
 }
 
-/**
- * Render an export at slide-friendly dimensions. The on-screen chart has the
- * editable title in the card header, but exported images need the title baked
- * in, so we build a standalone light-theme figure for clipboard/JPG output.
- */
-async function renderExportFigure(
-  fig: Figure,
-  format: "png" | "jpeg",
-  width = 2400,
-  height = 1500
-): Promise<string> {
-  const host = document.createElement("div");
-  host.style.cssText = `position:fixed;left:-30000px;top:0;width:${width}px;height:${height}px;`;
-  document.body.appendChild(host);
-  try {
-    const layout = { ...fig.layout, width, height, autosize: false };
-    await Plotly.newPlot(host, fig.data, layout, EXPORT_CONFIG);
-    return await Plotly.toImage(host, {
-      format,
-      width,
-      height,
-      scale: 1.25,
-      quality: 0.96,
-    });
-  } finally {
-    try {
-      Plotly.purge(host);
-    } catch {
-      /* ignore */
-    }
-    host.remove();
-  }
-}
-
 export function ChartPanel() {
   const info = useStore((s) => s.info);
   const spec = useStore((s) => s.spec);
@@ -542,6 +515,13 @@ export function ChartPanel() {
 
   const { data, loading, error } = usePlotData();
   const plotRef = useRef<HTMLDivElement>(null);
+  const [selectionState,setSelectionState]=useState<{key:string;selection:PlotSelection|null}>({key:"",selection:null});
+  const onSelection=useCallback((selection:PlotSelection|null)=>{setSelectionState({key:viewKey,selection});useStore.setState({plotSelection:selection});},[viewKey]);
+  const opened=selectionState.key===viewKey?selectionState.selection:null;
+  const exportingRef = useRef(false);
+  const [exporting, setExporting] = useState(false);
+  const exportRevision = JSON.stringify([viewKey, spec, opened]);
+  const revisionRef = useRef(exportRevision); revisionRef.current = exportRevision;
   const mapApi = useRef<MapExportApi | null>(null);
   const mapFacetApi = useRef<MapFacetExportApi | null>(null);
   const paretoFacetApi = useRef<ParetoFacetExportApi | null>(null);
@@ -571,12 +551,31 @@ export function ChartPanel() {
   );
   const mapSpec = useMemo(() => ({ ...spec, mapMode: "value" as const }), [spec]);
 
+  useEffect(()=>{
+    if(!useStore.getState().requestedPlotSelection||loading||!currentData)return;
+    if(!["binmap"].includes(spec.type)&&!(spec.type==="map"&&spec.groupBy!=="none")&&!(spec.type==="pareto"&&spec.groupBy!=="none")&&!facets.length)
+      useStore.setState({requestedPlotSelection:null,plotSelection:null});
+  },[currentData,loading,spec,facets]);
   if (!info) return <EmptyState />;
 
   const stats = currentData ? statsFor(currentData, spec) : [];
   const isMap = spec.type === "map";
   const isBinMap = spec.type === "binmap";
   const mapSplitActive = isMap && spec.groupBy !== "none";
+  const inGrid=(mapSplitActive||paretoSplitActive||splitActive||isBinMap)&&!opened;
+  const canCopy=!inGrid||isBinMap;
+  const makeJobs=(single:boolean):ImageExportJob[]=>{
+    if(mapSplitActive)return mapFacetApi.current?.jobs("light",single)??[];
+    if(paretoSplitActive)return (paretoFacetApi.current?.figures("light",single)??[]).map(image=>({label:image.label,render:format=>renderImage(image.figure,format)}));
+    if(isBinMap)return binMapApi.current?.jobs("light",single)??[];
+    if(isMap)return [{label:"",render:async format=>{const url=await mapApi.current?.toDataURL(format,"light",IMAGE_WIDTH,imageHeight("map"));if(!url)throw new Error("The map is not ready.");return url;}}];
+    if(!currentData)return [];
+    const entries: (Facet|undefined)[]=splitActive?(single?[opened??undefined]:facets):[undefined];
+    return entries.map(facet=>({label:facet?.label??"",render:async format=>{
+      const fig=buildFigure(currentData,spec,"light",facet?`${spec.title} · ${facet.label}`:spec.title,facet);
+      if(!fig)throw new Error("The plot is not ready.");return renderImage(fig,format);
+    }}));
+  };
 
   const commitTitle = () => {
     const t = titleDraft.trim();
@@ -584,30 +583,28 @@ export function ChartPanel() {
     else setTitleDraft(spec.title);
   };
 
+  const renderImage = (fig: Figure, format: "png" | "jpeg") =>
+    renderExportFigure({ ...fig, exportFilter: filters }, format);
+  const assertUnchanged = () => {
+    if (revisionRef.current !== exportRevision) throw new Error("The plot changed during export. Start the export again.");
+  };
+  const exportReady = () => {
+    if (exportingRef.current || loading || error) return false;
+    if (mapSplitActive) return mapFacetApi.current?.isReady() ?? false;
+    if (paretoSplitActive) return paretoFacetApi.current?.isReady() ?? false;
+    return !!currentData;
+  };
   const copyImage = async () => {
+    if(!canCopy)return;
+    if (!exportReady()) { notify("Wait for the plot to finish loading."); return; }
+    exportingRef.current=true;setExporting(true);
     try {
-      let url: string | null = null;
-      if (mapSplitActive) {
-        url = mapFacetApi.current?.toDataURLs("png", "light", 2400, 1500)[0]?.url ?? null;
-      } else if (isMap) {
-        url = mapApi.current?.toDataURL("png", "light", 2400, 1500) ?? null;
-      } else if (isBinMap) {
-        url = binMapApi.current?.toDataURL("png", "light", 2400, 1500) ?? null;
-      } else if (paretoSplitActive) {
-        const first = paretoFacetApi.current?.figures("light")[0];
-        if (first) url = await renderExportFigure(first.figure, "png");
-      } else if (currentData) {
-        const first = splitActive ? facets[0] : undefined;
-        const fig = buildFigure(
-          currentData,
-          spec,
-          "light",
-          first ? `${spec.title} · ${first.label}` : spec.title,
-          first
-        );
-        if (fig) url = await renderExportFigure(fig, "png");
-      }
-      if (!url) throw new Error("The chart is not ready yet.");
+      await paintExportProgress();await document.fonts.ready;
+      let url:string|null=null;
+      if(isBinMap)url=binMapApi.current?.toDataURL("png","light")??null;
+      else {const job=makeJobs(true)[0];if(job)url=await job.render("png");}
+      if(!url)throw new Error("The chart is not ready yet.");
+      assertUnchanged();
 
       if (api.isTauri) {
         // WebView2 blocks navigator.clipboard.write for images; use the native
@@ -635,79 +632,36 @@ export function ChartPanel() {
       notify("Image copied to the clipboard.");
     } catch (e) {
       setError(`Could not copy the image. ${String(e)}`);
-    }
+    } finally { exportingRef.current = false; setExporting(false); }
   };
 
-  const saveJpg = async () => {
-    try {
-      // Split plots are a cluster: save one image per split into a folder,
-      // with the split name in every filename.
-      if (mapSplitActive) {
-        const folder = await api.pickFolder();
-        if (!folder) return;
-        const images = mapFacetApi.current?.toDataURLs("jpeg", "light", 2400, 1500) ?? [];
-        const base = folder.replace(/[\\/]+$/, "");
-        for (const image of images) {
-          const file = `${safeName(spec.title)}_${safeName(image.label)}.jpg`;
-          await api.saveImage(`${base}\\${file}`, image.url);
-        }
-        notify(`Saved ${images.length} split map${images.length === 1 ? "" : "s"}.`);
-        return;
+  const saveJpg=async()=>{
+    if(!exportReady()){notify("Wait for the plot to finish loading.");return;}
+    exportingRef.current=true;setExporting(true);
+    const batch=inGrid;
+    try{
+      // Open the picker immediately. No chart construction/encoding precedes it.
+      const name=opened?splitImageName(spec.title,opened.label,0,safeName,isBinMap?"wafer":spec.groupBy):`${safeName(spec.title||"plot")}.jpg`;
+      const target=await (batch?api.pickFolder():api.pickSavePath(name,["jpg","jpeg"]));
+      if(!target)return;
+      assertUnchanged();
+      const jobs=makeJobs(!batch);
+      if(!jobs.length)throw new Error("The plots are not ready yet.");
+      if(batch)useStore.getState().setBusy(true,0,`Saving ${jobs.length} images…`);
+      for(const [index,job]of jobs.entries()){
+        assertUnchanged();if(batch)useStore.getState().setProgress(index/jobs.length*100,`Rendering ${index+1} of ${jobs.length}: ${job.label||"plot"}…`);
+        await paintExportProgress();await document.fonts.ready;
+        const url=await job.render("jpeg");
+        assertUnchanged();if(batch)useStore.getState().setProgress(index/jobs.length*100,`Saving ${index+1} of ${jobs.length}: ${job.label||"plot"}…`);
+        const group=job.label==="Overview"?undefined:isBinMap?"wafer":spec.groupBy;
+        const file=batch?splitImageName(spec.title,job.label,index,safeName,group):"";
+        const path=batch?`${target.replace(/[\\/]+$/,"")}\\${file}`:target;
+        await api.saveImage(path,url);
+        if(batch)useStore.getState().setProgress((index+1)/jobs.length*100,`Saved ${index+1} of ${jobs.length}`);
       }
-      if (paretoSplitActive) {
-        const folder = await api.pickFolder();
-        if (!folder) return;
-        const images = paretoFacetApi.current?.figures("light") ?? [];
-        const base = folder.replace(/[\\/]+$/, "");
-        for (const image of images) {
-          const url = await renderExportFigure(image.figure, "jpeg");
-          const file = `${safeName(spec.title)}_${safeName(image.label)}.jpg`;
-          await api.saveImage(`${base}\\${file}`, url);
-        }
-        notify(`Saved ${images.length} split Pareto${images.length === 1 ? "" : "s"}.`);
-        return;
-      }
-      if (splitActive && !isMap && !isBinMap) {
-        const folder = await api.pickFolder();
-        if (!folder) return;
-        let count = 0;
-        for (const facet of facets) {
-          if (!currentData) break;
-          const facetFigure = buildFigure(
-            currentData,
-            spec,
-            "light",
-            `${spec.title} · ${facet.label}`,
-            facet
-          );
-          if (!facetFigure) continue;
-          const url = await renderExportFigure(facetFigure, "jpeg");
-          const base = folder.replace(/[\\/]+$/, "");
-          const file = `${safeName(spec.title)}_${safeName(facet.label)}.jpg`;
-          await api.saveImage(`${base}\\${file}`, url);
-          count++;
-        }
-        notify(`Saved ${count} split image${count === 1 ? "" : "s"}.`);
-        return;
-      }
-
-      const path = await api.pickSavePath(`${safeName(spec.title || "plot")}.jpg`, ["jpg", "jpeg"]);
-      if (!path) return;
-      let url: string | null = null;
-      if (isMap) {
-        url = mapApi.current?.toDataURL("jpeg", "light", 2400, 1500) ?? null;
-      } else if (isBinMap) {
-        url = binMapApi.current?.toDataURL("jpeg", "light", 2400, 1500) ?? null;
-      } else if (currentData) {
-        const fig = buildFigure(currentData, spec, "light", spec.title);
-        if (fig) url = await renderExportFigure(fig, "jpeg");
-      }
-      if (!url) throw new Error("The chart is not ready yet.");
-      await api.saveImage(path, url);
-      notify(`Saved ${api.fileName(path)}`);
-    } catch (e) {
-      setError(`Could not save the image. ${String(e)}`);
-    }
+      notify(batch?`Saved ${jobs.length} images to ${api.fileName(target)}.`:`Saved ${api.fileName(target)}`);
+    }catch(error){setError(`Could not save the images. ${String(error)}`);}
+    finally{exportingRef.current=false;setExporting(false);if(batch)useStore.getState().setBusy(false);}
   };
 
   return (
@@ -725,7 +679,7 @@ export function ChartPanel() {
           </button>
         ))}
         <div className="tabs-spacer" />
-        <button className="btn" onClick={addReport} title="Add this plot to the report">
+        <button className="btn" onClick={()=>addReport(opened??undefined)} disabled={loading||exporting||!!error} title={opened?"Add the opened plot to the report":"Add this plot to the report"}>
           <IconPlus size={15} /> Add to report
         </button>
       </div>
@@ -749,10 +703,10 @@ export function ChartPanel() {
               aria-label="Plot title"
             />
             <div className="chart-actions">
-              <button className="btn icon" onClick={copyImage} title="Copy image to clipboard">
+              <button className="btn icon" onClick={copyImage} disabled={!canCopy || loading || exporting || !!error} title="Copy image to clipboard">
                 <IconCopy size={16} />
               </button>
-              <button className="btn icon" onClick={saveJpg} title="Save as JPG">
+              <button className="btn icon" onClick={saveJpg} disabled={loading || exporting || !!error} title="Save as JPG">
                 <IconImage size={16} />
               </button>
             </div>
@@ -789,12 +743,14 @@ export function ChartPanel() {
               spec={spec}
               filter={filters}
               onReady={(apiRef) => (mapFacetApi.current = apiRef)}
+              onSelection={onSelection}
             />
           ) : paretoSplitActive ? (
             <ParetoFacetView
               spec={spec}
               filter={filters}
               onReady={(apiRef) => (paretoFacetApi.current = apiRef)}
+              onSelection={onSelection}
             />
           ) : currentData?.kind === "map" ? (
             <WaferMapView
@@ -807,9 +763,10 @@ export function ChartPanel() {
               data={currentData.data}
               spec={spec}
               onReady={(apiRef) => (binMapApi.current = apiRef)}
+              onSelection={onSelection}
             />
           ) : splitActive && currentData ? (
-            <SplitPlotView data={currentData} spec={spec} theme={theme} facets={facets} />
+            <SplitPlotView data={currentData} spec={spec} theme={theme} facets={facets} onSelection={onSelection} />
           ) : figure || (!spec.splitPlots && ["box", "hist", "scatter", "trend", "pareto"].includes(spec.type)) ? (
             <>
               <PlotlyChart key={spec.type} figure={figure} hostRef={plotRef} cacheKey={viewKey} />

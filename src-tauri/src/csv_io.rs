@@ -179,13 +179,6 @@ fn looks_numeric(s: &str) -> bool {
     false
 }
 
-fn is_meta_header(norm: &str) -> bool {
-    matches!(
-        norm,
-        "split" | "group" | "grouping" | "label" | "category" | "class" | "segment" | "subgroup"
-    )
-}
-
 /// A text CSV column that can be used as a wafer-level grouping/colour key.
 /// Excel-added columns such as `Split` are imported this way.
 struct MetaColumn {
@@ -799,6 +792,7 @@ pub fn import_csv_with_mapping(
                 imp.sbin[row] = lay.sbin.and_then(|i| rec.get(i)).map(parse_u16).unwrap_or(UNKNOWN_BIN);
                 row_keys.insert(key, row);
             }
+            for (m,&ci)in meta_indices.iter().enumerate(){imp.write_text(&meta[m].name,row,rec.get(ci).unwrap_or(""));}
             measured.insert((row, id));
             let idx = imp.column((id, 0), row, parse_f32(rec.get(vi).unwrap_or("")));
             if imp.tests[idx].name.is_empty() {
@@ -862,8 +856,7 @@ pub fn import_csv_with_mapping(
     let mut numeric: Vec<usize> = Vec::new();
     let mut meta_indices: Vec<usize> = Vec::new();
     for &i in sample.iter() {
-        let n = norm(&headers[i]);
-        if is_meta_header(&n) || Some(i) == lay.wafer_number {
+        if Some(i) == lay.wafer_number {
             if !meta_name(&headers[i]).is_empty() {
                 meta_indices.push(i);
             }
@@ -929,6 +922,8 @@ pub fn import_csv_with_mapping(
             meta[m].observe(wafer, rec.get(ci).unwrap_or(""));
         }
         let r = imp.new_row(lot, wafer);
+        for (m,&ci)in meta_indices.iter().enumerate(){imp.write_text(&meta[m].name,r,rec.get(ci).unwrap_or(""));}
+        if let Some(ci)=lay.part {imp.write_text("Part ID",r,rec.get(ci).unwrap_or(""));}
         imp.site[r] = lay.site.and_then(|i| rec.get(i)).and_then(parse_u32).and_then(|v| u8::try_from(v).ok());
         imp.x[r] = lay.x.and_then(|i| rec.get(i)).map(parse_i16).unwrap_or(0);
         imp.y[r] = lay.y.and_then(|i| rec.get(i)).map(parse_i16).unwrap_or(0);

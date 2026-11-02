@@ -42,6 +42,8 @@ export interface CustomColumn {
 }
 
 export interface DatasetInfo {
+  dataCategories?:DataCategoryInfo[];
+  categorySources?:CategorySourceInfo[];
   sites?: number[];
   /** Earlier die attempts replaced by the latest imported attempt. */
   retestCount?: number;
@@ -63,6 +65,7 @@ export interface StatFilter {
 }
 
 export interface Filter {
+  categories?:Record<string,string[]>;
   /** Missing site metadata uses code 65535. */
   sites?: number[];
   lots: number[];
@@ -71,6 +74,9 @@ export interface Filter {
   sbins: number[];
   stat: StatFilter | null;
 }
+
+export interface DataCategoryInfo {id:string;name:string;values:string[];labels:string[];counts:number[];automatic:boolean}
+export interface CategorySourceInfo {id:string;name:string;kind:"test"|"text"}
 
 export const emptyFilter = (): Filter => ({
   lots: [],
@@ -127,6 +133,7 @@ export interface MapDie {
 }
 
 export interface MapResponse {
+  testTotal?: number;
   unknownBins?: number;
   testPass?: number;
   testFail?: number;
@@ -277,6 +284,7 @@ export interface ScatterSeries {
 }
 
 export interface ScatterResponse {
+  groupTotals?: Record<string, number>;
   series: ScatterSeries[];
   xTest: TestInfo;
   yTest: TestInfo;
@@ -378,8 +386,23 @@ export const defaultSpec = (type: PlotType, test: number | null, title: string):
   splitPlots: false,
 });
 
+export interface PlotSelection { label: string; key?: number; wafer?: number }
+
 export interface ReportItem {
+  references?: ReportReference[];
+  runtimeError?: string;
+  selection?: PlotSelection;
   id: string;
   spec: PlotSpec;
   filters: Filter;
 }
+
+export interface TestIdentity { number: number | null; name: string; units: string }
+export interface WaferIdentity { lot: string; name: string }
+export interface ReportReference {
+  explicit?: { dataset: string; index: number };
+  field: string;
+  kind: "test" | "category" | "lot" | "wafer" | "split" | "hbin" | "sbin" | "site";
+  value: string | number | TestIdentity | WaferIdentity | { category: string; label: string } | { legacyIndex: number | null; label: string };
+}
+export interface ReportIssue { key: string; kind: string; label: string; reference?: ReportReference }

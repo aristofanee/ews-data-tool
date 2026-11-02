@@ -3,6 +3,7 @@ import Plotly from "plotly.js-dist-min";
 import type { Figure } from "../charts/figures";
 import { PLOTLY_CONFIG } from "../charts/plotlyTheme";
 import { rasterScatterPreview } from "../charts/scatterPreview";
+import { restoreBoundaryLimitLines } from "../charts/limitLineClipping";
 
 interface Props {
   figure: Figure | null;
@@ -69,6 +70,7 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     if (!figure) return;
     let alive = true;
     const graph = el as any;
+    const restoreLimitLines = () => restoreBoundaryLimitLines(el);
     const saved = cacheKey ? views.get(cacheKey) : undefined;
     const defaults: Record<string, unknown> = {};
     const reset = () => {
@@ -90,6 +92,8 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
       ? rasterScatterPreview(figure, el.clientWidth, el.clientHeight) : figure;
     void Plotly.react(el, rendered.data, structuredClone(rendered.layout), config).then(async () => {
       if (!alive) return;
+      restoreLimitLines();
+      graph.on?.("plotly_afterplot", restoreLimitLines);
       if (!isStatic) {
         for (const [key, axis] of Object.entries(graph._fullLayout) as [string, any][]) {
           if (/^[xy]axis\d*$/.test(key) && Array.isArray(axis.range)) {
@@ -116,6 +120,7 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     return () => {
       alive = false;
       graph.removeListener?.("plotly_doubleclick", reset);
+      graph.removeListener?.("plotly_afterplot", restoreLimitLines);
       capture();
       graph.removeListener?.("plotly_relayout", capture);
       graph.removeListener?.("plotly_restyle", capture);

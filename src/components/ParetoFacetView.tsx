@@ -1,5 +1,6 @@
+import { useRestorePlotSelection } from "../lib/usePlotMemory";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Filter, ParetoResponse, PlotSpec } from "../types";
+import type { Filter, ParetoResponse, PlotSpec, PlotSelection } from "../types";
 import * as api from "../lib/api";
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
@@ -11,13 +12,15 @@ import { usePlotSelection, usePlotViewKey } from "../lib/usePlotMemory";
 import { IconArrowLeft, IconChevronLeft, IconChevronRight } from "./Icons";
 
 export interface ParetoFacetExportApi {
-  figures: (theme?: Theme) => { label: string; figure: Figure }[];
+  isReady: () => boolean;
+  figures: (theme?: Theme, selectedOnly?: boolean) => { label: string; figure: Figure }[];
 }
 
 interface Props {
   spec: PlotSpec;
   filter: Filter;
   onReady?: (api: ParetoFacetExportApi | null) => void;
+  onSelection?: (selection:PlotSelection|null)=>void;
 }
 
 interface Entry {
@@ -29,7 +32,7 @@ interface Entry {
  * One Pareto per selected group. Several groups are rendered as static,
  * clickable thumbnails; a single group is shown at full size.
  */
-export function ParetoFacetView({ spec, filter, onReady }: Props) {
+export function ParetoFacetView({ spec, filter, onReady, onSelection }: Props) {
   const info = useStore((s) => s.info);
   const theme = useStore((s) => s.theme);
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -40,6 +43,7 @@ export function ParetoFacetView({ spec, filter, onReady }: Props) {
   const [selected, setSelected] = usePlotSelection("pareto-split", selectionKey);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
 
+  useRestorePlotSelection(entries.map(e=>e.label),setSelected,!loading&&loadedKey===viewKey);
   const groups = useMemo(
     () => (info ? dataGroups(info, filter, spec.groupBy || "none") : []),
     [info, filter, spec.groupBy]
@@ -84,6 +88,11 @@ export function ParetoFacetView({ spec, filter, onReady }: Props) {
     if (!loading && selected !== null && selected >= entries.length) setSelected(null);
   }, [entries.length, selected, loading]);
 
+  useEffect(()=>{const index=selected??(entries.length===1?0:null);onSelection?.(index!==null&&entries[index]?{label:entries[index].label}:null);},[selected,entries,onSelection]);
+  useEffect(()=>()=>onSelection?.(null),[onSelection]);
+  const validRef = useRef(false);
+  validRef.current = !loading && !error && loadedKey === viewKey;
+  const selectedRef = useRef(selected); selectedRef.current = selected;
   const readyRef = useRef(onReady);
   readyRef.current = onReady;
   const entriesRef = useRef(entries);
@@ -95,14 +104,18 @@ export function ParetoFacetView({ spec, filter, onReady }: Props) {
 
   useEffect(() => {
     readyRef.current?.({
-      figures: (themeOverride) => {
+      isReady: () => validRef.current,
+      figures: (themeOverride, selectedOnly = false) => {
+        if (!validRef.current) throw new Error("The Pareto plots are still loading.");
         const sp = specRef.current;
-        return entriesRef.current.map(({ data, label }) => ({
+        const entries = selectedOnly ? entriesRef.current.slice(selectedRef.current ?? 0, (selectedRef.current ?? 0) + 1) : entriesRef.current;
+        return entries.map(({ data, label }) => ({
           label,
           figure: figurePareto(data, {
             theme: themeOverride ?? themeRef.current,
             spec: sp,
             title: `${sp.title} · ${label}`,
+            facetLabel: label,
           }),
         }));
       },

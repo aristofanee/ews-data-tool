@@ -9,6 +9,8 @@ import type {
 } from "../types";
 import { axisTitle, fmt, fmtInt, testLabel, tidyName } from "../lib/format";
 import { normalPdf, quantileSorted } from "../lib/stats";
+import { categoryName, type ExportPlotStyle } from "./imageExport";
+import type { Filter } from "../types";
 import { graphFontOffset } from "../lib/demoFonts";
 import type { Theme } from "../lib/theme";
 import { binColor, binLabel } from "../lib/theme";
@@ -24,6 +26,11 @@ import {
 } from "./plotlyTheme";
 
 export interface Figure {
+  /** Standalone image context, drawn by the export renderer only. */
+  exportNotes?: string[];
+  exportSubtitle?: string;
+  exportStyle?: ExportPlotStyle;
+  exportFilter?: Filter;
   data: any[];
   layout: any;
   rasterScatter?: boolean;
@@ -41,7 +48,7 @@ export interface FigureOpts {
 }
 
 function categoryTitle(value: string): string {
-  return ({ wafer: "Wafer", lot: "Lot", site: "Site", hbin: "HBIN", sbin: "SBIN" } as Record<string, string>)[value] ?? value;
+  return categoryName(value);
 }
 
 /** Small charts retain meaningful axes while using consistent compact type. */
@@ -116,7 +123,11 @@ function tickSubset(labels: string[], stride: number): number[] {
   const keep: number[] = [];
   for (const b of blocks) {
     for (let i = b.start; i <= b.end; i++) {
-      if ((i - b.start) % stride === 0) keep.push(i);
+      if ((i - b.start) % stride === 0) {
+        // Keep the new lot's first tick clear of the preceding lot's last tick.
+        if (i === b.start && keep.length && i - keep[keep.length - 1] < stride) keep.pop();
+        keep.push(i);
+      }
     }
   }
   return keep;
@@ -180,6 +191,7 @@ export function limitLines(
   const add = (v: number, label: string, anchor: "bottom" | "top") => {
     // Draw above gridlines so a gridline cannot split the dashes.
     shapes.push({
+      name: "ews-spec-limit",
       type: "line",
       xref: "paper",
       x0: 0,
@@ -224,6 +236,7 @@ export function limitLinesX(
   const annotations: any[] = [];
   const add = (v: number, label: string, side: "left" | "right") => {
     shapes.push({
+      name: "ews-spec-limit",
       type: "line",
       xref: "x",
       x0: v,
@@ -339,7 +352,7 @@ function addGroupBlocks(t: ChartTheme, groups: { groupLabel: string }[], spec: P
 
 }
 
-export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
+function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
   const style = chartStyle(opts.preview ? false : spec.presentation);
@@ -482,6 +495,9 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
   layout.boxgroupgap = 0;
   layout.showlegend = false;
   if (hasGrouping) addGroupBlocks(t, groups, spec, style, limits.shapes, limits.annotations);
+  else if (!preview && spec.xAxis === "wafer" && addLabelBlocks(t, xLabels, limits.shapes, limits.annotations, style)) {
+    layout.margin.t += Math.round(style.annotation * 1.2);
+  }
   layout.xaxis = {
     ...layout.xaxis,
     title: preview
@@ -543,14 +559,17 @@ export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
     const columns = ["x", "y", "customdata"];
     for (const column of columns) for (const value of trace[column]) batch[column].push(value);
   }
-  return previewFigure([...boxes, ...batches.values()], layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${units ? ` [${units}]` : ""}`);
+  const result = previewFigure([...boxes, ...batches.values()], layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${units ? ` [${units}]` : ""}`);
+  result.exportNotes = [`${fmtInt(groups.reduce((n, g) => n + g.summary.n, 0))} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} excluded by statistical filtering` : ""}`,
+    ...(data.truncated && spec.showPoints === "all" ? ["Regular markers are sampled; every outlier is retained. Box statistics use all considered measurements."] : [])];
+  return result;
 }
 
 /* ------------------------------------------------------------------ */
 /* Pareto                                                              */
 /* ------------------------------------------------------------------ */
 
-export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
+function figureParetoCore(data: ParetoResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
   const style = chartStyle(opts.preview ? false : spec.presentation);
@@ -696,7 +715,8 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
       ticksuffix: "%",
       showgrid: false,
       zeroline: false,
-      linecolor: t.axis,
+      linecolor: t.green,
+      tickcolor: t.green,
       linewidth: style.axisLine,
       showline: true,
       showticklabels: !preview,
@@ -709,7 +729,8 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
             standoff: 18,
           },
     };
-    return previewFigure(traces, layout, preview, data.groupLabel || "Group", "Fail [%]");
+    return { ...previewFigure(traces, layout, preview, data.groupLabel || "Group", "Fail [%]"),
+      exportNotes: [`${spec.binCategory === "soft" ? "SBIN" : "HBIN"} · ${fmtInt(data.total)} tested dice · failure percentages use all tested dice`] };
   }
 
   const bars = data.bars;
@@ -778,14 +799,15 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
     layout.xaxis.ticktext = bars.map((b) => b.name === "Others" ? "Others" : String(b.code));
     layout.xaxis.tickangle = -30;
   }
-  return previewFigure(traces, layout, preview, spec.binCategory === "soft" ? "SBIN" : "HBIN", "Fail [%]");
+  return { ...previewFigure(traces, layout, preview, spec.binCategory === "soft" ? "SBIN" : "HBIN", "Fail [%]"),
+    exportNotes: [`${spec.binCategory === "soft" ? "SBIN" : "HBIN"} · ${fmtInt(data.total)} tested dice · failure percentages use all tested dice`] };
 }
 
 /* ------------------------------------------------------------------ */
 /* Histogram                                                           */
 /* ------------------------------------------------------------------ */
 
-export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
+function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
   const style = chartStyle(opts.preview ? false : spec.presentation);
@@ -944,14 +966,15 @@ export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
   }
   layout.shapes = shapes;
   layout.annotations = annotations;
-  return previewFigure(traces, layout, preview, `${testLabel(data.test)}${data.test.units ? ` [${data.test.units}]` : ""}`, "Count");
+  return { ...previewFigure(traces, layout, preview, `${testLabel(data.test)}${data.test.units ? ` [${data.test.units}]` : ""}`, "Count"),
+    exportNotes: [`${fmtInt(data.summary.n)} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} excluded by statistical filtering` : ""}`] };
 }
 
 /* ------------------------------------------------------------------ */
 /* Trend                                                               */
 /* ------------------------------------------------------------------ */
 
-export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
+function figureTrendCore(data: TrendResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme), spec = opts.spec;
   const preview = opts.preview === true;
   const style = chartStyle(preview ? false : spec.presentation);
@@ -1019,7 +1042,8 @@ export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
     layout.margin.t = Math.max(layout.margin.t, style.margin.t + Math.round(style.annotation * 1.1));
   }
   layout.shapes = shapes; layout.annotations = annotations;
-  return previewFigure(traces, layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${data.test.units ? ` [${data.test.units}]` : ""}`);
+  return { ...previewFigure(traces, layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${data.test.units ? ` [${data.test.units}]` : ""}`),
+    exportNotes: [`${fmtInt(points.reduce((n, p) => n + p.n, 0))} considered measurements · ${fmtInt(points.length)} category means · ${spec.showBand ? "band: ±1 SD" : "band hidden"}`] };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1065,7 +1089,7 @@ function scatterHover(
   );
 }
 
-export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
+function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
   const style = chartStyle(opts.preview ? false : spec.presentation);
@@ -1140,6 +1164,9 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
         traces.push({
           type: traceType,
           mode: "markers",
+          // Plotly retains colourbar drawing state by trace identity. A change
+          // of orientation needs a fresh identity to discard the old bar axes.
+          uid: `scatter-z-${groupedZ ? "h" : "v"}-${s.key}`,
           name: s.name || data.groupLabel || undefined,
           x: arr.x,
           y: arr.y,
@@ -1409,7 +1436,9 @@ export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
   }
   if (fitShape) layout.shapes = [...(layout.shapes ?? []), fitShape];
   if (annotations.length && !preview) layout.annotations = annotations;
-  return { ...previewFigure(traces, layout, preview, `${testLabel(data.xTest)}${data.xTest.units ? ` [${data.xTest.units}]` : ""}`, `${testLabel(data.yTest)}${data.yTest.units ? ` [${data.yTest.units}]` : ""}`), rasterScatter: preview };
+  return { ...previewFigure(traces, layout, preview, `${testLabel(data.xTest)}${data.xTest.units ? ` [${data.xTest.units}]` : ""}`, `${testLabel(data.yTest)}${data.yTest.units ? ` [${data.yTest.units}]` : ""}`), rasterScatter: preview,
+    exportNotes: [`${fmtInt(series.reduce((n, s) => n + s.points.length, 0))} displayed points · ${fmtInt(data.total)} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} excluded` : ""}`,
+      ...(data.truncated ? ["Sampled display. Correlation uses all considered measurements; the fitted line uses displayed points."] : [])] };
 }
 
 /** Small helper used by the report to summarise a plot in text. */
@@ -1421,4 +1450,24 @@ export function describeBox(data: BoxResponse): string {
 export function describeHist(data: HistResponse): string {
   const s = data.summary;
   return `${fmtInt(s.n)} dice · mean ${fmt(s.mean)} · sd ${fmt(s.sd)}`;
+}
+
+function exportStyle(figure: Figure, opts: FigureOpts, test: import("../types").TestInfo | null, xLabel: string, total: number, facetLabel = opts.facetLabel): Figure {
+  return {...figure, exportStyle:{spec:opts.spec,test,xLabel,total,facetLabel}};
+}
+export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
+  return exportStyle(figureBoxCore(data,opts),opts,data.test,categoryName(opts.spec.xAxis),data.summary.n);
+}
+export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
+  return exportStyle(figureHistCore(data,opts),opts,data.test,"Count",data.summary.n);
+}
+export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
+  return exportStyle(figureTrendCore(data,opts),opts,data.test,categoryName(opts.spec.xAxis),data.points.reduce((n,p)=>n+p.n,0));
+}
+export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
+  return exportStyle(figureParetoCore(data,opts),opts,null,categoryName(opts.spec.xAxis),data.total);
+}
+export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
+  const label = opts.facetKey === undefined ? opts.facetLabel : data.series.find(s=>s.key===opts.facetKey)?.name;
+  return exportStyle(figureScatterCore(data,opts),opts,data.yTest,testLabel(data.xTest)+(data.xTest.units ? ` [${data.xTest.units}]` : ""),(label ? data.groupTotals?.[label] ?? data.series.find(s=>s.name===label)?.points.length ?? 0 : data.total),label);
 }

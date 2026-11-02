@@ -55,8 +55,16 @@ export async function pickFolder(): Promise<string | null> {
   return invoke<string | null>("pick_folder");
 }
 
+export async function createReportFolder(parent:string,name:string):Promise<string>{
+  return !isTauri ? mock.createReportFolder(parent,name) : invoke<string>("create_report_folder",{parent,name});
+}
+
+export async function removeReportImages(folder:string,names:string[]):Promise<void>{
+  return !isTauri ? mock.removeReportImages(folder,names) : invoke<void>("remove_report_images",{folder,names});
+}
+
 export async function pickTemplate(): Promise<string | null> {
-  if (!isTauri) return mock.pickSavePath("template.json");
+  if (!isTauri) return mock.pickTemplate();
   return invoke<string | null>("pick_template");
 }
 
@@ -95,6 +103,11 @@ export async function importProductMetadata(path: string): Promise<DatasetInfo> 
 export async function datasetInfo(): Promise<DatasetInfo | null> {
   if (!isTauri) return null;
   return invoke<DatasetInfo | null>("dataset_info");
+}
+
+export async function setDataCategory(id:string,enabled:boolean):Promise<DatasetInfo>{
+  const info=!isTauri?await mock.setDataCategory(id,enabled):await invoke<DatasetInfo>("set_data_category",{id,enabled});
+  invalidateMaps();return info;
 }
 
 export async function addCustomColumn(
@@ -254,4 +267,11 @@ export async function readText(path: string): Promise<string> {
 
 export function fileName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
+}
+
+export interface LimitCountsRequest { test: number; pairedTest?: number | null; filter: Filter; lsl: number | null; usl: number | null; groupBy?: string | null }
+export interface LimitCount { label: string; total: number; inLimits: number | null }
+export interface LimitCountsResponse { total: number; inLimits: number | null; groups: LimitCount[] }
+export async function limitCounts(req: LimitCountsRequest): Promise<LimitCountsResponse> {
+  return cachedPlot("limit_counts", req, () => !isTauri ? mock.limitCounts(req) : invoke<LimitCountsResponse>("limit_counts", { req }), d => 256 + d.groups.length * 96);
 }

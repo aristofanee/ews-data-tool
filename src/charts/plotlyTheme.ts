@@ -243,6 +243,7 @@ export function baseLayout(t: ChartTheme, title?: string, presentation = false):
   return {
     // Explicit colours are essential: JPEG has no alpha channel, and a
     // transparent Plotly background is encoded as solid black.
+    meta: { ewsPresentation: presentation },
     paper_bgcolor: t.paper,
     plot_bgcolor: t.paper,
     font: { family: CHART_FONT, size: style.tick, color: t.text },
@@ -285,6 +286,7 @@ export const PLOTLY_CONFIG = {
   displaylogo: false,
   scrollZoom: true,
   modeBarButtonsToRemove: [
+    "toImage", // Use the card export controls: title, light theme and shared encoding.
     "select2d",
     "lasso2d",
     "autoScale2d",
@@ -292,13 +294,7 @@ export const PLOTLY_CONFIG = {
     "hoverClosestCartesian",
     "hoverCompareCartesian",
   ],
-  toImageButtonOptions: {
-    format: "jpeg",
-    filename: "ews-plot",
-    width: 2400,
-    height: 1500,
-    scale: 1.5,
-  },
+
 };
 
 export const EXPORT_CONFIG = {

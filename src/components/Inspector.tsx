@@ -123,12 +123,6 @@ export function Inspector() {
   const supportsSpecRange = supportsSpec || spec.type === "map";
   const supportsLog = spec.type === "box" || spec.type === "hist" || spec.type === "trend" || isScatter;
   const valueAxis = spec.type === "map" ? "Colour scale" : spec.type === "hist" ? "Value axis" : "Y axis";
-  const testOptions = info.tests.map((t, i) => (
-    <option key={i} value={i}>
-      {testLabelWithUnits(t)}
-    </option>
-  ));
-
   const categoryOptions = (noneLabel?: string) => (
     <>
       {noneLabel !== undefined && <option value="none">{noneLabel}</option>}
@@ -137,6 +131,7 @@ export function Inspector() {
       <option value="hbin">HBIN</option>
       <option value="sbin">SBIN</option>
       <option value="site">Site</option>
+      {info.dataCategories?.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
       {info.customColumns.map((c) => (
         <option key={c.name} value={c.name}>
           {c.name}
@@ -150,6 +145,7 @@ export function Inspector() {
       <option value="none">None</option>
       <option value="wafer">Wafer ID (OCR)</option>
       <option value="lot">Lot</option>
+      {info.dataCategories?.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
       {info.customColumns.map((c) => (
         <option key={c.name} value={c.name}>
           {c.name}
@@ -164,6 +160,7 @@ export function Inspector() {
       <option value="lot">Lot</option>
       <option value="wafer">Wafer ID (OCR)</option>
       <option value="site">Site</option>
+      {info.dataCategories?.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
       {info.customColumns.map((c) => (
         <option key={c.name} value={c.name}>
           {c.name}
@@ -431,16 +428,7 @@ export function Inspector() {
           </Row>
           {spec.scatterZMode === "continuous" && (
             <Row label="Z test">
-              <select
-                className="input"
-                value={spec.scatterZTest ?? ""}
-                onChange={(e) =>
-                  patch({ scatterZTest: e.target.value === "" ? null : Number(e.target.value) })
-                }
-              >
-                {spec.scatterZTest === null && <option value="">Select…</option>}
-                {testOptions}
-              </select>
+              <TestCombobox label="Z test" tests={info.tests} value={spec.scatterZTest} onChange={(value)=>patch({scatterZTest:value})} />
             </Row>
           )}
           <Check

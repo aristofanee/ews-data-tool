@@ -130,6 +130,48 @@ pub struct CustomColumn {
     pub wafer_values: Vec<u16>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TextColumn {
+    pub name: String,
+    pub values: Vec<String>,
+    pub codes: Vec<u32>,
+    pub lookup: HashMap<String,u32>,
+}
+impl TextColumn {
+    pub fn new(name:String)->Self {Self{name,values:vec![String::new()],codes:Vec::new(),lookup:HashMap::new()}}
+    pub fn write(&mut self,row:usize,text:&str){
+        let text=text.trim();
+        let code=if text.is_empty(){0}else if let Some(&code)=self.lookup.get(text){code}else{
+            let code=self.values.len() as u32;self.values.push(text.into());self.lookup.insert(text.into(),code);code
+        };
+        self.codes.resize(self.codes.len().max(row+1),0);self.codes[row]=code;
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DataCategory {
+    pub id:String,
+    pub name:String,
+    pub values:Vec<String>,
+    pub codes:Vec<u16>,
+    pub automatic:bool,
+    pub counts:Vec<usize>,
+}
+impl DataCategory {
+    pub fn label(&self,code:u16)->String {
+        if code!=0{return self.values.get(code as usize).cloned().unwrap_or_default();}
+        let mut label="Unassigned".to_string();
+        while self.values.contains(&label){label.push_str(" (missing)");}label
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct DataCategoryInfo {pub id:String,pub name:String,pub values:Vec<String>,pub labels:Vec<String>,pub counts:Vec<usize>,pub automatic:bool}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct CategorySourceInfo {pub id:String,pub name:String,pub kind:String}
+
 impl CustomColumn {
     pub fn label(&self, code: u16) -> String {
         self.categories
@@ -143,6 +185,7 @@ impl CustomColumn {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Filter {
+    pub categories: HashMap<String, Vec<String>>,
     /// Site codes; 65535 represents missing site metadata.
     pub sites: Vec<u16>,
     pub lots: Vec<u16>,
@@ -180,6 +223,9 @@ impl Default for StatFilter {
 }
 
 pub struct Dataset {
+    pub text_cols: Vec<TextColumn>,
+    pub data_categories: Vec<DataCategory>,
+    pub text_label_sources: HashMap<String, String>,
     pub files: Vec<String>,
     pub lots: Vec<String>,
     pub wafers: Vec<WaferInfo>,
@@ -200,11 +246,16 @@ pub struct Dataset {
     pub pass_hbin: Vec<bool>,
     pub pass_sbin: Vec<bool>,
     pub custom_cols: Vec<CustomColumn>,
+    /// Automatically derived labels retain their source measurement column.
+    pub numeric_label_sources: HashMap<String, usize>,
 }
 
 impl Dataset {
     pub fn new() -> Self {
         Self {
+            text_cols: Vec::new(),
+            data_categories: Vec::new(),
+            text_label_sources: HashMap::new(),
             files: Vec::new(),
             lots: Vec::new(),
             wafers: Vec::new(),
@@ -224,6 +275,7 @@ impl Dataset {
             pass_hbin: vec![false; 65536],
             pass_sbin: vec![false; 65536],
             custom_cols: Vec::new(),
+            numeric_label_sources: HashMap::new(),
         }
     }
 
@@ -242,7 +294,9 @@ impl Dataset {
                     + c.wafer_values.capacity() * 2
             })
             .sum();
-        cols + self.rows * (2 + 2 + 2 + 2 + 2 + 2 + 2)
+        let text:usize=self.text_cols.iter().map(|c|c.codes.capacity()*4+c.values.iter().map(|v|v.capacity()).sum::<usize>()).sum();
+        let categories:usize=self.data_categories.iter().map(|c|c.codes.capacity()*2+c.values.iter().map(|v|v.capacity()).sum::<usize>()).sum();
+        cols + text + categories + self.rows * (2 + 2 + 2 + 2 + 2 + 2 + 2)
             + self.files.iter().map(|f| f.len()).sum::<usize>()
             + custom
     }
@@ -317,19 +371,30 @@ impl Dataset {
             }
             return Err("Assign at least one wafer label.".into());
         }
+        self.numeric_label_sources.remove(name);
+        self.text_label_sources.remove(name);
         Ok(())
     }
 
     pub fn remove_custom_column(&mut self, name: &str) -> bool {
+        self.numeric_label_sources.remove(name);
+        self.text_label_sources.remove(name);
         let before = self.custom_cols.len();
         self.custom_cols.retain(|c| c.name != name);
         before != self.custom_cols.len()
     }
 
     pub fn restore_custom_columns(&mut self, columns: Vec<CustomColumn>) -> Result<(), String> {
+        let mut names = std::collections::HashSet::new();
         for c in &columns {
             if c.name.trim().is_empty() {
                 return Err("A custom column has an empty name.".into());
+            }
+            if !names.insert(c.name.clone()) || matches!(c.name.to_lowercase().as_str(), "lot" | "wafer" | "site" | "hbin" | "sbin" | "__wafer") {
+                return Err("A custom column has a duplicate or reserved name.".into());
+            }
+            if c.categories.is_empty() || c.wafer_values.iter().any(|&v| v as usize >= c.categories.len()) {
+                return Err(format!("Column “{}” has invalid category codes.", c.name));
             }
             if c.wafer_values.len() != self.wafers.len() {
                 return Err(format!(
@@ -340,6 +405,8 @@ impl Dataset {
                 ));
             }
         }
+        self.numeric_label_sources.clear();
+        self.text_label_sources.clear();
         self.custom_cols = columns;
         Ok(())
     }
@@ -350,6 +417,11 @@ impl Dataset {
         let wafer_ok = |w: u16| f.wafers.is_empty() || f.wafers.contains(&w);
         let hbin_ok = |b: u16| f.hbins.is_empty() || f.hbins.contains(&b);
         let sbin_ok = |b: u16| f.sbins.is_empty() || f.sbins.contains(&b);
+        let categories:Vec<_>=f.categories.iter().filter(|(_,v)|!v.is_empty()).map(|(id,values)|{
+            self.data_categories.iter().find(|c|&c.id==id).map(|c|{
+                let allowed:std::collections::HashSet<_>=c.values.iter().enumerate().filter_map(|(i,v)|values.contains(v).then_some(i as u16)).collect();(c,allowed)
+            })
+        }).collect();
 
         (0..self.rows)
             .map(|r| {
@@ -358,6 +430,7 @@ impl Dataset {
                     && hbin_ok(self.hbin[r])
                     && sbin_ok(self.sbin[r])
                     && (f.sites.is_empty() || f.sites.contains(&self.site.get(r).copied().flatten().map(u16::from).unwrap_or(u16::MAX)))
+                    && categories.iter().all(|entry|entry.as_ref().is_some_and(|(c,allowed)|allowed.contains(&c.codes[r])))
             })
             .collect()
     }

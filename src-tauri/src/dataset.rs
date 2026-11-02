@@ -13,6 +13,7 @@ fn limits_differ(a: Option<f32>, b: Option<f32>) -> bool {
 
 /// Data parsed from one file, keyed by local indices. Merged into `Dataset` afterwards.
 pub struct Imported {
+    pub text_cols: Vec<TextColumn>,
     lot_lookup: HashMap<String, u16>,
     wafer_lookup: HashMap<u16, HashMap<String, u16>>,
     pub lots: Vec<String>,
@@ -39,6 +40,7 @@ pub struct Imported {
 impl Imported {
     pub fn new() -> Self {
         Self {
+            text_cols:Vec::new(),
             lot_lookup: HashMap::new(),
             wafer_lookup: HashMap::new(),
             lots: Vec::new(),
@@ -92,6 +94,11 @@ impl Imported {
         r
     }
 
+    pub fn write_text(&mut self,name:&str,row:usize,value:&str){
+        let index=self.text_cols.iter().position(|c|c.name==name).unwrap_or_else(||{self.text_cols.push(TextColumn::new(name.into()));self.text_cols.len()-1});
+        self.text_cols[index].write(row,value);
+    }
+
     /// Return the index of a test column, creating an empty one if needed.
     /// STDF default PTR/MPR records can arrive before the first die, so the
     /// parser needs a test slot without writing a value.
@@ -127,6 +134,7 @@ impl Imported {
 
     pub fn finish(mut self) -> Self {
         let rows = self.row_lot.len();
+        for col in &mut self.text_cols {col.codes.resize(rows,0);}
         for c in self.cols.iter_mut() {
             if !c.is_empty() && c.len() < rows {
                 c.resize(rows, NAN);
@@ -199,6 +207,8 @@ impl Dataset {
             compact(&mut self.sbin, &keep);
             compact(&mut self.site, &keep);
             for col in &mut self.cols { compact(col, &keep); }
+            for col in &mut self.text_cols {compact(&mut col.codes,&keep);}
+            for col in &mut self.data_categories {compact(&mut col.codes,&keep);col.counts.fill(0);for &code in &col.codes{col.counts[code as usize]+=1;}}
             self.rows = self.x.len();
         }
         self.recompute();
@@ -359,7 +369,20 @@ impl Dataset {
         // Text columns such as an Excel-added "Split" are imported as
         // wafer-level custom columns. Re-map the file-local wafer/category
         // codes into the merged dataset.
+        let imported_text_names:std::collections::HashSet<_>=imp.text_cols.iter().map(|c|c.name.clone()).collect();
+        for col in &mut self.text_cols {col.codes.resize(total,0);}
+        for source in imp.text_cols {
+            let index=self.text_cols.iter().position(|c|c.name==source.name).unwrap_or_else(||{let mut c=TextColumn::new(source.name.clone());c.codes.resize(total,0);self.text_cols.push(c);self.text_cols.len()-1});
+            let target=&mut self.text_cols[index];
+            if target.lookup.is_empty(){target.lookup.extend(target.values.iter().enumerate().skip(1).map(|(i,s)|(s.clone(),i as u32)));}
+            let mut remap=vec![0;source.values.len()];
+            for (i,value)in source.values.iter().enumerate().skip(1){
+                remap[i]=if let Some(&code)=target.lookup.get(value){code}else{let code=target.values.len() as u32;target.values.push(value.clone());target.lookup.insert(value.clone(),code);code};
+            }
+            for (row,&code)in source.codes.iter().enumerate().take(new_rows){target.codes[base_rows+row]=remap[code as usize];}
+        }
         for imported in imp.custom_cols {
+            if imported_text_names.contains(&imported.name){self.text_label_sources.insert(imported.name.clone(),imported.name.clone());}
             let idx = match self.custom_cols.iter().position(|c| c.name == imported.name) {
                 Some(i) => i,
                 None => {
@@ -468,6 +491,8 @@ impl Dataset {
         let sbins = bins(&self.sbin, &self.sbin_names, &self.pass_sbin);
 
         DatasetInfo {
+            data_categories:self.data_categories.iter().map(|c|DataCategoryInfo{id:c.id.clone(),name:c.name.clone(),values:c.values.clone(),labels:(0..c.values.len()).map(|i|c.label(i as u16)).collect(),counts:c.counts.clone(),automatic:c.automatic}).collect(),
+            category_sources:self.category_sources(),
             files: self.files.clone(),
             lots: self.lots.clone(),
             wafers: self.wafers.clone(),
@@ -492,6 +517,8 @@ impl Dataset {
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatasetInfo {
+    pub data_categories:Vec<DataCategoryInfo>,
+    pub category_sources:Vec<CategorySourceInfo>,
     pub sites: Vec<u16>,
     pub files: Vec<String>,
     pub lots: Vec<String>,

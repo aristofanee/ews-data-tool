@@ -165,8 +165,8 @@ pub async fn open_paths(
         let n = paths2.len().max(1) as f32;
         for (i, p) in paths2.iter().enumerate() {
             let path = PathBuf::from(p);
-            let base = i as f32 / n * 100.0;
-            let span = 100.0 / n;
+            let base = i as f32 / n * 90.0;
+            let span = 90.0 / n;
             let app2 = app.clone();
             let mut cb = |pct: f32, msg: &str| {
                 let _ = app2.emit(
@@ -200,10 +200,14 @@ pub async fn open_paths(
             ds.append_import(imp);
             ds.files.push(p.clone());
         }
+        let _ = app.emit("import-progress", Progress {pct:92.0,msg:"Resolving retests…".into()});
         ds.resolve_retests();
         if ds.rows == 0 {
             return Err("No data rows were found in the selected file(s)".into());
         }
+        let _ = app.emit("import-progress", Progress {pct:99.0,msg:"Detecting numeric grouping labels…".into()});
+        ds.detect_numeric_labels();
+        ds.detect_data_categories();
         let info = ds.info();
         *ds_arc.lock().unwrap() = Some(ds);
         let _ = app.emit(
@@ -239,6 +243,12 @@ pub async fn import_product_metadata(state: State<'_, AppState>, path: String) -
 #[tauri::command]
 pub fn dataset_info(state: State<'_, AppState>) -> Result<Option<DatasetInfo>, String> {
     Ok(state.ds.lock().unwrap().as_ref().map(|d| d.info()))
+}
+
+#[tauri::command]
+pub async fn set_data_category(state:State<'_,AppState>,id:String,enabled:bool)->Result<DatasetInfo,String>{
+    let target=state.ds.clone();
+    tauri::async_runtime::spawn_blocking(move||{let mut guard=target.lock().map_err(|e|e.to_string())?;let ds=guard.as_mut().ok_or("Import data first")?;ds.set_data_category(&id,enabled)?;Ok(ds.info())}).await.map_err(|e|e.to_string())?
 }
 
 #[derive(serde::Deserialize)]
@@ -349,6 +359,11 @@ pub async fn histogram(
 }
 
 #[tauri::command]
+pub async fn limit_counts(state: State<'_, AppState>, req: query::LimitCountsRequest) -> Result<query::LimitCountsResponse, String> {
+    with_ds(state, move |ds| query::limit_counts(ds, &req)).await
+}
+
+#[tauri::command]
 pub async fn trend(
     state: State<'_, AppState>,
     req: query::TrendRequest,
@@ -382,6 +397,9 @@ pub async fn export_csv(
 
 fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String> {
     let mask = ds.base_mask(filter);
+    // Derived numeric labels already have their complete source test in the CSV.
+    // Avoid duplicate columns; edited/manual labels remain independent exports.
+    let custom:Vec<_>=ds.custom_cols.iter().filter(|c|!ds.numeric_label_sources.contains_key(&c.name)&&!ds.text_label_sources.contains_key(&c.name)).collect();
     let file = std::fs::File::create(&path).map_err(|e| format!("Cannot create file: {e}"))?;
     let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
 
@@ -390,8 +408,11 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
         // Keep units in the header so the export can be re-imported with them.
         write!(w, ",{}", csv_escape(&t.display_with_units())).map_err(|e| e.to_string())?;
     }
-    for c in ds.custom_cols.iter() {
-        write!(w, ",{}", csv_escape(&c.name)).map_err(|e| e.to_string())?;
+    let mut used:std::collections::HashSet<String> = ["lot","wafer","x","y","hbin","sbin","site"].into_iter().map(String::from).chain(ds.tests.iter().map(|t|t.display_with_units())).collect();
+    for col in &ds.text_cols {let mut name=col.name.clone();while used.contains(&name){name.push_str(" text");}used.insert(name.clone());write!(w,",{}",csv_escape(&name)).map_err(|e|e.to_string())?;}
+    let custom_headers:Vec<_>=custom.iter().map(|c|{let mut name=c.name.clone();while used.contains(&name){name.push_str(" label");}used.insert(name.clone());name}).collect();
+    for name in &custom_headers {
+        write!(w, ",{}", csv_escape(name)).map_err(|e| e.to_string())?;
     }
     writeln!(w).map_err(|e| e.to_string())?;
 
@@ -405,7 +426,8 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
             lows.push_str(&fmt_csv_num(v));
         }
     }
-    for _ in ds.custom_cols.iter() {
+    for _ in &ds.text_cols {lows.push(',');}
+    for _ in custom.iter() {
         lows.push(',');
     }
     writeln!(w, "{lows}").map_err(|e| e.to_string())?;
@@ -420,7 +442,8 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
             highs.push_str(&fmt_csv_num(v));
         }
     }
-    for _ in ds.custom_cols.iter() {
+    for _ in &ds.text_cols {highs.push(',');}
+    for _ in custom.iter() {
         highs.push(',');
     }
     writeln!(w, "{highs}").map_err(|e| e.to_string())?;
@@ -453,7 +476,8 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
                 line.push(',');
             }
         }
-        for c in ds.custom_cols.iter() {
+        for col in &ds.text_cols {line.push(',');line.push_str(&csv_escape(&col.values[col.codes[r]as usize]));}
+        for c in custom.iter() {
             let code = c
                 .wafer_values
                 .get(ds.wafer_of_row[r] as usize)
@@ -512,8 +536,40 @@ pub fn save_binary(path: String, data_base64: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn create_report_folder(parent: String, name: String) -> Result<String, String> {
+    let child = std::path::Path::new(&name);
+    if child.components().count() != 1 || !matches!(child.components().next(), Some(std::path::Component::Normal(_))) || name.contains(['/', '\\', ':']) {
+        return Err("Invalid report folder name.".into());
+    }
+    let parent = std::fs::canonicalize(parent).map_err(|e| format!("Cannot open output folder: {e}"))?;
+    let path = parent.join(child);
+    // create_dir fails if this run already exists. Completed reports are never reused.
+    std::fs::create_dir(&path).map_err(|e| format!("Cannot create report folder: {e}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 pub fn save_text(path: String, contents: String) -> Result<(), String> {
     std::fs::write(&path, contents).map_err(|e| format!("Cannot write file: {e}"))
+}
+
+#[tauri::command]
+pub fn remove_report_images(folder: String, names: Vec<String>) -> Result<(), String> {
+    let folder = PathBuf::from(folder);
+    for name in &names {
+        let path = std::path::Path::new(name);
+        if path.components().count() != 1 || !name.ends_with(".jpg") || name.contains(['/', '\\', ':']) {
+            return Err("Invalid report image name.".into());
+        }
+    }
+    for name in names {
+        match std::fs::remove_file(folder.join(name)) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(format!("Cannot remove incomplete image: {e}")),
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -533,6 +589,41 @@ pub fn file_name(path: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::fmt_csv_num;
+
+    #[test]
+    fn report_runs_are_exclusive_and_cleanup_only_requested_images() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let parent = std::env::temp_dir().join(format!("ews-report-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&parent).unwrap();
+        let root = parent.to_string_lossy().to_string();
+        assert!(super::create_report_folder(root.clone(), "../escape".into()).is_err());
+        let folder = super::create_report_folder(root.clone(), "run".into()).unwrap();
+        assert!(super::create_report_folder(root, "run".into()).is_err());
+        let run = std::path::PathBuf::from(&folder);
+        std::fs::write(run.join("01_plot.jpg"), b"image").unwrap();
+        std::fs::write(run.join("index.html"), b"complete report").unwrap();
+        assert!(super::remove_report_images(folder.clone(), vec!["../index.html".into()]).is_err());
+        assert!(super::remove_report_images(folder.clone(), vec!["index.html".into()]).is_err());
+        super::remove_report_images(folder, vec!["01_plot.jpg".into()]).unwrap();
+        assert!(!run.join("01_plot.jpg").exists());
+        assert_eq!(std::fs::read(run.join("index.html")).unwrap(), b"complete report");
+        std::fs::remove_file(run.join("index.html")).unwrap();
+        std::fs::remove_dir(run).unwrap();
+        std::fs::remove_dir(parent).unwrap();
+    }
+
+    #[test]
+    fn invalid_custom_label_restore_does_not_replace_existing_columns() {
+        use crate::model::{CustomColumn, Dataset};
+        let mut ds = Dataset::new();
+        ds.custom_cols.push(CustomColumn {name:"Existing".into(),categories:vec!["".into()],wafer_values:vec![]});
+        let bad = CustomColumn {name:"Bad".into(),categories:vec![],wafer_values:vec![]};
+        assert!(ds.restore_custom_columns(vec![bad]).is_err());
+        assert_eq!(ds.custom_cols[0].name, "Existing");
+        let reserved = CustomColumn {name:"wafer".into(),categories:vec!["".into()],wafer_values:vec![]};
+        assert!(ds.restore_custom_columns(vec![reserved]).is_err());
+        assert_eq!(ds.custom_cols[0].name, "Existing");
+    }
 
     #[test]
     fn csv_roundtrip_preserves_site_and_measurement_metadata() {
@@ -569,5 +660,48 @@ mod tests {
         assert_eq!(fmt_csv_num(0.0), "0");
         assert_eq!(fmt_csv_num(0.41515), "0.41515");
         assert_eq!(fmt_csv_num(12.5), "12.5");
+    }
+
+    #[test]
+    fn numeric_csv_labels_keep_source_values_and_roundtrip_without_duplicate_columns() {
+        let source=std::env::temp_dir().join(format!("ews-numeric-source-{}.csv",std::process::id()));
+        let output=std::env::temp_dir().join(format!("ews-numeric-export-{}.csv",std::process::id()));
+        std::fs::write(&source,"Lot,Wafer,X,Y,Split,V [V]\nL,W1,0,0,1,0.1\nL,W1,1,0,1,0.2\nL,W2,0,0,2,0.3\nL,W2,1,0,2,0.4\n").unwrap();
+        let mut ds=crate::model::Dataset::new();ds.merge(crate::csv_io::import_csv(&source,&mut |_,_|{}).unwrap());
+        let values=ds.cols.clone();ds.detect_numeric_labels();
+        assert_eq!(ds.tests.len(),2);assert_eq!(ds.cols,values);
+        assert_eq!(ds.custom_cols[0].name,"Split label");
+        super::write_csv(&ds,output.to_str().unwrap(),&Default::default()).unwrap();
+        let text=std::fs::read_to_string(&output).unwrap();
+        assert!(!text.lines().next().unwrap().contains("Split label"));
+        let mut loaded=crate::model::Dataset::new();loaded.merge(crate::csv_io::import_csv(&output,&mut |_,_|{}).unwrap());loaded.detect_numeric_labels();
+        assert_eq!(loaded.cols,values);assert_eq!(loaded.tests.len(),2);assert_eq!(loaded.custom_cols[0].categories,ds.custom_cols[0].categories);
+        ds.set_custom_column("Split label",&[(0,"Manual A".into()),(1,"Manual B".into())]).unwrap();
+        super::write_csv(&ds,output.to_str().unwrap(),&Default::default()).unwrap();
+        let loaded=crate::csv_io::import_csv(&output,&mut |_,_|{}).unwrap();
+        let manual=loaded.custom_cols.iter().find(|c|c.name=="Split label").unwrap();
+        assert_eq!(manual.label(manual.wafer_values[0]),"Manual A");
+        assert_eq!(manual.label(manual.wafer_values[1]),"Manual B");
+        std::fs::remove_file(source).unwrap();std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn per_die_csv_categories_roundtrip_and_keep_retested_text_alignment(){
+        let source=std::env::temp_dir().join(format!("ews-row-category-{}.csv",std::process::id()));let output=source.with_extension("export.csv");
+        let mut text="Lot,Wafer,X,Y,Mode,Code,Voltage [V]\n".to_string();
+        for x in 0..40{text.push_str(&format!("L,W,{x},0,{},{},{}\n",if x%2==0{"A"}else{"B"},x%2,if x%2==0{0.8}else{1.2}));}
+        text.push_str("L,W,0,0,B,1,1.2\n");std::fs::write(&source,text).unwrap();
+        let mut ds=crate::model::Dataset::new();ds.append_import(crate::csv_io::import_csv(&source,&mut|_,_|{}).unwrap());ds.resolve_retests();ds.detect_numeric_labels();ds.detect_data_categories();
+        assert_eq!(ds.rows,40);assert_eq!(ds.retest_count,1);assert!(ds.custom_column("Mode").is_none());
+        assert_eq!(ds.data_category("data:text:Mode").unwrap().counts,vec![0,19,21]);assert!(ds.data_category("data:test:Code").is_some());assert!(ds.data_category("data:test:Voltage [V]").is_none());
+        ds.set_data_category("data:test:Voltage [V]",true).unwrap();assert_eq!(ds.data_category("data:test:Voltage [V]").unwrap().counts,vec![0,19,21]);
+        super::write_csv(&ds,output.to_str().unwrap(),&Default::default()).unwrap();
+        let mut loaded=crate::model::Dataset::new();loaded.append_import(crate::csv_io::import_csv(&output,&mut|_,_|{}).unwrap());loaded.resolve_retests();loaded.detect_numeric_labels();loaded.detect_data_categories();
+        assert_eq!(loaded.cols,ds.cols);assert_eq!(loaded.rows,ds.rows);assert_eq!(loaded.data_category("data:text:Mode").unwrap().counts,vec![0,19,21]);
+        let by_coord=|data:&crate::model::Dataset|{let c=data.text_cols.iter().find(|c|c.name=="Mode").unwrap();(0..data.rows).map(|r|(data.x[r],c.values[c.codes[r]as usize].clone())).collect::<std::collections::HashMap<_,_>>()};
+        assert_eq!(by_coord(&loaded),by_coord(&ds));
+        ds.set_custom_column("Mode",&[(0,"Manual label".into())]).unwrap();super::write_csv(&ds,output.to_str().unwrap(),&Default::default()).unwrap();
+        let original=crate::csv_io::import_csv(&output,&mut|_,_|{}).unwrap();assert!(original.text_cols.iter().any(|c|c.name=="Mode"));assert!(original.custom_cols.iter().any(|c|c.name=="Mode label"));
+        std::fs::remove_file(source).unwrap();std::fs::remove_file(output).unwrap();
     }
 }

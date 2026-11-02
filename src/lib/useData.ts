@@ -3,6 +3,7 @@ import * as api from "./api";
 import { fmtInt, safeName } from "./format";
 import { useStore, type TemplateFile } from "../store";
 import type { CsvMapping } from "../types";
+import { templatePlots, validateTemplate } from "./reportReferences";
 
 const CSV_EXT = /\.(csv|txt|tsv|dat)$/i;
 
@@ -89,21 +90,18 @@ export function useSaveTemplate() {
   return useCallback(async () => {
     try {
       const s = useStore.getState();
-      const plots =
-        s.report.length > 0
-          ? s.report.map((r) => ({ spec: r.spec, filters: r.filters }))
-          : [{ spec: s.spec, filters: s.filters }];
+      const items=s.report.length?s.report:[{id:s.spec.id,spec:s.spec,filters:s.filters,selection:s.plotSelection??undefined}];
+      const plots=templatePlots(items,s.info);
       const name = s.templateName.trim() || "EWS report template";
       const t: TemplateFile = {
         app: "EWS Data Tool",
-        version: 1,
+        version: 2,
         name,
         created: new Date().toISOString(),
         theme: s.theme,
         presentation: s.presentation,
         filters: s.filters,
         plots,
-        customColumns: s.info?.customColumns ?? [],
       };
       const path = await api.pickSavePath(`${safeName(name)}.json`, ["json"]);
       if (!path) return;
@@ -124,20 +122,9 @@ export function useLoadTemplate() {
       const path = await api.pickTemplate();
       if (!path) return;
       const text = await api.readText(path);
-      const t = JSON.parse(text) as TemplateFile;
-      if (!t || !Array.isArray(t.plots)) throw new Error("This file is not an EWS Data Tool template.");
-      const state = useStore.getState();
-      let customWarning: string | null = null;
-      if (state.info && t.customColumns?.length) {
-        try {
-          const info = await api.restoreCustomColumns(t.customColumns);
-          useStore.getState().setInfo(info, { keepFilters: true });
-        } catch (e) {
-          customWarning = `Template loaded, but custom labels were not restored: ${String(e)}`;
-        }
-      }
+      const t:unknown = JSON.parse(text);
+      validateTemplate(t);
       applyTemplate(t);
-      if (customWarning) useStore.getState().notify(customWarning);
     } catch (e) {
       setError(String(e));
     }

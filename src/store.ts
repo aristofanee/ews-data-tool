@@ -7,11 +7,13 @@ import type {
   PlotSpec,
   PlotType,
   ReportItem,
+  PlotSelection,
   TestInfo,
 } from "./types";
 import { defaultSpec, emptyFilter } from "./types";
 import type { Theme } from "./lib/theme";
 import { testLabelWithUnits } from "./lib/format";
+import { bindReportItem, captureReferences, referenceKey, remapReference, validateTemplate } from "./lib/reportReferences";
 
 export const PLOT_LABELS: Record<PlotType, string> = {
   box: "Box plot",
@@ -44,19 +46,19 @@ function defaultSpecs(): Record<PlotType, PlotSpec> {
 
 function hasCategory(info: DatasetInfo | null, value: string): boolean {
   if (!info || !value) return false;
-  return BUILTIN_CATEGORIES.includes(value) || info.customColumns.some((c) => c.name === value);
+  return BUILTIN_CATEGORIES.includes(value) || info.customColumns.some((c) => c.name === value) || !!info.dataCategories?.some(c=>c.id===value);
 }
 
 /** Pareto splits include the per-die site category as well as wafer labels. */
 function isParetoCategory(info: DatasetInfo | null, value: string): boolean {
   if (value === "lot" || value === "wafer" || value === "site") return true;
   if (!info) return true;
-  return info.customColumns.some((c) => c.name === value);
+  return info.customColumns.some((c) => c.name === value) || !!info.dataCategories?.some(c=>c.id===value);
 }
 
 /** Keep old templates and removed custom columns from leaving a dead category selected. */
 function sanitizeSpec(spec: PlotSpec, info: DatasetInfo | null): PlotSpec {
-  const next = { ...spec };
+  const next = { ...spec, presentation: false };
   if (next.type === "pareto") {
     if (next.xAxis !== "none" && !hasCategory(info, next.xAxis)) next.xAxis = "none";
     if (next.groupBy !== "none" && !isParetoCategory(info, next.groupBy)) next.groupBy = "none";
@@ -65,7 +67,7 @@ function sanitizeSpec(spec: PlotSpec, info: DatasetInfo | null): PlotSpec {
     if (next.groupBy !== "none") {
       const valid =
         next.type === "map"
-          ? next.groupBy === "lot" || next.groupBy === "wafer" || !!info?.customColumns.some((c) => c.name === next.groupBy)
+          ? next.groupBy === "lot" || next.groupBy === "wafer" || !!info?.customColumns.some((c) => c.name === next.groupBy) || !!info?.dataCategories?.some(c=>c.id===next.groupBy)
           : hasCategory(info, next.groupBy);
       if (!valid) next.groupBy = "none";
     }
@@ -80,15 +82,16 @@ function sanitizeSpec(spec: PlotSpec, info: DatasetInfo | null): PlotSpec {
 
 export interface TemplateFile {
   app: "EWS Data Tool";
-  version: 1;
+  version: 1 | 2;
   name: string;
   created: string;
   theme?: Theme;
   presentation?: boolean;
   filters: Filter;
-  plots: { spec: PlotSpec; filters: Filter }[];
-  /** Labels created in the app; restored when the same wafers are loaded. */
+  plots: { spec: PlotSpec; filters: Filter; selection?: PlotSelection; references?: import("./types").ReportReference[] }[];
+  /** Legacy template payloads are accepted but never imported into the dataset. */
   customColumns?: CustomColumn[];
+  waferIdentities?: import("./types").WaferIdentity[];
 }
 
 function rid(): string {
@@ -134,7 +137,7 @@ function scatterSpecTitle(spec: PlotSpec, tests: TestInfo[]): string {
 
 const initialTheme: Theme =
   typeof localStorage !== "undefined" && localStorage.getItem("ews-theme") === "dark" ? "dark" : "light";
-const initialPresentation = typeof localStorage !== "undefined" && localStorage.getItem("ews-presentation") === "true";
+const initialPresentation = false;
 
 export interface CsvPrompt {
   paths: string[];
@@ -158,6 +161,14 @@ interface AppState {
   specs: Record<PlotType, PlotSpec>;
   filters: Filter;
   report: ReportItem[];
+  plotSelection: PlotSelection | null;
+  editingReportId: string | null;
+  updateReportItem: (id:string)=>void;
+  requestedPlotSelection: { label: string | null; token: number } | null;
+  activateReport: (id: string) => void;
+  resolveReportReference: (key: string, target: string) => void;
+  removeReportReference: (key: string) => void;
+  setReportItemError: (id: string, error?: string) => void;
   reportOpen: boolean;
   templateName: string;
   showInspector: boolean;
@@ -179,7 +190,7 @@ interface AppState {
   resetFilters: () => void;
   toggleArrayFilter: (key: "lots" | "wafers" | "hbins" | "sbins", value: number) => void;
 
-  addReport: () => void;
+  addReport: (selection?: PlotSelection) => void;
   addReportItems: (items: { spec: PlotSpec; filters: Filter }[]) => void;
   removeReport: (id: string) => void;
   moveReport: (id: string, dir: -1 | 1) => void;
@@ -208,6 +219,9 @@ export const useStore = create<AppState>((set, get) => ({
   specs: Object.fromEntries(Object.entries(defaultSpecs()).map(([key, spec]) => [key, { ...spec, presentation: initialPresentation }])) as Record<PlotType, PlotSpec>,
   filters: emptyFilter(),
   report: [],
+  plotSelection: null,
+  editingReportId: null,
+  requestedPlotSelection: null,
   reportOpen: false,
   templateName: "",
   showInspector: true,
@@ -222,7 +236,7 @@ export const useStore = create<AppState>((set, get) => ({
       specs.box = spec;
       try { localStorage.setItem("ews-theme", "light"); localStorage.setItem("ews-presentation", "false"); } catch {}
       set({ info, filters: emptyFilter(), spec, specs, theme: "light", presentation: false,
-        report: [], reportOpen: false, templateName: "", showInspector: true, csvPrompt: null });
+        report: [], editingReportId:null, plotSelection:null, requestedPlotSelection:null, reportOpen: false, templateName: "", showInspector: true, csvPrompt: null });
       return;
     }
     const prev = get();
@@ -263,7 +277,8 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   setBusy: (busy, pct = 0, msg = "") => set({ busy, busyPct: pct, busyMsg: msg }),
-  setPresentation: (presentation) => {
+  setPresentation: (_requested) => {
+    const presentation = false;
     const s = get();
     try { localStorage.setItem("ews-presentation", String(presentation)); } catch {}
     set({ presentation, spec: { ...s.spec, presentation },
@@ -305,7 +320,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
     next = sanitizeSpec(next, s.info);
     specs[type] = next;
-    set({ spec: next, specs });
+    set({ spec: next, specs, plotSelection:null });
   },
   patchSpec: (p) => {
     if (p.presentation !== undefined && p.presentation !== get().presentation) get().setPresentation(p.presentation);
@@ -355,8 +370,9 @@ export const useStore = create<AppState>((set, get) => ({
     set({ filters: { ...f, [key]: next } });
   },
 
-  addReport: () => {
+  addReport: (selected) => {
     const s = get();
+    const selection=selected??s.plotSelection??undefined;
     if (s.spec.type === "scatter") {
       if (s.spec.scatterX === null || s.spec.scatterY === null) {
         s.notify("Select X and Y tests before adding a scatter plot.");
@@ -371,17 +387,19 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
     const spec: PlotSpec = { ...s.spec, id: rid() };
-    const item: ReportItem = { id: spec.id, spec, filters: structuredClone(s.filters) };
-    set({ report: [...s.report, item], reportOpen: true });
-    s.notify(`Added “${spec.title}” to the report.`);
+    const item: ReportItem = { id: spec.id, spec, filters: structuredClone(s.filters), selection: selection ? structuredClone(selection) : undefined };
+    item.references=captureReferences(item,s.info);
+    set({ report: [...s.report, item] });
+    s.notify(`Added “${spec.title}${selection ? ` · ${selection.label}` : ""}” to the report.`);
   },
   addReportItems: (items) => {
     const s = get();
     const added: ReportItem[] = items.map((it) => {
       const spec = { ...it.spec, id: rid(), presentation: s.presentation };
-      return { id: spec.id, spec, filters: structuredClone(it.filters) };
+      const item:ReportItem={ id: spec.id, spec, filters: structuredClone(it.filters) };
+      item.references=captureReferences(item,s.info);return item;
     });
-    set({ report: [...s.report, ...added], reportOpen: true });
+    set({ report: [...s.report, ...added] });
     s.notify(`Added ${added.length} plots to the report.`);
   },
   removeReport: (id) => set({ report: get().report.filter((r) => r.id !== id) }),
@@ -396,8 +414,29 @@ export const useStore = create<AppState>((set, get) => ({
   clearReport: () => set({ report: [] }),
   setReportOpen: (reportOpen) => set({ reportOpen }),
   setTemplateName: (templateName) => set({ templateName }),
+  updateReportItem: (id) => {
+    const s=get(),item:ReportItem={id,spec:structuredClone({...s.spec,id}),filters:structuredClone(s.filters),selection:s.plotSelection?structuredClone(s.plotSelection):undefined};
+    item.references=captureReferences(item,s.info);
+    set({report:s.report.map(r=>r.id===id?item:r)});s.notify("Report item updated.");
+  },
+  activateReport: (id) => {
+    const s=get(),source=s.report.find(r=>r.id===id);if(!source)return;
+    const {item,issues}=bindReportItem(source,s.info);
+    if(issues.length){s.notify("Resolve this report item before opening it.");return;}
+    set({editingReportId:id,spec:structuredClone(item.spec),specs:{...s.specs,[item.spec.type]:structuredClone(item.spec)},filters:structuredClone(item.filters),plotSelection:null,requestedPlotSelection:{label:item.selection?.label??null,token:Date.now()},reportOpen:false});
+  },
+  resolveReportReference: (key,target) => {
+    const s=get();if(!s.info)return;
+    const report=remapReference(s.report,key,target,s.info).map((item,i)=>{
+      if(s.report[i].references?.some(r=>r.kind==="test"&&referenceKey(r)===key))item.spec.title=item.spec.type==="scatter"?scatterSpecTitle(item.spec,s.info!.tests):autoTitle(item.spec.test!==null?s.info!.tests[item.spec.test]:null,item.spec.type);
+      return item;
+    });set({report});
+  },
+  removeReportReference: (key) => {const s=get();set({report:s.report.filter(r=>!(r.references??captureReferences(r,s.info)).some(ref=>referenceKey(ref)===key)&&!bindReportItem(r,s.info).issues.some(i=>i.key===key))});},
+  setReportItemError: (id,error) => set({report:get().report.map(r=>r.id===id?{...r,runtimeError:error}:r)}),
   applyTemplate: (t) => {
-    const presentation = t.presentation ?? t.plots?.[0]?.spec.presentation ?? get().presentation;
+    validateTemplate(t);
+    const presentation = false;
     get().setPresentation(presentation);
     const s = get();
     const tests = s.info?.tests ?? [];
@@ -411,6 +450,8 @@ export const useStore = create<AppState>((set, get) => ({
       let spec: PlotSpec = {
         ...defaultSpec(p.spec.type ?? "box", p.spec.test ?? null, p.spec.title ?? ""),
         ...raw,
+        lsl: null,
+        usl: null,
         presentation,
         id: rid(),
       };
@@ -426,9 +467,7 @@ export const useStore = create<AppState>((set, get) => ({
       if (!raw.limitMode) {
         spec.limitMode = spec.yMin !== null || spec.yMax !== null ? "manual" : "auto";
       }
-      spec = sanitizeSpec(spec, s.info);
       if (spec.type === "scatter") {
-        spec = normalizeScatter(spec, tests);
         if (!spec.title) spec.title = scatterSpecTitle(spec, tests);
       } else if (!spec.title) {
         spec.title = autoTitle(
@@ -436,22 +475,30 @@ export const useStore = create<AppState>((set, get) => ({
           spec.type
         );
       }
-      return { id: spec.id, spec, filters: p.filters ?? emptyFilter() };
+      const item:ReportItem={id:spec.id,spec,filters:structuredClone(p.filters??t.filters??emptyFilter()),selection:p.selection?structuredClone(p.selection):undefined,references:p.references?structuredClone(p.references):undefined};
+      item.references??=captureReferences(item,s.info,true);
+      item.references.forEach(ref=>delete ref.explicit);
+      return bindReportItem(item,s.info).item;
     });
     const specs = { ...s.specs };
-    for (const item of plots) specs[item.spec.type] = item.spec;
-    const active = plots[0]?.spec ?? s.spec;
+    for (const item of plots) if(!bindReportItem(item,s.info).issues.length) specs[item.spec.type] = item.spec;
+    const firstReady=plots.find(item=>!bindReportItem(item,s.info).issues.length);
+    const active = firstReady?.spec ?? s.spec;
     specs[active.type] = active;
     set({
       report: plots,
-      filters: t.filters ?? emptyFilter(),
+      editingReportId:null,
+      plotSelection:firstReady?null:s.plotSelection,
+      requestedPlotSelection:firstReady?{label:firstReady.selection?.label??null,token:Date.now()}:null,
+      filters: structuredClone(firstReady?.filters??s.filters),
       templateName: t.name ?? "Template",
       theme: t.theme === "dark" || t.theme === "light" ? t.theme : s.theme,
       reportOpen: true,
       spec: active,
       specs,
     });
-    s.notify(`Template “${t.name}” loaded: ${plots.length} plots.`);
+    const failed=plots.filter(p=>bindReportItem(p,s.info).issues.length).length;
+    s.notify(`Template “${t.name}” loaded: ${plots.length} items${failed?`, ${failed} need resolving`:""}.`);
   },
   setShowInspector: (showInspector) => set({ showInspector }),
   setCsvPrompt: (csvPrompt) => set({ csvPrompt }),

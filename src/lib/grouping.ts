@@ -60,6 +60,10 @@ export function dataGroups(
         filter: { ...filter, lots: [lot], wafers: indices },
       }));
   }
+  const rowCategory=info.dataCategories?.find(c=>c.id===kind);
+  if(rowCategory)return rowCategory.values.flatMap((value,code)=>rowCategory.counts[code]>0&&(!filter.categories?.[kind]?.length||filter.categories[kind].includes(value))?[{
+    key:`data${code}`,label:rowCategory.labels[code],wafer:null,filter:{...filter,categories:{...filter.categories,[kind]:[value]}}
+  }]:[]);
   const col = info.customColumns.find((c) => c.name === kind);
   if (!col) {
     return [{ key: "all", label: meanLabel, wafer: null, filter }];

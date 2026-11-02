@@ -22,7 +22,7 @@ export function StatusBar() {
       </div>
       <div className="status-right">
         {!isTauri && <span className="demo-badge">browser demo</span>}
-        <span>v0.4.3</span>
+        <span>v0.5.0</span>
         <span className="meta-dot" />
         <span>offline</span>
       </div>
@@ -36,13 +36,13 @@ export function ProgressOverlay() {
   const msg = useStore((s) => s.busyMsg);
   if (!busy) return null;
   return (
-    <div className="overlay">
+    <div className="overlay" role="status" aria-live="polite">
       <div className="overlay-card">
         <div className="overlay-head">
           <span className="spinner" />
           <span className="overlay-title">{msg || "Working…"}</span>
         </div>
-        <div className="progress-track">
+        <div className="progress-track" role="progressbar" aria-label="Operation progress" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100}>
           <div className="progress-fill" style={{ width: `${Math.max(2, Math.min(100, pct))}%` }} />
         </div>
         <div className="overlay-pct">{Math.round(pct)}%</div>

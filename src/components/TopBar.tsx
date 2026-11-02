@@ -32,8 +32,6 @@ function BrandMark() {
 }
 
 export function TopBar() {
-  const presentation = useStore((s) => s.presentation);
-  const setPresentation = useStore((s) => s.setPresentation);
   const info = useStore((s) => s.info);
   const theme = useStore((s) => s.theme);
   const toggleTheme = useStore((s) => s.toggleTheme);
@@ -89,10 +87,11 @@ export function TopBar() {
       )}
 
       <div className="topbar-actions">
-        <label className="check-row global-presentation" title="Slide-sized fonts and markers for every plot and report">
-          <input type="checkbox" checked={presentation} onChange={(e) => setPresentation(e.target.checked)} />
-          Slide-sized fonts
-        </label>
+
+        <button className="btn icon" onClick={toggleTheme} title={theme === "dark" ? "Light mode" : "Dark mode"}>
+          {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
+        </button>
+        <span className="topbar-sep" />
         <button className="btn primary" onClick={() => open()} title="Open STDF, .Z, ZIP or CSV files">
           <IconFolder size={15} /> Open data
         </button>
@@ -104,17 +103,14 @@ export function TopBar() {
         >
           <IconDownload size={15} /> Export CSV
         </button>
-        <span className="topbar-sep" />
         <button className="btn" disabled={!info || !api.isTauri} onClick={importMetadata}
           title="Fill missing wafer geometry and bin descriptions from a reference STDF of the same product; no measurements are added">Metadata</button>
+        <span className="topbar-sep" />
         <button className="btn icon" onClick={saveTemplate} title="Save template (all report plots + settings)">
           <IconSave size={16} />
         </button>
         <button className="btn icon" onClick={loadTemplate} title="Load template">
           <IconOpen size={16} />
-        </button>
-        <button className="btn icon" onClick={toggleTheme} title={theme === "dark" ? "Light mode" : "Dark mode"}>
-          {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
         </button>
         <button className="btn report-btn" onClick={() => setReportOpen(true)} title="Open the report builder">
           <IconReport size={16} /> Report

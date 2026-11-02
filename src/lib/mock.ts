@@ -20,6 +20,7 @@ import type {
   WaferInfo,
 } from "../types";
 import { cpCpk, keepMask, mean, naturalCompare, quantileSorted, stdDev, summarize } from "./stats";
+import { testLabelWithUnits } from "./format";
 
 /* ------------------------------------------------------------------ */
 /* Synthetic dataset used when the app runs in a plain browser (dev).  */
@@ -40,6 +41,7 @@ interface MockWafer {
 }
 
 interface MockDataset {
+  categoryData:Map<string,Map<number,Uint16Array>>;
   lots: string[];
   wafers: MockWafer[];
   tests: TestInfo[];
@@ -257,12 +259,33 @@ function buildDataset(): MockDataset {
     customColumns: [],
     memoryMb: (rows * (2 + 2 + 2 + 2 + 2 + 2) + rows * tests.length * 4) / (1024 * 1024),
   };
-  return { lots, wafers, tests, customCols: [], info };
+  return { lots, wafers, tests, customCols: [], info, categoryData:new Map() };
 }
 
 function dataset(): MockDataset {
-  if (!cached) cached = buildDataset();
+  if (!cached) {
+    cached = buildDataset();
+    cached.info.categorySources=[...cached.tests.map(t=>({id:`data:test:${testLabelWithUnits(t)}`,name:testLabelWithUnits(t),kind:"test" as const})),{id:"data:text:Probe mode",name:"Probe mode",kind:"text"},{id:"data:text:Program step",name:"Program step",kind:"text"}];
+    buildMockCategory(cached,"data:text:Probe mode",true);
+  }
   return cached;
+}
+
+function buildMockCategory(ds:MockDataset,id:string,automatic=false){
+  const source=ds.info.categorySources?.find(c=>c.id===id);if(!source)throw new Error("Category source is no longer available.");
+  const values=[""],lookup=new Map<string,number>(),data=new Map<number,Uint16Array>(),counts=[0];
+  const test=source.kind==="test"?ds.tests.findIndex(t=>`data:test:${testLabelWithUnits(t)}`===id):-1;
+  for(const w of ds.wafers){const codes=new Uint16Array(w.x.length);for(let i=0;i<codes.length;i++){
+    const raw=source.kind==="text"?(source.name==="Probe mode"?["A","B","C"][i%3]:`Step ${Math.floor(i/5)%2+1}`):Number.isFinite(w.cols[test][i])?String(w.cols[test][i]):"";
+    let code=raw?lookup.get(raw):0;if(code===undefined){if(values.length>=65535)throw new Error("Too many distinct values for a category.");code=values.length;values.push(raw);counts.push(0);lookup.set(raw,code);}codes[i]=code;counts[code]++;
+  }data.set(w.index,codes);}
+  ds.categoryData.set(id,data);ds.info={...ds.info,dataCategories:[...(ds.info.dataCategories??[]).filter(c=>c.id!==id),{id,name:source.name,values,labels:values.map((v,i)=>i?v:"Unassigned"),counts,automatic}]};
+}
+export async function setDataCategory(id:string,enabled:boolean):Promise<DatasetInfo>{
+  const ds=dataset();if(enabled)buildMockCategory(ds,id);else{ds.categoryData.delete(id);ds.info={...ds.info,dataCategories:ds.info.dataCategories?.filter(c=>c.id!==id)};}return delay(ds.info);
+}
+function categoryAllowed(w:MockWafer,i:number,f:Filter):boolean{
+  const ds=dataset();return Object.entries(f.categories??{}).every(([id,values])=>{if(!values.length)return true;const c=ds.info.dataCategories?.find(c=>c.id===id),code=ds.categoryData.get(id)?.get(w.index)?.[i];return !!c&&code!==undefined&&values.includes(c.values[code]);});
 }
 
 function delay<T>(v: T, ms = 60): Promise<T> {
@@ -280,6 +303,7 @@ function waferAllowed(w: MockWafer, f: Filter): boolean {
 }
 
 function binAllowed(w: MockWafer, i: number, f: Filter): boolean {
+  if(!categoryAllowed(w,i,f))return false;
   if (f.sites?.length && !f.sites.includes(i % 4)) return false;
   if (f.hbins.length && !f.hbins.includes(w.hbin[i])) return false;
   if (f.sbins.length && !f.sbins.includes(w.sbin[i])) return false;
@@ -342,6 +366,7 @@ function categoryFor(
     case "lot":
       return { code: w.lot, name: ds.lots[w.lot] };
     default: {
+      const row=ds.info.dataCategories?.find(c=>c.id===col);if(row){const code=ds.categoryData.get(col)?.get(w.index)?.[i]??0;return {code,name:row.labels[code]};}
       const c = ds.customCols.find((x) => x.name === col);
       if (!c) return { code: w.lot, name: ds.lots[w.lot] };
       const code = c.waferValues[w.index] ?? 0;
@@ -374,7 +399,7 @@ function scatterGroupLabel(ds: MockDataset, col: string): string {
     case "sbin":
       return "SBIN";
     default:
-      return ds.customCols.find((c) => c.name === col)?.name ?? "Lot";
+      return ds.info.dataCategories?.find(c=>c.id===col)?.name??ds.customCols.find((c) => c.name === col)?.name ?? "Lot";
   }
 }
 
@@ -738,18 +763,22 @@ export async function waferMap(req: {
   }
   const lsl = req.lsl ?? test?.loSpec ?? null;
   const usl = req.usl ?? test?.hiSpec ?? null;
+  let testTotal = 0;
   let testPass = 0;
   let testFail = 0;
   const validLimits = (lsl !== null || usl !== null) &&
     (lsl === null || Number.isFinite(lsl)) && (usl === null || Number.isFinite(usl)) &&
     (lsl === null || usl === null || lsl <= usl);
-  if (validLimits) {
+  {
     for (let j = 0; j < rowW.length; j++) {
       if (!rowKeep[j]) continue;
       const v = colOf(rowW[j])?.[rowI[j]] ?? NaN;
       if (!Number.isFinite(v)) continue;
-      if ((lsl === null || v >= lsl) && (usl === null || v <= usl)) testPass++;
-      else testFail++;
+      testTotal++;
+      if (validLimits) {
+        if ((lsl === null || v >= lsl) && (usl === null || v <= usl)) testPass++;
+        else testFail++;
+      }
     }
   }
   const first = selected[0];
@@ -768,6 +797,7 @@ export async function waferMap(req: {
 
   return delay({
     wafer,
+    testTotal,
     testPass,
     testFail,
     testYieldPct: testPass + testFail ? testPass * 100 / (testPass + testFail) : null,
@@ -857,6 +887,7 @@ export async function pareto(req: {
     if (!waferAllowed(w, req.filter)) continue;
     const codes = req.category === "hard" ? w.hbin : w.sbin;
     for (let i = 0; i < codes.length; i++) {
+      if (!categoryAllowed(w,i,req.filter))continue;
       if (req.filter.sites?.length && !req.filter.sites.includes(i % 4)) continue;
       const visible = binAllowed(w, i, req.filter);
       const code = codes[i];
@@ -1166,10 +1197,13 @@ export async function scatter(req: {
     excluded = before - points.length;
   }
 
+  const groupTotals: Record<string, number> = {};
+  for (const p of points) if (p.name) groupTotals[p.name] = (groupTotals[p.name] ?? 0) + 1;
   const total = points.length;
   const cap = Math.max(1, req.maxPoints ?? 30000);
   const stride = total > cap ? Math.ceil(total / cap) : 1;
   const sampled = points.filter((_, i) => i % stride === 0);
+  if(groupCol){const present=new Set(sampled.map(p=>p.code));for(const p of points)if(!present.has(p.code)){sampled.push(p);present.add(p.code);}}
   const r = pearson(
     points.map((p) => p.x),
     points.map((p) => p.y)
@@ -1224,6 +1258,7 @@ export async function scatter(req: {
 
   return delay({
     series,
+    groupTotals,
     xTest,
     yTest,
     zTest,
@@ -1299,15 +1334,68 @@ export async function restoreCustomColumns(columns: CustomColumn[]): Promise<Dat
   return delay(refreshInfo(ds));
 }
 
+const exportFiles=new Map<string,FileSystemFileHandle>();
 export async function pickSavePath(defaultName: string): Promise<string | null> {
-  return defaultName;
+  const picker=(window as any).showSaveFilePicker;
+  if(!picker)return defaultName;
+  try{const handle:FileSystemFileHandle=await picker.call(window,{suggestedName:defaultName});exportFiles.set(handle.name,handle);return handle.name;}
+  catch(error){if((error as DOMException).name==="AbortError")return null;throw error;}
 }
 
+let exportDirectory: FileSystemDirectoryHandle | null = null;
+const exportDirectories=new Map<string,FileSystemDirectoryHandle>();
 export async function pickFolder(): Promise<string | null> {
-  return "downloads";
+  const picker=(window as any).showDirectoryPicker;
+  if (!picker) throw new Error("Folder exports require a browser with folder access support, such as Edge or Chrome, or the desktop app.");
+  try {
+    exportDirectory=await picker.call(window,{mode:"readwrite"});
+    exportDirectories.set(exportDirectory!.name,exportDirectory!);
+    return exportDirectory!.name;
+  } catch(error) { if ((error as DOMException).name==="AbortError") return null; throw error; }
+}
+
+export async function createReportFolder(parent:string,name:string):Promise<string>{
+  const directory=exportDirectories.get(parent);
+  if(!directory)throw new Error("Choose the output folder again before generating a report.");
+  if(/[\\/:]/.test(name)||name==="."||name==="..")throw new Error("Invalid report folder name.");
+  try{await directory.getDirectoryHandle(name);throw new Error("This report folder already exists.");}
+  catch(error){if((error as DOMException).name!=="NotFoundError")throw error;}
+  const handle=await directory.getDirectoryHandle(name,{create:true}),path=parent+"\\"+name;
+  exportDirectories.set(path,handle);return path;
+}
+
+export async function removeReportImages(folder:string,names:string[]):Promise<void>{
+  const directory=exportDirectories.get(folder);
+  if(!directory)throw new Error("Output folder is no longer available.");
+  if(names.some(name=>/[\\/:]/.test(name)||!name.endsWith(".jpg")))throw new Error("Invalid report image name.");
+  for(const name of names)await directory.removeEntry(name);
+}
+
+let templateFile:File|null=null;
+export async function pickTemplate():Promise<string|null>{
+  const picker=(window as any).showOpenFilePicker;
+  if(picker){try{const [handle]=await picker.call(window,{multiple:false,types:[{description:"EWS template",accept:{"application/json":[".json"]}}]});exportFiles.set("template:"+handle.name,handle);return "template:"+handle.name;}catch(error){if((error as DOMException).name==="AbortError")return null;throw error;}}
+  return new Promise(resolve=>{
+    const input=document.createElement("input");input.type="file";input.accept=".json";
+    input.onchange=()=>{templateFile=input.files?.[0]??null;resolve(templateFile?"template-input":null);};input.oncancel=()=>resolve(null);input.click();
+  });
 }
 
 export async function saveBinary(path: string, dataUrl: string): Promise<void> {
+  if(exportFiles.has(path)){
+    const writer=await exportFiles.get(path)!.createWritable();
+    try{await writer.write(await(await fetch(dataUrl)).blob());await writer.close();}catch(error){await writer.abort().catch(()=>{});throw error;}
+    return;
+  }
+  const directory=exportDirectories.get(path.slice(0,path.lastIndexOf("\\")));
+  if (directory) {
+    const file=await directory.getFileHandle(path.split(/[\\/]/).pop()!,{create:true});
+    const writer=await file.createWritable();
+    try { await writer.write(await (await fetch(dataUrl)).blob()); await writer.close(); }
+    catch(error) { await writer.abort().catch(()=>{}); throw error; }
+    return;
+  }
+  if(/[\\/]/.test(path))throw new Error("Choose the output folder again before saving.");
   const a = document.createElement("a");
   a.href = dataUrl;
   a.download = path.split(/[\\/]/).pop() || "plot.jpg";
@@ -1315,6 +1403,20 @@ export async function saveBinary(path: string, dataUrl: string): Promise<void> {
 }
 
 export async function saveText(path: string, contents: string): Promise<void> {
+  if(exportFiles.has(path)){
+    const writer=await exportFiles.get(path)!.createWritable();
+    try{await writer.write(contents);await writer.close();}catch(error){await writer.abort().catch(()=>{});throw error;}
+    return;
+  }
+  const directory=exportDirectories.get(path.slice(0,path.lastIndexOf("\\")));
+  if (directory) {
+    const file=await directory.getFileHandle(path.split(/[\\/]/).pop()!,{create:true});
+    const writer=await file.createWritable();
+    try { await writer.write(contents); await writer.close(); }
+    catch(error) { await writer.abort().catch(()=>{}); throw error; }
+    return;
+  }
+  if(/[\\/]/.test(path))throw new Error("Choose the output folder again before saving.");
   const blob = new Blob([contents], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -1324,6 +1426,9 @@ export async function saveText(path: string, contents: string): Promise<void> {
 }
 
 export async function readText(_path: string): Promise<string> {
+  const handle=exportFiles.get(_path);
+  if(handle)return (await handle.getFile()).text();
+  if(_path==="template-input"&&templateFile)return templateFile.text();
   return new Promise((resolve, reject) => {
     const input = document.createElement("input");
     input.type = "file";
@@ -1344,4 +1449,26 @@ export async function exportCsv(_path: string, _filter: Filter): Promise<string>
 export function onProgress(cb: (pct: number, msg: string) => void): () => void {
   void cb;
   return () => {};
+}
+
+export async function limitCounts(req: import("./api").LimitCountsRequest): Promise<import("./api").LimitCountsResponse> {
+  if (req.pairedTest !== undefined && req.pairedTest !== null) {
+    const data=await scatter({xTest:req.pairedTest,yTest:req.test,zMode:"none",filter:req.filter,groupBy:req.groupBy,maxPoints:Number.MAX_SAFE_INTEGER});
+    const has=req.lsl!==null||req.usl!==null;
+    const groups=data.series.map(s=>({label:s.name,total:s.points.length,inLimits:has?s.points.filter(p=>(req.lsl===null||p.y>=req.lsl)&&(req.usl===null||p.y<=req.usl)).length:null}));
+    return {total:groups.reduce((n,g)=>n+g.total,0),inLimits:has?groups.reduce((n,g)=>n+(g.inLimits??0),0):null,groups};
+  }
+  const box = await boxPlot({test: req.test, filter: req.filter, xAxis: "wafer", groupBy: req.groupBy});
+  const hasLimits = req.lsl !== null || req.usl !== null;
+  const groups = new Map<string, import("./api").LimitCount>();
+  let total = 0, inLimits = 0;
+  for (const b of box.groups) {
+    const g = groups.get(b.groupLabel) ?? {label:b.groupLabel,total:0,inLimits:hasLimits ? 0 : null};
+    for (const v of b.values) {
+      const inside = (req.lsl === null || v >= req.lsl) && (req.usl === null || v <= req.usl);
+      total++; g.total++; if (inside) { inLimits++; if (g.inLimits !== null) g.inLimits++; }
+    }
+    groups.set(b.groupLabel,g);
+  }
+  return {total,inLimits:hasLimits ? inLimits : null,groups:[...groups.values()]};
 }

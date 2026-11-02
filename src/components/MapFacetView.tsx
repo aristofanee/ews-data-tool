@@ -1,12 +1,15 @@
+import { useRestorePlotSelection } from "../lib/usePlotMemory";
+import { IMAGE_WIDTH, imageHeight, imageScope } from "../charts/imageExport";
 import { binYieldText } from "../lib/theme";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Filter, MapResponse, PlotSpec } from "../types";
+import type { Filter, MapResponse, PlotSpec, PlotSelection } from "../types";
 import * as api from "../lib/api";
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
 import {
   mapColorLimits,
   renderMapImage,
+  mapExportFooter,
   type MapOptions,
 } from "../charts/waferMap";
 import { testLabelWithUnits } from "../lib/format";
@@ -14,21 +17,26 @@ import { dataGroups, type DataGroup } from "../lib/grouping";
 import { WaferMapView } from "./WaferMapView";
 import { MapGallery, useMapSelection } from "./MapGallery";
 import { MapDetailView } from "./MapDetailView";
+import type { ImageExportJob } from "../lib/exportJobs";
 import { mapGeneration } from "../lib/mapCache";
 
 export interface MapFacetExportApi {
+  isReady: () => boolean;
+  jobs: (theme?: Theme, selectedOnly?: boolean) => ImageExportJob[];
   toDataURLs: (
     format?: "jpeg" | "png",
     theme?: Theme,
     width?: number,
-    height?: number
-  ) => { label: string; url: string }[];
+    height?: number,
+    selectedOnly?: boolean
+  ) => Promise<{ label: string; url: string }[]>;
 }
 
 interface Props {
   spec: PlotSpec;
   filter: Filter;
   onReady?: (api: MapFacetExportApi | null) => void;
+  onSelection?: (selection: PlotSelection | null) => void;
 }
 
 interface Entry {
@@ -41,7 +49,7 @@ interface Entry {
  * several groups render as a mosaic of clickable previews. The previews are
  * static (no legend, hover or zoom) so the grid scrolls normally.
  */
-export function MapFacetView({ spec, filter, onReady }: Props) {
+export function MapFacetView({ spec, filter, onReady, onSelection }: Props) {
   const info = useStore((s) => s.info);
   const theme = useStore((s) => s.theme);
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -52,6 +60,7 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [selected, setSelected] = useMapSelection("value", [dataVersion, filter, spec.test, spec.groupBy, spec.lsl, spec.usl]);
 
+  useRestorePlotSelection(entries.map(e=>e.label),setSelected,!loading&&loadedKey===requestKey);
   const groups = useMemo<DataGroup[]>(
     () => (info ? dataGroups(info, filter, spec.groupBy || "none") : []),
     [info, filter, spec.groupBy]
@@ -117,6 +126,11 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
     [info, spec.binCategory]
   );
 
+  const validRef = useRef(false);
+  validRef.current = !loading && !error && loadedKey === requestKey;
+  const selectedRef = useRef(selected); selectedRef.current = selected;
+  const groupsRef = useRef(groups); groupsRef.current=groups;
+  const filterRef = useRef(filter); filterRef.current=filter;
   const readyRef = useRef(onReady);
   readyRef.current = onReady;
   const entriesRef = useRef(entries);
@@ -131,38 +145,36 @@ export function MapFacetView({ spec, filter, onReady }: Props) {
   binPassRef.current = binPass;
 
   useEffect(() => {
-    readyRef.current?.({
-      toDataURLs: (format = "jpeg", themeOverride, width = 2400, height = 1500) => {
-        const sp = specRef.current;
-        return entriesRef.current.map(({ md, label }) => {
-          const title = `${sp.title} · ${label}`;
-          const limits = mapColorLimits(sp, md);
-          const opts: MapOptions = {
-            theme: themeOverride ?? themeRef.current,
-            palette: sp.palette,
-            mode: "value",
-            lsl: sp.showLimits ? (sp.lsl ?? md.lsl) : null,
-            usl: sp.showLimits ? (sp.usl ?? md.usl) : null,
-            binNames: binNamesRef.current,
-            binCategory: sp.binCategory,
-            binPass: binPassRef.current,
-            vmin: limits.vmin,
-            vmax: limits.vmax,
-            presentation: sp.presentation,
-          };
-          const subtitle =
-            `${label}` +
-            (md.test ? ` · ${testLabelWithUnits(md.test)}` : "") +
-            ` · Yield ${binYieldText(md.yieldPct, md.dice, 2, md.unknownBins)}`;
-          return {
-            label,
-            url: renderMapImage(md, opts, width, height, title, subtitle, format),
-          };
-        });
-      },
-    });
-    return () => readyRef.current?.(null);
-  }, []);
+    const entry=entries[selected ?? (entries.length===1 ? 0 : -1)];
+    onSelection?.(entry ? {label:entry.label,wafer:groups.find(g=>g.label===entry.label)?.wafer??undefined} : null);
+  }, [selected,entries,groups,onSelection]);
+  useEffect(() => () => onSelection?.(null), [onSelection]);
+
+  useEffect(() => {
+    const jobs=(themeOverride?:Theme,selectedOnly=false):ImageExportJob[]=>{
+      if (!validRef.current) throw new Error("The maps are still loading.");
+      const sp={...specRef.current}, exportGroups=groupsRef.current, exportFilter=filterRef.current;
+      const entries=selectedOnly?entriesRef.current.slice(selectedRef.current??0,(selectedRef.current??0)+1):entriesRef.current;
+      const theme=themeOverride??themeRef.current, binNames=binNamesRef.current, binPass=binPassRef.current;
+      return entries.map(({md,label})=>({label,render:async(format)=>{
+        await document.fonts.ready;
+        const limits=mapColorLimits(sp,md);
+        const opts:MapOptions={exportSpec:sp,exportGroupLabel:label,theme,palette:sp.palette,mode:"value",
+          lsl:sp.showLimits?(sp.lsl??md.lsl):null,usl:sp.showLimits?(sp.usl??md.usl):null,
+          binNames,binCategory:sp.binCategory,binPass,...limits,presentation:false};
+        const group=exportGroups.find(g=>g.label===label);
+        const footer=await mapExportFooter(md,opts,group?.filter??exportFilter);
+        return renderMapImage(md,{...opts,exportFooter:footer},IMAGE_WIDTH,imageHeight("map"),`${sp.title} · ${label}`,"",format);
+      }}));
+    };
+    readyRef.current?.({isReady:()=>validRef.current,jobs,
+      toDataURLs:async(format="jpeg",themeOverride,_width,_height,selectedOnly=false)=>{
+        const out:{label:string;url:string}[]=[];
+        for(const job of jobs(themeOverride,selectedOnly))out.push({label:job.label,url:await job.render(format)});
+        return out;
+      }});
+    return ()=>readyRef.current?.(null);
+  },[]);
 
   if (error) return <div className="chart-placeholder">{error}</div>;
   if (loading || loadedKey !== requestKey) return <div className="chart-placeholder">Loading {groups.length} wafer maps…</div>;

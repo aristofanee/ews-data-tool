@@ -1,11 +1,20 @@
-import type { BinOverviewWafer, MapDie, MapResponse, PlotSpec } from "../types";
+import type { BinOverviewWafer, MapDie, MapResponse, PlotSpec, Filter } from "../types";
 import { fmtMap } from "../lib/format";
 import { quantileSorted } from "../lib/stats";
 import type { Theme } from "../lib/theme";
 import { binColor, binLabel, paletteColor, binYieldText } from "../lib/theme";
+import * as api from "../lib/api";
 import { graphFontOffset } from "../lib/demoFonts";
+import { imageFrame, encodeImage, wrapImageText, exportPlotTitle, categoryName, limitFooter, imageHeight } from "./imageExport";
 
 export interface MapOptions {
+  showDieGrid?: boolean;
+  exportInk?: boolean;
+  exportFooter?: string;
+  exportSpec?: PlotSpec;
+  exportGroupLabel?: string;
+  /** Standalone export provenance; ignored by the interactive renderer. */
+  exportNotes?: string[];
   fontRevision?: number;
   theme: Theme;
   palette: string;
@@ -472,7 +481,7 @@ export class WaferMapRenderer {
     ctx.beginPath();
     ctx.arc(0, 0, R, 0, Math.PI * 2);
     ctx.clip();
-    const gap = Math.max(0.3, Math.min(cellW, cellH) * 0.055);
+    const gap = this.opts.showDieGrid === false ? -0.5 / this.scale : Math.max(0.3, Math.min(cellW, cellH) * 0.055);
     const dw = Math.max(0.5, cellW - gap);
     const dh = Math.max(0.5, cellH - gap);
     const lo = Number.isFinite(this.opts?.vmin) ? (this.opts!.vmin as number) : Number.isFinite(data.vmin) ? data.vmin : 0;
@@ -532,7 +541,7 @@ export class WaferMapRenderer {
     ctx.restore();
 
     const barX = w - cbarW + (pres ? 14 : 10);
-    const legendColors = mapColors("light");
+    const legendColors = this.opts.exportInk ? {...mapColors("light"),text:"#000000",muted:"#000000",outline:"#000000"} : mapColors("light");
     const bounds = new LegendBounds();
     let legendCtx: CanvasRenderingContext2D | null = null;
     if (showLegend) {
@@ -705,7 +714,7 @@ export class WaferMapRenderer {
     ctx.strokeRect(x + 0.5, barY + 0.5, width - 1, barH - 1);
 
     const units = this.data?.test?.units || "value";
-    ctx.font = `600 ${textSize}px ${FONT}`;
+    ctx.font = `${this.opts?.exportInk ? "400" : "600"} ${textSize}px ${FONT}`;
     ctx.fillStyle = t.muted;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
@@ -716,7 +725,7 @@ export class WaferMapRenderer {
     if (unitsLabel !== units) { unitsLabel = unitsLabel.slice(0, -1) + "…"; }
     bounds.text(ctx, unitsLabel, x, y + textSize);
 
-    ctx.font = `${textSize}px ${FONT}`;
+    ctx.font = `${this.opts?.exportInk ? "400 " : ""}${textSize}px ${FONT}`;
     ctx.textBaseline = "middle";
     for (let i = 0; i <= 4; i++) {
       const f = i / 4;
@@ -744,7 +753,7 @@ export class WaferMapRenderer {
       ctx.moveTo(x - 2 * k, yy);
       ctx.lineTo(x + width + 2 * k, yy);
       ctx.stroke();
-      ctx.font = `700 ${Math.round(9 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
+      ctx.font = `${this.opts?.exportInk ? "400" : "700"} ${Math.round(9 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
       ctx.fillStyle = "#e11d48";
       ctx.textAlign = "right";
       bounds.include(x - 2 * k, yy - k, width + 4 * k, 2 * k);
@@ -778,7 +787,7 @@ export class WaferMapRenderer {
     const shown = entries.slice(0, 12);
     const rest = entries.slice(12);
 
-    ctx.font = `600 ${Math.round(10 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
+    ctx.font = `${this.opts?.exportInk ? "400" : "600"} ${Math.round(10 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
     ctx.fillStyle = t.muted;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
@@ -827,135 +836,139 @@ function fmtCount(n: number): string {
   return n.toLocaleString("en-US");
 }
 
-/**
- * Render a print-ready wafer map with a title block. Used by “Save JPG” and by
- * the batch report generator, so the exported image matches what is on screen.
- */
-export function renderMapImage(
-  data: MapResponse,
-  opts: MapOptions,
-  width: number,
-  height: number,
-  title: string,
-  subtitle: string,
-  format: "jpeg" | "png" = "jpeg"
-): string {
-  const pres = opts.presentation === true;
-  const k = pres ? 1.5 : 1;
-  const headerH = Math.round(height * (pres ? 0.17 : 0.13));
-  const map = document.createElement("canvas");
-  const renderer = new WaferMapRenderer(map);
-  renderer.setSize(width, height - headerH, pres ? 1.75 : 1.55);
-  renderer.setData(data, opts);
-  renderer.draw();
-
-  const out = document.createElement("canvas");
-  out.width = width;
-  out.height = height;
-  const ctx = out.getContext("2d");
-  if (!ctx) return "";
-  const t = mapColors(opts.theme);
-  ctx.fillStyle = t.bg;
-  ctx.fillRect(0, 0, width, height);
-
-  ctx.textAlign = "left";
-  ctx.textBaseline = "alphabetic";
-  ctx.fillStyle = t.text;
-  ctx.font = `600 ${Math.round(30 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
-  ctx.fillText(title, 42, Math.round(50 * k));
-  ctx.fillStyle = t.muted;
-  ctx.font = `${Math.round(15 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
-  ctx.fillText(subtitle, 42, Math.round(78 * k));
-  ctx.fillStyle = "#2563eb";
-  ctx.fillRect(42, Math.round(94 * k), Math.round(74 * k), Math.round(4 * k));
-
-  ctx.drawImage(map, 0, headerH);
-  return out.toDataURL(format === "png" ? "image/png" : "image/jpeg", 0.95);
+/** Full, non-truncated legend layout shared by individual and overview bin exports. */
+function exportBinLegend(ctx: CanvasRenderingContext2D, dice: MapDie[], opts: MapOptions, maxHeight: number, availableWidth = 1152, maxColumns = 6) {
+  const counts = new Map<number, number>();
+  for (const die of dice) {
+    const code = opts.binCategory === "soft" ? die.sbin : die.hbin;
+    counts.set(code, (counts.get(code) ?? 0) + 1);
+  }
+  const entries = [...counts].sort((a, b) => a[0] - b[0]);
+  const category = opts.binCategory === "soft" ? "soft" : "hard";
+  for (let size = opts.presentation ? 18 : 15; size >= 11; size--) {
+    ctx.font = `${size}px ${FONT}`;
+    let best: { height: number; columns: number; rows: number; cells: { code: number; count: number; lines: string[]; h: number }[]; rowHeights: number[] } | undefined;
+    for (let columns = 1; columns <= Math.min(maxColumns, Math.max(1, entries.length)); columns++) {
+      const rows = Math.ceil(entries.length / columns), cellW = availableWidth / columns;
+      const cells = entries.map(([code, count]) => {
+        const lines = wrapImageText(ctx, binLabel(category, code, opts.binNames?.[code], false), cellW - 78);
+        return { code, count, lines, h: Math.max(size + 8, lines.length * (size + 4) + 8) };
+      });
+      const rowHeights = Array.from({ length: rows }, (_, row) => Math.max(...cells.slice(row * columns, (row + 1) * columns).map(c => c.h)));
+      const height = 28 + rowHeights.reduce((n, h) => n + h, 0);
+      if (height <= maxHeight && (!best || height + columns * 7 < best.height + best.columns * 7)) best = { height, columns, rows, cells, rowHeights };
+    }
+    if (best) {
+      const layout = best;
+      return { height: layout.height, draw: (top: number, left = 24) => {
+        ctx.textAlign = "left"; ctx.textBaseline = "top"; ctx.fillStyle = "#000000";
+        ctx.font = `400 ${size}px ${FONT}`; ctx.fillText(category === "soft" ? "SBIN" : "HBIN", left, top);
+        ctx.font = `${size}px ${FONT}`;
+        let y = top + 28;
+        for (let row = 0; row < layout.rows; row++) {
+          for (let col = 0; col < layout.columns; col++) {
+            const cell = layout.cells[row * layout.columns + col]; if (!cell) continue;
+            const cellW = availableWidth / layout.columns, x = left + col * cellW;
+            ctx.fillStyle = binColor(cell.code); ctx.fillRect(x, y + 2, 11, 11);
+            ctx.fillStyle = "#000000"; ctx.textAlign = "left";
+            cell.lines.forEach((line, i) => ctx.fillText(line, x + 18, y + i * (size + 4)));
+            ctx.fillStyle = "#000000"; ctx.textAlign = "right"; ctx.fillText(fmtCount(cell.count), x + cellW - 12, y);
+          }
+          y += layout.rowHeights[row];
+        }
+        ctx.textAlign = "left";
+      } };
+    }
+  }
+  throw new Error("The complete bin legend cannot fit in this image. Filter to fewer bins or wafers before exporting.");
 }
 
-/** Composite export for the Bin map tab: all selected wafers in one image. */
-export function renderBinOverviewImage(
-  wafers: BinOverviewWafer[],
-  opts: MapOptions,
-  width: number,
-  height: number,
-  title: string,
-  subtitle: string,
-  format: "jpeg" | "png" = "jpeg"
-): string {
-  const out = document.createElement("canvas");
-  out.width = width;
-  out.height = height;
-  const ctx = out.getContext("2d");
-  if (!ctx) return "";
-  const t = mapColors(opts.theme);
-  ctx.fillStyle = t.bg;
-  ctx.fillRect(0, 0, width, height);
+function rightBinLegend(ctx: CanvasRenderingContext2D, dice: MapDie[], opts: MapOptions, height: number) {
+  for (const width of [220, 280, 340, 420]) {
+    try {
+      return { legend: exportBinLegend(ctx, dice, opts, height, width, Math.max(1, Math.floor(width / 200))), width };
+    } catch { /* Try a wider complete legend before rejecting the export. */ }
+  }
+  throw new Error("The complete bin legend cannot fit. Filter to fewer bins before exporting.");
+}
 
-  const pres = opts.presentation === true;
-  const headerH = Math.round(height * (pres ? 0.14 : 0.12));
-  ctx.textAlign = "left";
-  ctx.textBaseline = "alphabetic";
-  ctx.fillStyle = t.text;
-  ctx.font = `600 ${Math.round(pres ? 32 : 28 + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
-  ctx.fillText(title, 42, Math.round(pres ? 54 : 46));
-  ctx.fillStyle = t.muted;
-  ctx.font = `${Math.round(pres ? 17 : 16 + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
-  ctx.fillText(subtitle, 42, Math.round(pres ? 84 : 72));
-  ctx.fillStyle = "#2563eb";
-  ctx.fillRect(42, Math.round(pres ? 102 : 86), Math.round(pres ? 82 : 64), 4);
+/** Count full source measurements against the exact colour range of this map. */
+export async function mapExportFooter(data: MapResponse, opts: MapOptions, filter: Filter): Promise<string> {
+  const spec=opts.exportSpec;
+  const total=data.testTotal??data.dice.filter(d=>Number.isFinite(d.v)).length;
+  if (opts.mode==="bin" || !spec || spec.test===null) return limitFooter(opts.mode==="bin"?data.dice.length:total,null);
+  const lo=opts.vmin??data.vmin, hi=opts.vmax??data.vmax;
+  if (!Number.isFinite(lo)||!Number.isFinite(hi)) return limitFooter(total,null);
+  const grouped=!data.isMean&&!!data.wafer;
+  const counts=await api.limitCounts({test:spec.test,filter,lsl:lo,usl:hi,groupBy:grouped?"wafer":null});
+  const label=`${data.lotName} / ${data.wafer?.name}`;
+  const count=grouped?counts.groups.find(g=>g.label===label)||counts.groups.find(g=>g.label===data.wafer?.name):counts;
+  const explicit=Number.isFinite(opts.vmin)||Number.isFinite(opts.vmax);
+  return limitFooter(count?.total??0,count?.inLimits??0,spec.lsl??data.lsl,spec.usl??data.usl,
+    explicit?spec:{...spec,limitMode:"auto"});
+}
 
-  const n = wafers.length;
-  if (!n) return out.toDataURL(format === "png" ? "image/png" : "image/jpeg", 0.95);
-  const cols = Math.ceil(Math.sqrt(n));
-  const rows = Math.ceil(n / cols);
-  const margin = Math.round(pres ? 34 : 24);
-  const gap = Math.round(pres ? 22 : 14);
-  const labelH = Math.round(pres ? 46 : 34);
-  const cellW = (width - margin * 2 - gap * (cols - 1)) / cols;
-  const cellH = (height - headerH - margin - gap * (rows - 1)) / rows;
-  const multiLot = new Set(wafers.map((w) => w.lotName)).size > 1;
+/** Standalone maps share the same header, pixel size and encoder as Plotly. */
+export function renderMapImage(data: MapResponse, opts: MapOptions, width: number, height: number,
+  title: string, subtitle: string, format: "jpeg" | "png" = "jpeg"): string {
+  const bin = opts.mode === "bin";
+  const spec = opts.exportSpec;
+  const group = opts.exportGroupLabel ?? (!data.isMean && data.wafer ? `${data.lotName} / ${data.wafer.name}` : undefined);
+  if (spec) title = exportPlotTitle(spec, data.test, "WaferID", group);
+  const numericTotal = (data.testPass ?? 0) + (data.testFail ?? 0);
+  const total = bin ? data.dice.length : data.testTotal ?? (numericTotal || data.dice.filter(d=>Number.isFinite(d.v)).length);
 
-  wafers.forEach((w, i) => {
-    const col = i % cols;
-    const row = Math.floor(i / cols);
-    const x = margin + col * (cellW + gap);
-    const y = headerH + row * (cellH + gap);
-    const mapH = Math.max(10, cellH - labelH);
-    const mapCanvas = document.createElement("canvas");
-    const renderer = new WaferMapRenderer(mapCanvas);
-    renderer.setSize(Math.round(cellW), Math.round(mapH), pres ? 1.5 : 1.25);
-    const data: MapResponse = {
-      wafer: w.wafer,
-      lotName: w.lotName,
-      dice: w.dice,
-      test: null,
-      lsl: null,
-      usl: null,
-      vmin: Number.NaN,
-      vmax: Number.NaN,
-      pass: w.pass,
-      fail: w.fail,
-      yieldPct: w.yieldPct,
-      isMean: false,
-      waferCount: 1,
-      excluded: 0,
-    };
-    renderer.setData(data, { ...opts, mode: "bin", showLegend: false, presentation: false });
-    renderer.draw();
+  const frame = imageFrame(width, height, title, "", opts.presentation, [opts.exportFooter??limitFooter(total,null)]);
+  const right = bin ? rightBinLegend(frame.ctx, data.dice, opts, frame.contentHeight) : null;
+  const mapWidth = right ? 1152 - right.width - 16 : 1200;
+  const mapHeight = frame.contentHeight;
+  const map = document.createElement("canvas"), renderer = new WaferMapRenderer(map);
+  renderer.setSize(Math.round(mapWidth * frame.scale), Math.round(mapHeight * frame.scale), frame.scale);
+  renderer.setData(data, { ...opts, theme: "light", exportInk: true, showLegend: bin ? false : true });
+  frame.ctx.drawImage(map, right ? 24 : 0, frame.top, mapWidth, mapHeight);
+  right?.legend.draw(frame.top, 24 + mapWidth + 16);
+  return encodeImage(frame.canvas, format);
+}
 
-    const label = multiLot ? `${w.lotName} / ${w.wafer.name}` : w.wafer.name;
-    ctx.fillStyle = t.text;
-    ctx.font = `600 ${Math.round(pres ? 18 : 16 + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-    ctx.fillText(label, x + 2, y + Math.round(pres ? 20 : 15));
-    ctx.fillStyle = binColor(1);
-    ctx.font = `${Math.round(pres ? 15 : 14 + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
-    ctx.textAlign = "right";
-    ctx.fillText(binYieldText(w.yieldPct, w.dice, 1), x + cellW - 2, y + Math.round(pres ? 20 : 15));
-    ctx.drawImage(mapCanvas, x, y + labelH, cellW, mapH);
+/** All wafers plus a shared, complete bin legend; no category is silently dropped. */
+export function renderBinOverviewImage(wafers: BinOverviewWafer[], opts: MapOptions, width: number, height: number,
+  title: string, subtitle: string, format: "jpeg" | "png" = "jpeg"): string {
+  if (opts.exportSpec) title = exportPlotTitle(opts.exportSpec, null, "WaferID");
+  // An overview is always a 16:9 image; enlarged individual wafers remain square.
+  height = Math.round(width * 9 / 16);
+  const lots = [...new Set(wafers.map(w=>w.lotName))];
+  if (opts.exportSpec && lots.length === 1) title = exportPlotTitle({...opts.exportSpec,groupBy:"lot"}, null, "WaferID", lots[0]);
+  const frame = imageFrame(width, height, title, "", opts.presentation,
+    []);
+  if (!wafers.length) return encodeImage(frame.canvas, format);
+  const {legend, width:legendW} = rightBinLegend(frame.ctx, wafers.flatMap(w=>w.dice), opts, frame.contentHeight);
+  const areaW = 1152 - legendW - 16, gap = 6, n = wafers.length;
+  const multiLot = lots.length > 1;
+  let best: {cols:number;rows:number;cellW:number;cellH:number;labelH:number;labels:string[][];diameter:number} | undefined;
+  frame.ctx.font = `400 11px ${FONT}`;
+  for (let cols=1;cols<=Math.min(n,30);cols++) {
+    const rows=Math.ceil(n/cols), cellW=(areaW-gap*(cols-1))/cols, cellH=(frame.contentHeight-gap*(rows-1))/rows;
+    if (cellW<40) continue;
+    const labels=wafers.map(w=>wrapImageText(frame.ctx,multiLot?`${w.lotName} / ${w.wafer.name}`:w.wafer.name,cellW));
+    const labelH=Math.max(...labels.map(lines=>lines.length*13+15));
+    const diameter=Math.min(cellW,cellH-labelH);
+    if (!best || diameter>best.diameter) best={cols,rows,cellW,cellH,labelH,labels,diameter};
+  }
+  if (!best || best.diameter<20) throw new Error("Too many wafers to label clearly in one image. Filter to fewer wafers before exporting.");
+  const {cols,cellW,cellH,labelH,labels}=best;
+  wafers.forEach((w,i)=>{
+    const x=24+(i%cols)*(cellW+gap), y=frame.top+Math.floor(i/cols)*(cellH+gap), mapH=cellH-labelH;
+    const map=document.createElement("canvas"), renderer=new WaferMapRenderer(map);
+    renderer.setSize(Math.round(cellW*frame.scale),Math.round(mapH*frame.scale),frame.scale);
+    const data: MapResponse={wafer:w.wafer,lotName:w.lotName,dice:w.dice,test:null,lsl:null,usl:null,
+      vmin:NaN,vmax:NaN,pass:w.pass,fail:w.fail,yieldPct:w.yieldPct,isMean:false,waferCount:1,excluded:0};
+    renderer.setData(data,{...opts,theme:"light",exportInk:true,mode:"bin",showLegend:false,showDieGrid:false,presentation:false});
+    frame.ctx.textAlign="left";frame.ctx.textBaseline="top";frame.ctx.fillStyle="#000000";frame.ctx.font=`400 11px ${FONT}`;
+    labels[i].forEach((line,j)=>frame.ctx.fillText(line,x,y+j*13));
+    frame.ctx.font=`10px ${FONT}`;frame.ctx.fillStyle="#000000";
+    frame.ctx.fillText(binYieldText(w.yieldPct,w.dice,1),x,y+labels[i].length*13);
+    frame.ctx.drawImage(map,x,y+labelH,cellW,mapH);
   });
-
-  return out.toDataURL(format === "png" ? "image/png" : "image/jpeg", 0.95);
+  legend.draw(frame.top,24+areaW+16);
+  return encodeImage(frame.canvas,format);
 }

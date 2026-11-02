@@ -214,6 +214,7 @@ impl Dataset {
         self.recompute();
     }
 
+    #[cfg(test)]
     pub fn merge(&mut self, imp: Imported) {
         self.merge_impl(imp, true);
     }
@@ -492,7 +493,6 @@ impl Dataset {
 
         DatasetInfo {
             data_categories:self.data_categories.iter().map(|c|DataCategoryInfo{id:c.id.clone(),name:c.name.clone(),values:c.values.clone(),labels:(0..c.values.len()).map(|i|c.label(i as u16)).collect(),counts:c.counts.clone(),automatic:c.automatic}).collect(),
-            category_sources:self.category_sources(),
             files: self.files.clone(),
             lots: self.lots.clone(),
             wafers: self.wafers.clone(),
@@ -518,7 +518,6 @@ impl Dataset {
 #[serde(rename_all = "camelCase")]
 pub struct DatasetInfo {
     pub data_categories:Vec<DataCategoryInfo>,
-    pub category_sources:Vec<CategorySourceInfo>,
     pub sites: Vec<u16>,
     pub files: Vec<String>,
     pub lots: Vec<String>,

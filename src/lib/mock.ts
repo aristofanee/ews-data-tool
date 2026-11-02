@@ -19,8 +19,7 @@ import type {
   TrendResponse,
   WaferInfo,
 } from "../types";
-import { cpCpk, keepMask, mean, naturalCompare, quantileSorted, stdDev, summarize } from "./stats";
-import { testLabelWithUnits } from "./format";
+import { cpCpk, keepMask, naturalCompare, summarize, scatterStatistics } from "./stats";
 
 /* ------------------------------------------------------------------ */
 /* Synthetic dataset used when the app runs in a plain browser (dev).  */
@@ -265,24 +264,17 @@ function buildDataset(): MockDataset {
 function dataset(): MockDataset {
   if (!cached) {
     cached = buildDataset();
-    cached.info.categorySources=[...cached.tests.map(t=>({id:`data:test:${testLabelWithUnits(t)}`,name:testLabelWithUnits(t),kind:"test" as const})),{id:"data:text:Probe mode",name:"Probe mode",kind:"text"},{id:"data:text:Program step",name:"Program step",kind:"text"}];
-    buildMockCategory(cached,"data:text:Probe mode",true);
+    buildMockCategory(cached);
   }
   return cached;
 }
 
-function buildMockCategory(ds:MockDataset,id:string,automatic=false){
-  const source=ds.info.categorySources?.find(c=>c.id===id);if(!source)throw new Error("Category source is no longer available.");
-  const values=[""],lookup=new Map<string,number>(),data=new Map<number,Uint16Array>(),counts=[0];
-  const test=source.kind==="test"?ds.tests.findIndex(t=>`data:test:${testLabelWithUnits(t)}`===id):-1;
+function buildMockCategory(ds:MockDataset){
+  const id="data:text:Probe mode",values=["","A","B","C"],data=new Map<number,Uint16Array>(),counts=[0,0,0,0];
   for(const w of ds.wafers){const codes=new Uint16Array(w.x.length);for(let i=0;i<codes.length;i++){
-    const raw=source.kind==="text"?(source.name==="Probe mode"?["A","B","C"][i%3]:`Step ${Math.floor(i/5)%2+1}`):Number.isFinite(w.cols[test][i])?String(w.cols[test][i]):"";
-    let code=raw?lookup.get(raw):0;if(code===undefined){if(values.length>=65535)throw new Error("Too many distinct values for a category.");code=values.length;values.push(raw);counts.push(0);lookup.set(raw,code);}codes[i]=code;counts[code]++;
+    const code=i%3+1;codes[i]=code;counts[code]++;
   }data.set(w.index,codes);}
-  ds.categoryData.set(id,data);ds.info={...ds.info,dataCategories:[...(ds.info.dataCategories??[]).filter(c=>c.id!==id),{id,name:source.name,values,labels:values.map((v,i)=>i?v:"Unassigned"),counts,automatic}]};
-}
-export async function setDataCategory(id:string,enabled:boolean):Promise<DatasetInfo>{
-  const ds=dataset();if(enabled)buildMockCategory(ds,id);else{ds.categoryData.delete(id);ds.info={...ds.info,dataCategories:ds.info.dataCategories?.filter(c=>c.id!==id)};}return delay(ds.info);
+  ds.categoryData.set(id,data);ds.info={...ds.info,dataCategories:[{id,name:"Probe mode",values,labels:values.map((v,i)=>i?v:"Unassigned"),counts,automatic:true}]};
 }
 function categoryAllowed(w:MockWafer,i:number,f:Filter):boolean{
   const ds=dataset();return Object.entries(f.categories??{}).every(([id,values])=>{if(!values.length)return true;const c=ds.info.dataCategories?.find(c=>c.id===id),code=ds.categoryData.get(id)?.get(w.index)?.[i];return !!c&&code!==undefined&&values.includes(c.values[code]);});
@@ -401,24 +393,6 @@ function scatterGroupLabel(ds: MockDataset, col: string): string {
     default:
       return ds.info.dataCategories?.find(c=>c.id===col)?.name??ds.customCols.find((c) => c.name === col)?.name ?? "Lot";
   }
-}
-
-function pearson(xs: number[], ys: number[]): number {
-  const n = Math.min(xs.length, ys.length);
-  if (n < 2) return NaN;
-  const mx = xs.slice(0, n).reduce((a, b) => a + b, 0) / n;
-  const my = ys.slice(0, n).reduce((a, b) => a + b, 0) / n;
-  let sxy = 0;
-  let sxx = 0;
-  let syy = 0;
-  for (let i = 0; i < n; i++) {
-    const dx = xs[i] - mx;
-    const dy = ys[i] - my;
-    sxy += dx * dy;
-    sxx += dx * dx;
-    syy += dy * dy;
-  }
-  return sxx > 0 && syy > 0 ? sxy / Math.sqrt(sxx * syy) : NaN;
 }
 
 /* ------------------------------------------------------------------ */
@@ -880,7 +854,6 @@ export async function pareto(req: {
   const passOf = (code: number) => code === 1;
   const counts = new Map<number, number>();
   const grouped = new Map<string, { total: number; pass: number; counts: Map<number, number> }>();
-  const multiLot = ds.lots.length > 1;
   let total = 0;
   let passTotal = 0;
   for (const w of ds.wafers) {
@@ -1191,26 +1164,31 @@ export async function scatter(req: {
   if (req.filter.stat) {
     const sf = req.filter.stat;
     const before = points.length;
-    const keepX = keepMask(points.map((p) => p.x), sf.kind, sf.k);
-    const keepY = keepMask(points.map((p) => p.y), sf.kind, sf.k);
-    points = points.filter((_, i) => keepX[i] && keepY[i]);
+    const buckets=new Map<number,number[]>();
+    points.forEach((p,i)=>{const key=sf.perWafer?p.wafer:0;const rows=buckets.get(key)??[];rows.push(i);buckets.set(key,rows);});
+    const keep=new Uint8Array(points.length);
+    for(const rows of buckets.values()){
+      const kx=keepMask(rows.map(i=>points[i].x),sf.kind,sf.k),ky=keepMask(rows.map(i=>points[i].y),sf.kind,sf.k);
+      rows.forEach((row,i)=>{keep[row]=Number(kx[i]&&ky[i]);});
+    }
+    points = points.filter((_, i) => keep[i]);
     excluded = before - points.length;
   }
 
-  const groupTotals: Record<string, number> = {};
-  for (const p of points) if (p.name) groupTotals[p.name] = (groupTotals[p.name] ?? 0) + 1;
+  const groupTotals: Record<string, number> = Object.create(null);
+  const groupStatistics:NonNullable<ScatterResponse["groupStatistics"]>=Object.create(null),groupPoints=new Map<string,Raw[]>();
+  for(const p of points)if(p.name){const rows=groupPoints.get(p.name)??[];rows.push(p);groupPoints.set(p.name,rows);}
+  for(const [name,rows]of groupPoints){groupTotals[name]=rows.length;groupStatistics[name]=scatterStatistics(rows);}
+  const statistics=scatterStatistics(points);
   const total = points.length;
   const cap = Math.max(1, req.maxPoints ?? 30000);
   const stride = total > cap ? Math.ceil(total / cap) : 1;
   const sampled = points.filter((_, i) => i % stride === 0);
   if(groupCol){const present=new Set(sampled.map(p=>p.code));for(const p of points)if(!present.has(p.code)){sampled.push(p);present.add(p.code);}}
-  const r = pearson(
-    points.map((p) => p.x),
-    points.map((p) => p.y)
-  );
+  const r = statistics.fit?.r??null;
   let zMin: number | null = null;
   let zMax: number | null = null;
-  for (const p of sampled) {
+  for (const p of points) {
     if (p.z !== null) {
       zMin = zMin === null ? p.z : Math.min(zMin, p.z);
       zMax = zMax === null ? p.z : Math.max(zMax, p.z);
@@ -1258,6 +1236,7 @@ export async function scatter(req: {
 
   return delay({
     series,
+    statistics,groupStatistics,
     groupTotals,
     xTest,
     yTest,
@@ -1272,7 +1251,7 @@ export async function scatter(req: {
     total,
     excluded,
     truncated: stride > 1,
-    r: Number.isFinite(r) ? r : null,
+    r,
     lots: ds.lots,
     wafers: ds.wafers.map((w) => labelOf(w, multiLot)),
   });

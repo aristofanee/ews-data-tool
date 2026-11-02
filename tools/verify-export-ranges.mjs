@@ -37,6 +37,7 @@ try{
   results.push({name:'map-custom',image:renderMapImage(md,opts,2400,2100,'ignored','','png'),footer:opts.exportFooter,expected:results[1].expected,text:[...window.texts]});
   HTMLAnchorElement.prototype.click=function(){if(this.href.startsWith('data:image/'))window.saved.push({name:this.download,url:this.href});};
   const {generateReport}=await import('/src/lib/report.ts');window.texts=[];
+  const dirs=new Set(['audit']);const directory=path=>({name:path.split('\\').at(-1),getDirectoryHandle:async(name,options)=>{const next=path+'\\'+name;if(!dirs.has(next)&&!options?.create)throw new DOMException('Missing','NotFoundError');dirs.add(next);return directory(next);},getFileHandle:async name=>({createWritable:async()=>({write:async value=>{if(value instanceof Blob&&value.type.startsWith('image/')){const url=await new Promise(resolve=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.readAsDataURL(value);});window.saved.push({name,url});}},close:async()=>{},abort:async()=>{}})})});window.showDirectoryPicker=async()=>directory('audit');await api.pickFolder();
   await generateReport({items:[{id:'bins',spec:defaultSpec('binmap',null,'Bin map'),filters:filter}],info:state.info,theme:'light',folder:'audit',templateName:'Lots',onProgress:()=>{}});
   const report=await Promise.all(window.saved.map(async f=>{const im=new Image();im.src=f.url;await im.decode();return {...f,width:im.width,height:im.height};}));
   const overview=await api.binOverview({category:'hard',filter});const w=overview.wafers[0];
@@ -49,7 +50,7 @@ try{
  });
  for(const r of results.results){assert.ok(r.footer.startsWith(r.expected),`${r.name}: ${r.footer} expected ${r.expected}`);if(['auto','manual','scatter-custom','map-custom'].includes(r.name))assert.equal(r.footer,r.expected);assert.ok(r.text.every(t=>!/(?:bold|^[67]00)/.test(t.font)),r.name+' regular fonts');writeFileSync(`${dir}/${r.name}.png`,Buffer.from(r.image.split(',')[1],'base64'));delete r.image;delete r.text;}
  assert.match(results.results.find(r=>r.name==='sigma').footer,/Mean ±1σ$/);assert.match(results.results.find(r=>r.name==='iqr').footer,/Q1\/Q3 ±0.5 IQR$/);assert.match(results.results.find(r=>r.name==='spec').footer,/USL\/LSL$/);
- assert.equal(results.report.length,2);for(const r of results.report){assert.equal(r.width,2400);assert.equal(r.height,1350);writeFileSync(`${dir}/${r.name}`,Buffer.from(r.url.split(',')[1],'base64'));delete r.url;}
+ assert.equal(results.report.length,2);for(const r of results.report){assert.equal(r.width,4800);assert.equal(r.height,2700);writeFileSync(`${dir}/${r.name}`,Buffer.from(r.url.split(',')[1],'base64'));delete r.url;}
  assert.equal(results.longest.nonGreen,0);assert.ok(results.longest.span>500);assert.ok(results.legendTexts.some(t=>t.text==='HBIN'&&t.x>900));writeFileSync(`${dir}/no-grid.png`,Buffer.from(results.seam.split(',')[1],'base64'));delete results.seam;delete results.legendTexts;
  assert.deepEqual(errors,[]);writeFileSync(`${dir}/result.json`,JSON.stringify({...results,errors},null,2));console.log(JSON.stringify({...results,errors},null,2));
 }finally{await browser?.close();server.kill();}

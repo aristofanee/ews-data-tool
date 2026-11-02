@@ -25,7 +25,6 @@ pub fn run() {
             commands::inspect_csv,
             commands::import_product_metadata,
             commands::dataset_info,
-            commands::set_data_category,
             commands::add_custom_column,
             commands::remove_custom_column,
             commands::restore_custom_columns,

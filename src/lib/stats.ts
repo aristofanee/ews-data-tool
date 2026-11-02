@@ -1,4 +1,17 @@
-import type { Summary } from "../types";
+import type { Summary, ScatterStatistics } from "../types";
+
+/** Full considered population; marker sampling must never alter fit or ranges. */
+export function scatterStatistics(points: readonly {x:number;y:number}[]): ScatterStatistics {
+  const summary=summarize(points.map(p=>p.y));
+  if(points.length<2)return {summary,fit:null};
+  let sx=0,sy=0,xMin=Infinity,xMax=-Infinity;
+  for(const p of points){sx+=p.x;sy+=p.y;xMin=Math.min(xMin,p.x);xMax=Math.max(xMax,p.x);}
+  const mx=sx/points.length,my=sy/points.length;let sxx=0,syy=0,sxy=0;
+  for(const p of points){const dx=p.x-mx,dy=p.y-my;sxx+=dx*dx;syy+=dy*dy;sxy+=dx*dy;}
+  if(sxx<=0)return {summary,fit:null};
+  const slope=sxy/sxx;
+  return {summary,fit:{slope,intercept:my-slope*mx,r:syy>0?Math.max(-1,Math.min(1,sxy/Math.sqrt(sxx*syy))):null,xMin,xMax}};
+}
 
 export function mean(v: ArrayLike<number>): number {
   if (v.length === 0) return NaN;

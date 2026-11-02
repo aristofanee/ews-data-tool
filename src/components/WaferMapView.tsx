@@ -1,4 +1,4 @@
-import { IMAGE_WIDTH, imageHeight, imageScope } from "../charts/imageExport";
+import { IMAGE_WIDTH, imageHeight } from "../charts/imageExport";
 import { binYieldText } from "../lib/theme";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MapResponse, PlotSpec } from "../types";

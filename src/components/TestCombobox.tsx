@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useId, useRef, useState } from "react";
+import { useLayoutEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { TestInfo } from "../types";
 import { testLabelWithUnits } from "../lib/format";
@@ -10,6 +10,7 @@ export function TestCombobox({ tests, value, onChange, label:fieldLabel="Y test"
 }) {
   const id = useId();
   const [open, setOpen] = useState(false), [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
   const [active, setActive] = useState(0);
   const root = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLDivElement>(null);
@@ -35,21 +36,31 @@ export function TestCombobox({ tests, value, onChange, label:fieldLabel="Y test"
   }, [open, tests]);
   const label = value !== null && tests[value] ? testLabelWithUnits(tests[value]) : "";
   const rows = tests.map((t, i) => ({ label: testLabelWithUnits(t), i })).filter((t) => matchesSearch(t.label, query));
-  const choose = (index: number) => { onChange(index); setOpen(false); setQuery(""); };
-  useEffect(() => { list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" }); }, [active]);
+  const openAtSelection = () => { setOpen(true); setQuery(""); setSearching(false); setActive(value !== null && tests[value] ? value : 0); };
+  const close = () => { setOpen(false); setQuery(""); setSearching(false); };
+  const choose = (index: number) => { onChange(index); close(); };
+  useLayoutEffect(() => {
+    const menu=list.current,row=menu?.querySelector<HTMLElement>('[aria-selected="true"]');
+    if(!open||!menu||!row)return;
+    // Scroll only the popup, after its final width is applied. Text wrapping
+    // changes row heights; scrollIntoView can also move ancestor containers.
+    const top=row.offsetTop,bottom=top+row.offsetHeight;
+    if(top<menu.scrollTop)menu.scrollTop=top;
+    else if(bottom>menu.scrollTop+menu.clientHeight)menu.scrollTop=bottom-menu.clientHeight;
+  }, [active,open,query,position.width,position.maxHeight]);
   return <div className="test-combobox" ref={root} onBlur={(e) => {
-    if (!e.currentTarget.contains(e.relatedTarget as Node)) { setOpen(false); setQuery(""); }
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) close();
   }}>
     <input className="input" role="combobox" aria-label={fieldLabel} aria-expanded={open}
       aria-autocomplete="list" aria-controls={id} aria-activedescendant={open && rows[active] ? `${id}-${rows[active].i}` : undefined}
-      value={open ? query : label} placeholder="Select or type to search…"
-      onFocus={() => { setOpen(true); setQuery(""); setActive(0); }}
-      onClick={() => { if (!open) { setOpen(true); setQuery(""); setActive(0); } }}
-      onChange={(e) => { setQuery(e.target.value); setOpen(true); setActive(0); }}
+      value={open && searching ? query : label} placeholder="Select or type to search…"
+      onFocus={(e) => { openAtSelection(); e.currentTarget.select(); }}
+      onClick={(e) => { if (!open) openAtSelection(); if(!searching)e.currentTarget.select(); }}
+      onChange={(e) => { setQuery(e.target.value); setSearching(true); setOpen(true); setActive(0); }}
       onKeyDown={(e) => {
-        if (e.key === "Escape") { e.preventDefault(); setOpen(false); setQuery(""); }
+        if (e.key === "Escape") { e.preventDefault(); close(); }
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-          e.preventDefault(); setOpen(true); setActive((i) => Math.max(0, Math.min(rows.length - 1, i + (e.key === "ArrowDown" ? 1 : -1))));
+          e.preventDefault(); if(!open){openAtSelection();return;} setActive((i) => Math.max(0, Math.min(rows.length - 1, i + (e.key === "ArrowDown" ? 1 : -1))));
         }
         if (e.key === "Enter" && open && rows[active]) { e.preventDefault(); choose(rows[active].i); }
       }} />

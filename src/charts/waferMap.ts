@@ -5,7 +5,7 @@ import type { Theme } from "../lib/theme";
 import { binColor, binLabel, paletteColor, binYieldText } from "../lib/theme";
 import * as api from "../lib/api";
 import { graphFontOffset } from "../lib/demoFonts";
-import { imageFrame, encodeImage, wrapImageText, exportPlotTitle, categoryName, limitFooter, imageHeight } from "./imageExport";
+import { imageFrame, encodeImage, wrapImageText, exportPlotTitle, limitFooter } from "./imageExport";
 
 export interface MapOptions {
   showDieGrid?: boolean;
@@ -141,7 +141,6 @@ export class WaferMapRenderer {
   private data: MapResponse | null = null;
   private opts: MapOptions | null = null;
 
-  private cell = 1;
   private cellW = 1;
   private cellH = 1;
   private cx = 0;
@@ -350,7 +349,6 @@ export class WaferMapRenderer {
     const data = this.data;
     const mode = this.opts.mode;
     const pres = this.opts.presentation === true;
-    const k = pres ? 1.55 : 1;
 
     ctx.setTransform(dpr * this.scale, 0, 0, dpr * this.scale, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -454,7 +452,6 @@ export class WaferMapRenderer {
       R = Math.max((cols / 2) * cell, (rows / 2) * cell) + cell * 0.6;
     }
 
-    this.cell = Math.min(cellW, cellH);
     this.cellW = cellW;
     this.cellH = cellH;
     this.cx = cx;
@@ -910,7 +907,7 @@ export async function mapExportFooter(data: MapResponse, opts: MapOptions, filte
 
 /** Standalone maps share the same header, pixel size and encoder as Plotly. */
 export function renderMapImage(data: MapResponse, opts: MapOptions, width: number, height: number,
-  title: string, subtitle: string, format: "jpeg" | "png" = "jpeg"): string {
+  title: string, _subtitle: string, format: "jpeg" | "png" = "jpeg"): string {
   const bin = opts.mode === "bin";
   const spec = opts.exportSpec;
   const group = opts.exportGroupLabel ?? (!data.isMean && data.wafer ? `${data.lotName} / ${data.wafer.name}` : undefined);
@@ -932,7 +929,7 @@ export function renderMapImage(data: MapResponse, opts: MapOptions, width: numbe
 
 /** All wafers plus a shared, complete bin legend; no category is silently dropped. */
 export function renderBinOverviewImage(wafers: BinOverviewWafer[], opts: MapOptions, width: number, height: number,
-  title: string, subtitle: string, format: "jpeg" | "png" = "jpeg"): string {
+  title: string, _subtitle: string, format: "jpeg" | "png" = "jpeg"): string {
   if (opts.exportSpec) title = exportPlotTitle(opts.exportSpec, null, "WaferID");
   // An overview is always a 16:9 image; enlarged individual wafers remain square.
   height = Math.round(width * 9 / 16);

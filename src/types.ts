@@ -43,7 +43,6 @@ export interface CustomColumn {
 
 export interface DatasetInfo {
   dataCategories?:DataCategoryInfo[];
-  categorySources?:CategorySourceInfo[];
   sites?: number[];
   /** Earlier die attempts replaced by the latest imported attempt. */
   retestCount?: number;
@@ -76,7 +75,6 @@ export interface Filter {
 }
 
 export interface DataCategoryInfo {id:string;name:string;values:string[];labels:string[];counts:number[];automatic:boolean}
-export interface CategorySourceInfo {id:string;name:string;kind:"test"|"text"}
 
 export const emptyFilter = (): Filter => ({
   lots: [],
@@ -283,7 +281,14 @@ export interface ScatterSeries {
   points: ScatterPoint[];
 }
 
+export interface ScatterStatistics {
+  summary: Summary;
+  fit: {slope:number;intercept:number;r:number|null;xMin:number;xMax:number}|null;
+}
+
 export interface ScatterResponse {
+  statistics?: ScatterStatistics;
+  groupStatistics?: Record<string, ScatterStatistics>;
   groupTotals?: Record<string, number>;
   series: ScatterSeries[];
   xTest: TestInfo;

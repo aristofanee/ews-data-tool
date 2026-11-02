@@ -105,11 +105,6 @@ export async function datasetInfo(): Promise<DatasetInfo | null> {
   return invoke<DatasetInfo | null>("dataset_info");
 }
 
-export async function setDataCategory(id:string,enabled:boolean):Promise<DatasetInfo>{
-  const info=!isTauri?await mock.setDataCategory(id,enabled):await invoke<DatasetInfo>("set_data_category",{id,enabled});
-  invalidateMaps();return info;
-}
-
 export async function addCustomColumn(
   name: string,
   assignments: { wafer: number; label: string }[]

@@ -1,6 +1,5 @@
 import { useRestorePlotSelection } from "../lib/usePlotMemory";
-import { IMAGE_WIDTH, BIN_OVERVIEW_WIDTH, imageHeight, imageScope } from "../charts/imageExport";
-import { binYieldText, overviewYieldText } from "../lib/theme";
+import { IMAGE_WIDTH, BIN_OVERVIEW_WIDTH, imageHeight } from "../charts/imageExport";
 import { useEffect, useMemo, useRef } from "react";
 import type { BinOverviewResponse, BinOverviewWafer, MapResponse, PlotSpec, PlotSelection } from "../types";
 import {

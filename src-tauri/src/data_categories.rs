@@ -70,7 +70,8 @@ fn repeated_and_varied(ds:&Dataset,codes:&[u16],counts:&[usize])->bool{
 }
 
 impl Dataset {
-    pub fn category_sources(&self)->Vec<CategorySourceInfo>{
+    #[cfg(test)]
+    fn category_sources(&self)->Vec<CategorySourceInfo>{
         self.tests.iter().map(|t|CategorySourceInfo{id:format!("data:test:{}",t.display_with_units()),name:t.display_with_units(),kind:"test".into()})
             .chain(self.text_cols.iter().map(|c|CategorySourceInfo{id:format!("data:text:{}",c.name),name:c.name.clone(),kind:"text".into()})).collect()
     }
@@ -139,6 +140,7 @@ impl Dataset {
         for (i,c)in self.text_cols.iter().enumerate(){let source=CategorySourceInfo{id:format!("data:text:{}",c.name),name:c.name.clone(),kind:"text".into()};if let Ok(category)=self.build_data_category(source,i,false,&[]){self.data_categories.push(category);}}
         for c in &mut self.text_cols{c.lookup.clear();c.lookup.shrink_to_fit();}
     }
+    #[cfg(test)]
     pub fn set_data_category(&mut self,id:&str,enabled:bool)->Result<(),String>{
         if enabled{let (index,source)=self.category_sources().into_iter().enumerate().find(|(_,s)|s.id==id).ok_or("Category source is no longer available")?;let index=if source.kind=="text"{index-self.tests.len()}else{index};let category=self.build_data_category(source,index,true,&[])?;self.data_categories.retain(|c|c.id!=id);self.data_categories.push(category);}else{self.data_categories.retain(|c|c.id!=id);}Ok(())
     }

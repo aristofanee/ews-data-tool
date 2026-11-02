@@ -9,7 +9,6 @@ import {
   IconChevronDown,
   IconChevronUp,
   IconLayers,
-  IconPlus,
   IconSearch,
   IconSliders,
   IconTrash,

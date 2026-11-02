@@ -245,12 +245,6 @@ pub fn dataset_info(state: State<'_, AppState>) -> Result<Option<DatasetInfo>, S
     Ok(state.ds.lock().unwrap().as_ref().map(|d| d.info()))
 }
 
-#[tauri::command]
-pub async fn set_data_category(state:State<'_,AppState>,id:String,enabled:bool)->Result<DatasetInfo,String>{
-    let target=state.ds.clone();
-    tauri::async_runtime::spawn_blocking(move||{let mut guard=target.lock().map_err(|e|e.to_string())?;let ds=guard.as_mut().ok_or("Import data first")?;ds.set_data_category(&id,enabled)?;Ok(ds.info())}).await.map_err(|e|e.to_string())?
-}
-
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnAssignment {

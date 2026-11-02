@@ -1,6 +1,5 @@
 import { useRestorePlotSelection } from "../lib/usePlotMemory";
 import { useEffect, useMemo, useRef, useState, useCallback, type ComponentType } from "react";
-import Plotly from "plotly.js-dist-min";
 import { PLOT_LABELS, useStore } from "../store";
 import type { PlotSpec, PlotType, PlotSelection } from "../types";
 import { usePlotData, type PlotData } from "../lib/usePlotData";
@@ -15,12 +14,13 @@ import {
 import { PlotlyChart } from "./PlotlyChart";
 import { PlotPreviewGrid } from "./PlotPreviewGrid";
 import { usePlotSelection, usePlotViewKey } from "../lib/usePlotMemory";
+import { categoryName } from "../lib/categoryNames";
 import { WaferMapView, type MapExportApi } from "./WaferMapView";
 import { BinMapView, type BinMapExportApi } from "./BinMapView";
 import { MapFacetView, type MapFacetExportApi } from "./MapFacetView";
 import { ParetoFacetView, type ParetoFacetExportApi } from "./ParetoFacetView";
 import { EmptyState } from "./EmptyState";
-import { renderExportFigure, splitImageName, imageScope, IMAGE_WIDTH, IMAGE_HEIGHT, imageHeight } from "../charts/imageExport";
+import { renderExportFigure, splitImageName, IMAGE_WIDTH, imageHeight } from "../charts/imageExport";
 import type { Theme } from "../lib/theme";
 import { binLabel, binYieldText } from "../lib/theme";
 import * as api from "../lib/api";
@@ -73,7 +73,7 @@ function categoryLabel(value: string): string {
   if (value === "lot") return "Lot";
   if (value === "hbin") return "HBIN";
   if (value === "sbin") return "SBIN";
-  return value;
+  return categoryName(value);
 }
 
 function statsFor(data: PlotData, spec: PlotSpec): Stat[] {
@@ -398,7 +398,9 @@ function SplitPlotView({
   onSelection: (selection: PlotSelection | null) => void;
 }) {
   const viewKey = usePlotViewKey(spec);
-  const [selected, setSelected] = usePlotSelection(`split:${spec.type}`, viewKey);
+  // Axis edits reset the zoom, while keeping the currently opened group.
+  const selectionKey = usePlotViewKey({...spec,limitMode:"auto",limitK:3,yMin:null,yMax:null,lsl:null,usl:null,logY:false});
+  const [selected, setSelected] = usePlotSelection(`split:${spec.type}`, selectionKey);
   useRestorePlotSelection(facets.map(f=>f.label),setSelected);
   const facet = selected !== null ? facets[selected] : undefined;
   useEffect(()=>{onSelection(facet??null);},[facet,onSelection]);
@@ -721,7 +723,7 @@ export function ChartPanel() {
             {(currentData?.kind === "box" || currentData?.kind === "scatter") &&
               currentData.data.truncated && (
                 <div className="stat" title={currentData.kind === "scatter"
-                  ? `Showing ${fmtInt(currentData.data.series.reduce((n, s) => n + s.points.length, 0))} of ${fmtInt(currentData.data.total)} considered X/Y measurements for responsiveness. Correlation uses all considered measurements; the fit line uses the displayed subset. No measurements are removed from the imported data.`
+                  ? `Showing ${fmtInt(currentData.data.series.reduce((n, s) => n + s.points.length, 0))} of ${fmtInt(currentData.data.total)} considered X/Y measurements for responsiveness. Correlation, fit lines and range statistics use all considered measurements. No measurements are removed from the imported data.`
                   : "Regular markers are sampled for responsiveness. Every outlier is retained, and box statistics use all considered measurements."}>
                   <span className="stat-k">Rendering</span>
                   <span className="stat-v tone-warn">{currentData.kind === "scatter" ? "Sampled display" : "Regular points sampled"}</span>

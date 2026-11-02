@@ -30,16 +30,15 @@ fn split_units(header: &str) -> (String, String) {
     (h.to_string(), String::new())
 }
 
-fn decode(bytes: &[u8]) -> Cow<'_, str> {
-    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        Cow::Borrowed(std::str::from_utf8(&bytes[3..]).unwrap_or(""))
-    } else if bytes.starts_with(&[0xFF, 0xFE]) {
-        Cow::Owned(encoding_rs::UTF_16LE.decode(&bytes[2..]).0.into_owned())
-    } else if bytes.starts_with(&[0xFE, 0xFF]) {
-        Cow::Owned(encoding_rs::UTF_16BE.decode(&bytes[2..]).0.into_owned())
-    } else {
-        String::from_utf8_lossy(bytes)
+fn decode(bytes: &[u8]) -> Result<Cow<'_, str>,String> {
+    const ERROR:&str="Invalid CSV text encoding. Save the file as UTF-8 or UTF-16; no data has been imported.";
+    if bytes.starts_with(&[0xFF,0xFE])||bytes.starts_with(&[0xFE,0xFF]){
+        let encoding=if bytes[0]==0xFF{encoding_rs::UTF_16LE}else{encoding_rs::UTF_16BE};
+        let (text,_,invalid)=encoding.decode(&bytes[2..]);
+        if invalid{return Err(ERROR.into());}return Ok(Cow::Owned(text.into_owned()));
     }
+    let body=bytes.strip_prefix(&[0xEF,0xBB,0xBF]).unwrap_or(bytes);
+    std::str::from_utf8(body).map(Cow::Borrowed).map_err(|_|ERROR.into())
 }
 
 fn count_delim(line: &str, delim: char) -> usize {
@@ -255,6 +254,12 @@ fn push_meta_columns(imp: &mut Imported, collectors: Vec<MetaColumn>) {
             }
         }
     }
+}
+
+fn validate_text_columns(columns:&[MetaColumn])->Result<(),String>{
+    let mut names=HashSet::new();
+    for c in columns {if !names.insert(&c.name){return Err(format!("Duplicate CSV text column “{}”. Give each column a distinct name before importing.",c.name));}}
+    Ok(())
 }
 
 fn meta_name(header: &str) -> String {
@@ -669,7 +674,7 @@ fn read_metadata_and_probe(
 
 pub fn inspect_csv(path: &Path) -> Result<CsvInspection, String> {
     let mapped = mapped_text(path)?;
-    let text = decode(&mapped);
+    let text = decode(&mapped)?;
     let delim = detect_delimiter(&text);
     let (headers, header_line, _header_idx) = find_header(&text, delim)?;
     let lay = layout_from_headers(&headers);
@@ -685,6 +690,7 @@ pub fn inspect_csv(path: &Path) -> Result<CsvInspection, String> {
     })
 }
 
+#[cfg(test)]
 pub fn import_csv(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<Imported, String> {
     import_csv_with_mapping(path, progress, None)
 }
@@ -695,7 +701,7 @@ pub fn import_csv_with_mapping(
     mapping: Option<&CsvMapping>,
 ) -> Result<Imported, String> {
     let mapped = mapped_text(path)?;
-    let text = decode(&mapped);
+    let text = decode(&mapped)?;
     let delim = detect_delimiter(&text);
     let (headers, _header_line, header_idx) = find_header(&text, delim)?;
     if headers.is_empty() {
@@ -743,6 +749,7 @@ pub fn import_csv_with_mapping(
             .iter()
             .map(|&i| MetaColumn::new(if Some(i) == lay.wafer_number { "Wafer number".into() } else { meta_name(&headers[i]) }))
             .collect();
+        validate_text_columns(&meta)?;
 
         let mut push = |rec: &csv::StringRecord, imp: &mut Imported| {
             let lot_name = lay.lot.and_then(|i| rec.get(i)).unwrap_or("LOT");
@@ -906,11 +913,19 @@ pub fn import_csv_with_mapping(
         imp.cols.push(Vec::with_capacity(probe.len() + 1024));
     }
     imp.col_index.clear();
+    let mut identities=HashSet::new();
+    for test in &imp.tests {
+        if !identities.insert((test.number,test.name.clone(),test.units.clone())) {
+            return Err(format!("Duplicate CSV measurement column “{}”. Give each column a distinct name or test number before importing.",test.display_with_units()));
+        }
+    }
     let mut meta: Vec<MetaColumn> = meta_indices
         .iter()
         .map(|&i| MetaColumn::new(if Some(i) == lay.wafer_number { "Wafer number".into() } else { meta_name(&headers[i]) }))
         .collect();
 
+    validate_text_columns(&meta)?;
+    if lay.part.is_some()&&meta.iter().any(|c|c.name=="Part ID") {return Err("Duplicate CSV text column “Part ID”. Rename the extra column before importing.".into());}
     let push_row = |imp: &mut Imported,
                     rec: &csv::StringRecord,
                     meta: &mut Vec<MetaColumn>| {
@@ -962,6 +977,21 @@ pub fn import_csv_with_mapping(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejects_corrupt_text_instead_of_replacing_labels_and_units(){
+        for bytes in [&b"Lot,Wafer,X,Y,V\nL,W,0,0,\xff"[..],&b"\xef\xbb\xbf\xff"[..],&b"\xff\xfeL\0x"[..]]{assert!(super::decode(bytes).unwrap_err().contains("encoding"));}
+        let text="Lot,Wafer,X,Y,Current [µA]\nL,W,0,0,1\n";
+        assert_eq!(super::decode(text.as_bytes()).unwrap(),text);
+        let bytes:Vec<u8>=[0xff,0xfe].into_iter().chain(text.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        assert_eq!(super::decode(&bytes).unwrap(),text);
+    }
+
+    #[test]
+    fn duplicate_columns_cannot_silently_overwrite_measurements_or_text(){
+        for (name,text)in [("duplicate-measurement","Lot,Wafer,X,Y,V,V\nL,W,0,0,1,9\n"),("duplicate-text","Lot,Wafer,X,Y,V,Mode,Mode\nL,W,0,0,1,A,B\n")]{let p=write_temp(name,text);assert!(import_csv(&p,&mut|_,_|{}).err().unwrap().contains("Duplicate CSV"));std::fs::remove_file(p).unwrap();}
+        let p=write_temp("different-number","Lot,Wafer,X,Y,V,V\nTestNumber,,,,100,101\nL,W,0,0,1,9\n");
+        let imp=import_csv(&p,&mut|_,_|{}).unwrap();assert_eq!(imp.tests[0].number,Some(100));assert_eq!(imp.tests[1].number,Some(101));assert_eq!(imp.cols,vec![vec![1.0],vec![9.0]]);std::fs::remove_file(p).unwrap();
+    }
     use super::*;
 
     #[test]

@@ -1,6 +1,5 @@
 import { useRestorePlotSelection } from "../lib/usePlotMemory";
-import { IMAGE_WIDTH, imageHeight, imageScope } from "../charts/imageExport";
-import { binYieldText } from "../lib/theme";
+import { IMAGE_WIDTH, imageHeight } from "../charts/imageExport";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Filter, MapResponse, PlotSpec, PlotSelection } from "../types";
 import * as api from "../lib/api";
@@ -12,7 +11,6 @@ import {
   mapExportFooter,
   type MapOptions,
 } from "../charts/waferMap";
-import { testLabelWithUnits } from "../lib/format";
 import { dataGroups, type DataGroup } from "../lib/grouping";
 import { WaferMapView } from "./WaferMapView";
 import { MapGallery, useMapSelection } from "./MapGallery";

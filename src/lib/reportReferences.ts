@@ -82,7 +82,7 @@ export function captureReferences(item: ReportItem, info: DatasetInfo | null, le
   }
   if(item.selection){
     const category=s.type==="binmap"?"wafer":s.groupBy,label=item.selection.label;
-    const wi=info?.wafers.findIndex((w,i)=>{const id=waferIdentity(info,i);return `${id.lot} / ${id.name}`===label;})??-1;
+    const wi=info?.wafers.findIndex((_,i)=>{const id=waferIdentity(info,i);return `${id.lot} / ${id.name}`===label;})??-1;
     if(category==="wafer"&&wi>=0&&!legacyTemplate)add("selection","wafer",waferIdentity(info!,wi));
     else if(category==="lot")add("selection","lot",label);
     else add("selection","split",{category,label});
@@ -174,7 +174,7 @@ export function remapReference(items:ReportItem[],key:string,target:string,info:
         if(r.field.startsWith("categoryFilter:")&&typeof r.value==="object"&&"category"in r.value){r.value={...r.value,label:JSON.parse(target)};continue;}
         const category=item.spec.type==="binmap"?"wafer":item.spec.groupBy;
         if(category==="wafer"){
-          const i=info.wafers.findIndex((w,i)=>{const id=waferIdentity(info,i);return `${id.lot} / ${id.name}`===target;});
+          const i=info.wafers.findIndex((_,i)=>{const id=waferIdentity(info,i);return `${id.lot} / ${id.name}`===target;});
           if(i<0)throw new Error("Choose a current wafer.");r.kind="wafer";r.value=waferIdentity(info,i);
         }else if(category==="lot"){r.kind="lot";r.value=target;}
         else {r.kind="split";r.value={category,label:target};}

@@ -8,7 +8,7 @@ import type {
   TrendResponse,
 } from "../types";
 import { axisTitle, fmt, fmtInt, testLabel, tidyName } from "../lib/format";
-import { normalPdf, quantileSorted } from "../lib/stats";
+import { normalPdf, summarize, scatterStatistics } from "../lib/stats";
 import { categoryName, type ExportPlotStyle } from "./imageExport";
 import type { Filter } from "../types";
 import { graphFontOffset } from "../lib/demoFonts";
@@ -1034,8 +1034,7 @@ function figureTrendCore(data: TrendResponse, opts: FigureOpts): Figure {
       if (Number.isFinite(v) && (!spec.logY || v > 0)) { min = Math.min(min, v); max = Math.max(max, v); }
     }
   }
-  const meanStats = { mean: points.reduce((a, p) => a + p.mean, 0) / Math.max(1, points.length),
-    sd: Math.sqrt(points.reduce((a, p) => a + p.sd * p.sd, 0) / Math.max(1, points.length)), min, max, q1: min, q3: max };
+  const meanStats = summarize(points.map(p=>p.mean).filter(v=>!spec.logY||v>0));
   applyAxisRange(layout, "y", spec, meanStats, lsl, usl, min, max);
   if (hasGrouping) addGroupBlocks(t, points, spec, style, shapes, annotations);
   else if (addLabelBlocks(t, labels, shapes, annotations, style)) {
@@ -1272,38 +1271,15 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
     }
   }
 
-  // Least-squares line through every visible point. Plotly draws WebGL
+  // Least-squares line through every considered measurement. Plotly draws WebGL
   // traces in their own canvas layer, so a normal line trace can end up under
   // the markers even when it is added last. A layout shape with
   // layer:"above" is composited over both SVG and WebGL traces.
-  const allPoints = series.flatMap((s) => s.points);
+  const statistics=(facet?data.groupStatistics?.[series[0]?.name]:data.statistics)??scatterStatistics(series.flatMap(s=>s.points));
   const annotations: any[] = [];
   let fitShape: any = null;
-  if (spec.scatterFit && allPoints.length >= 2) {
-    let sx = 0;
-    let sy = 0;
-    for (const p of allPoints) {
-      sx += p.x;
-      sy += p.y;
-    }
-    const mx = sx / allPoints.length;
-    const my = sy / allPoints.length;
-    let sxx = 0;
-    let sxy = 0;
-    for (const p of allPoints) {
-      const dx = p.x - mx;
-      sxx += dx * dx;
-      sxy += dx * (p.y - my);
-    }
-    if (sxx > 0) {
-      const slope = sxy / sxx;
-      const intercept = my - slope * mx;
-      let lo = Infinity;
-      let hi = -Infinity;
-      for (const p of allPoints) {
-        if (p.x < lo) lo = p.x;
-        if (p.x > hi) hi = p.x;
-      }
+  if (spec.scatterFit && statistics.fit) {
+      const {slope,intercept,r,xMin:lo,xMax:hi}=statistics.fit;
       if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) {
         fitShape = {
           type: "line",
@@ -1316,7 +1292,7 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
           line: { color: t.red, width: style.line },
           layer: "above",
         };
-        if (data.r !== null && Number.isFinite(data.r)) {
+        if (r !== null && Number.isFinite(r)) {
           annotations.push({
             xref: "paper",
             x: 0.995,
@@ -1324,7 +1300,7 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
             yref: "paper",
             y: 0.02,
             yanchor: "bottom",
-            text: `R² = ${(data.r * data.r).toFixed(3)}`,
+            text: `R² = ${(r * r).toFixed(3)}`,
             showarrow: false,
             font: { size: style.annotation, color: t.muted, family: CHART_FONT },
             bgcolor: t.paper,
@@ -1332,7 +1308,6 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
           });
         }
       }
-    }
   }
 
   const layout = baseLayout(t, preview ? "" : opts.title, spec.presentation);
@@ -1380,29 +1355,17 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
     zeroline: false,
   };
   if (!preview) {
-    const ys = data.series
-      .flatMap((s) => s.points.map((p) => p.y))
-      .filter((v) => Number.isFinite(v))
-      .sort((a, b) => a - b);
-    if (ys.length) {
-      const mean = ys.reduce((a, b) => a + b, 0) / ys.length;
-      const sd = Math.sqrt(ys.reduce((a, b) => a + (b - mean) * (b - mean), 0) / ys.length);
+    const s=statistics.summary;
+    if (s.n) {
       applyAxisRange(
         layout,
         "y",
         spec,
-        {
-          mean,
-          sd,
-          min: ys[0],
-          max: ys[ys.length - 1],
-          q1: quantileSorted(ys, 0.25),
-          q3: quantileSorted(ys, 0.75),
-        },
+        s,
         null,
         null,
-        ys[0],
-        ys[ys.length - 1]
+        s.min,
+        s.max
       );
     }
   }

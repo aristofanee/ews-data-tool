@@ -130,14 +130,3 @@ export function useLoadTemplate() {
     }
   }, [setError, applyTemplate]);
 }
-
-export function filtersSummary(): string {
-  const f = useStore.getState().filters;
-  const info = useStore.getState().info;
-  const parts: string[] = [];
-  if (f.lots.length && info) parts.push(f.lots.map((l) => info.lots[l] ?? `L${l}`).join(", "));
-  if (f.wafers.length) parts.push(`${f.wafers.length} wafers`);
-  if (f.hbins.length) parts.push(`HBIN ${f.hbins.join(",")}`);
-  if (f.stat) parts.push(`${f.stat.kind === "sigma" ? `${f.stat.k}σ` : `IQR×${f.stat.k}`}${f.stat.perWafer ? " /wafer" : ""}`);
-  return parts.length ? parts.join(" · ") : "All data";
-}

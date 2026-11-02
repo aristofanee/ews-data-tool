@@ -1,8 +1,8 @@
-import { binYieldText, overviewYieldText } from "./theme";
+import { binYieldText } from "./theme";
 import type { DatasetInfo, MapResponse, ReportItem } from "../types";
 import type { Theme } from "./theme";
 import * as api from "./api";
-import { renderExportFigure, imageScope, IMAGE_WIDTH, IMAGE_HEIGHT, BIN_OVERVIEW_WIDTH, imageHeight } from "../charts/imageExport";
+import { renderExportFigure, imageScope, IMAGE_WIDTH, BIN_OVERVIEW_WIDTH, imageHeight } from "../charts/imageExport";
 import {
   figureBox,
   figureHist,
@@ -18,7 +18,7 @@ import {
   mapExportFooter,
   type MapOptions,
 } from "../charts/waferMap";
-import { safeName, testLabel, testLabelWithUnits, tidyName } from "./format";
+import { safeName, testLabel, testLabelWithUnits } from "./format";
 import { dataGroups } from "./grouping";
 import { bindReportItem, splitChoices, templatePlots } from "./reportReferences";
 import { paintExportProgress } from "./exportJobs";

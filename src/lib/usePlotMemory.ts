@@ -35,5 +35,5 @@ export function usePlotViewKey(spec: PlotSpec) {
   return JSON.stringify([mapGeneration(), version, filters, spec.type, test,
     spec.xAxis, spec.groupBy, spec.splitPlots, spec.binCategory, spec.top, spec.bins,
     spec.scatterX, spec.scatterY, spec.scatterZMode, spec.scatterZTest,
-    spec.logY, spec.limitMode, spec.yMin, spec.yMax, spec.lsl, spec.usl]);
+    spec.logY, spec.limitMode, spec.limitK, spec.yMin, spec.yMax, spec.lsl, spec.usl]);
 }

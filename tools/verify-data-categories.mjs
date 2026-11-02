@@ -26,5 +26,10 @@ try{
  });
  await page.waitForFunction(()=>document.querySelectorAll('.facet-card').length===3);await page.locator('.facet-card').first().click();await page.getByRole('button',{name:'All plots',exact:true}).waitFor();
  for(const tab of ['Histogram','Trend']){await page.getByRole('button',{name:tab,exact:true}).click();await page.evaluate(()=>window.S.getState().patchSpec({groupBy:'data:text:Probe mode',splitPlots:true}));await page.waitForSelector('.facet-card');}
- assert.equal(await page.evaluate(()=>window.S.getState().info.tests.length),6);assert.deepEqual(errors,[]);console.log(JSON.stringify({...result,automaticFlatChoices:true,errors},null,2));
+ for(const type of ['map','pareto']){
+  await page.evaluate(type=>{window.S.getState().setPlotType(type);window.S.getState().patchSpec({groupBy:'data:text:Probe mode'});},type);
+  await page.waitForFunction(()=>[...document.querySelectorAll('.stat-v')].some(el=>/^(Grouped|Split) by Probe mode$/.test(el.textContent)));
+  assert.doesNotMatch(await page.locator('body').innerText(),/data:(text|test):/);
+ }
+ assert.equal(await page.evaluate(()=>window.S.getState().info.tests.length),6);assert.deepEqual(errors,[]);console.log(JSON.stringify({...result,automaticFlatChoices:true,humanReadableGroupNames:true,errors},null,2));
 }finally{await browser?.close();server.kill();}

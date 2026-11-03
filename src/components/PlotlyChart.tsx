@@ -76,6 +76,10 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     const reset = () => {
       void Plotly.relayout(el, defaults);
     };
+    const resetFromPointer=(event:MouseEvent)=>{
+      if(event.button!==0||event.detail!==2||!(event.target instanceof Element)||!event.target.closest('.nsewdrag'))return;
+      event.preventDefault();event.stopImmediatePropagation();reset();
+    };
     const capture = () => {
       if (!cacheKey || isStatic || !graph._fullLayout) return;
       const axes: Record<string, { range: number[]; autorange: unknown }> = {};
@@ -90,7 +94,11 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     // relayout, so double click still resets to the actual plot default.
     const rendered = isStatic && figure.rasterScatter
       ? rasterScatterPreview(figure, el.clientWidth, el.clientHeight) : figure;
-    void Plotly.react(el, rendered.data, structuredClone(rendered.layout), config).then(async () => {
+    const layout=structuredClone(rendered.layout);
+    for(const [key,axis]of Object.entries(layout)as[string,any][]){
+      if(/^[xy]axis\d*$/.test(key))axis.autorange=!Array.isArray(axis.range);
+    }
+    void Plotly.react(el, rendered.data, layout, config).then(async () => {
       if (!alive) return;
       restoreLimitLines();
       graph.on?.("plotly_afterplot", restoreLimitLines);
@@ -100,7 +108,10 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
             defaults[`${key}.range`] = [...axis.range]; defaults[`${key}.autorange`] = false;
           }
         }
-        graph.on?.("plotly_doubleclick", reset);
+        // Detect the second native press before Plotly starts another drag.
+        // Its drag handlers can suppress the browser's later dblclick event.
+        el.addEventListener('mousedown',resetFromPointer,true);
+        graph.on?.('plotly_doubleclick',reset);
       }
       if (isStatic || !cacheKey) { el.style.visibility = "visible"; return; }
       if (saved) {
@@ -119,7 +130,8 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     }).catch((error: unknown) => { if (alive) console.error("Unable to render plot", error); });
     return () => {
       alive = false;
-      graph.removeListener?.("plotly_doubleclick", reset);
+      el.removeEventListener('mousedown',resetFromPointer,true);
+      graph.removeListener?.('plotly_doubleclick',reset);
       graph.removeListener?.("plotly_afterplot", restoreLimitLines);
       capture();
       graph.removeListener?.("plotly_relayout", capture);

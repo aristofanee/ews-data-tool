@@ -24,6 +24,8 @@ export interface WaferInfo {
   centerX: number | null;
   centerY: number | null;
   flat: string | null;
+  posX?: string | null;
+  posY?: string | null;
 }
 
 export interface BinInfo {

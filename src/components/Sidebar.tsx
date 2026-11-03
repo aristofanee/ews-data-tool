@@ -5,6 +5,7 @@ import * as api from "../lib/api";
 import { binColor } from "../lib/theme";
 import { fmtInt, tidyName } from "../lib/format";
 import { fuzzyMatch } from "../lib/search";
+import { naturalCompare } from "../lib/stats";
 import {
   IconChevronDown,
   IconChevronUp,
@@ -439,7 +440,7 @@ function CustomColumnsPanel() {
                 )}
               </div>
               <div className="column-wafer-list">
-                {info.wafers.map((w, i) => {
+                {info.wafers.map((w,i)=>({w,i})).sort((a,b)=>naturalCompare(info.lots[a.w.lot]??"",info.lots[b.w.lot]??"")||naturalCompare(a.w.name,b.w.name)||a.i-b.i).map(({w,i}) => {
                   const current = labelFor(i);
                   return (
                     <label

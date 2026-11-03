@@ -507,10 +507,8 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 let flat = c.u8() as char;
                 let center_x = c.i16();
                 let center_y = c.i16();
-                // POS_X / POS_Y are not needed for rendering, but consuming
-                // them keeps this parser aligned with the record layout.
-                let _pos_x = c.u8();
-                let _pos_y = c.u8();
+                let pos_x = (c.u8() as char).to_ascii_uppercase();
+                let pos_y = (c.u8() as char).to_ascii_uppercase();
                 let scale = wafer_unit_scale(units);
                 let mut geom = WaferGeom {
                     diameter_mm: scale.and_then(|s| (wafr_siz > 0.0).then_some(wafr_siz * s)),
@@ -519,6 +517,8 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                     center_x: (center_x != -32768).then_some(center_x),
                     center_y: (center_y != -32768).then_some(center_y),
                     flat: matches!(flat, 'U' | 'D' | 'L' | 'R').then_some(flat),
+                    pos_x: matches!(pos_x,'L'|'R').then_some(pos_x),
+                    pos_y: matches!(pos_y,'U'|'D').then_some(pos_y),
                 };
                 // Keep a WCR without a valid unit scale useful for centre/flat.
                 if scale.is_none() {
@@ -1057,7 +1057,7 @@ mod tests {
         let mut bytes = rec(0, 10, &[2, 4]);
         let mut wcr = Vec::new();
         wcr.extend_from_slice(&300f32.to_le_bytes()); wcr.extend_from_slice(&2.04f32.to_le_bytes()); wcr.extend_from_slice(&2.8f32.to_le_bytes());
-        wcr.extend_from_slice(&[3, b'D']); wcr.extend_from_slice(&0i16.to_le_bytes()); wcr.extend_from_slice(&0i16.to_le_bytes()); wcr.extend_from_slice(&[b'R', b'U']);
+        wcr.extend_from_slice(&[3, b'D']); wcr.extend_from_slice(&0i16.to_le_bytes()); wcr.extend_from_slice(&0i16.to_le_bytes()); wcr.extend_from_slice(&[b'L', b'D']);
         bytes.extend(rec(2, 30, &wcr));
         // Valid record framing, deliberately not a full PTR: metadata path
         // must not inspect or allocate measurement values.
@@ -1067,6 +1067,8 @@ mod tests {
         let source = metadata_bytes(&bytes).unwrap();
         assert!(source.cols.is_empty()); assert!(source.row_lot.is_empty());
         assert_eq!(source.wafer_geom.last().unwrap().diameter_mm, Some(300.0));
+        assert_eq!(source.wafer_geom.last().unwrap().pos_x,Some('L'));
+        assert_eq!(source.wafer_geom.last().unwrap().pos_y,Some('D'));
         let mut imp = Imported::new(); let l = imp.lot_index("CSV"); let w = imp.wafer_index(l, "1"); let row = imp.new_row(l, w);
         imp.column((1, 0), row, 42.0); imp.wafer_geom[0].center_x = Some(10);
         let mut ds = crate::model::Dataset::new(); ds.merge(imp);
@@ -1075,6 +1077,7 @@ mod tests {
         assert_eq!(ds.rows, 1); assert_eq!(ds.cols, before); assert_eq!(ds.hbin, bins); assert_eq!(ds.files, files);
         assert_eq!(ds.wafers[0].diameter_mm, Some(300.0)); assert_eq!(ds.wafers[0].die_w_mm, Some(2.8));
         assert_eq!(ds.wafers[0].center_x, Some(10)); assert_eq!(ds.sbin_names[&7], "Leak");
+        assert_eq!(ds.wafers[0].pos_x.as_deref(),Some("L"));assert_eq!(ds.wafers[0].pos_y.as_deref(),Some("D"));
         let mut conflicting = Imported::new();
         conflicting.wafer_geom = vec![WaferGeom { diameter_mm: Some(200.0), ..Default::default() }, WaferGeom { diameter_mm: Some(300.0), ..Default::default() }];
         assert!(ds.fill_product_metadata(conflicting).is_err());

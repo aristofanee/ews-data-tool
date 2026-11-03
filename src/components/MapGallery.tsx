@@ -28,14 +28,15 @@ function MapThumb({ data, opts }: { data: MapResponse; opts: MapOptions }) {
     const draw = () => {
       if (!visible) return;
       const rect = canvas.getBoundingClientRect();
-      const width = Math.round(rect.width), height = Math.round(rect.height);
+      const dpr=Math.min(2,window.devicePixelRatio||1);
+      const width = Math.round(rect.width*dpr), height = Math.round(rect.height*dpr);
       if (width < 2 || height < 2) return;
-      const key = JSON.stringify([identity(data), opts, width, height]);
+      const key = JSON.stringify([identity(data), opts, width, height, dpr]);
       let cached = images.get(key);
       if (!cached) {
         cached = document.createElement("canvas");
         const renderer = new WaferMapRenderer(cached);
-        renderer.setSize(width, height);
+        renderer.setSize(width, height, dpr);
         renderer.setData(data, opts);
         const size = width * height * 4;
         while (images.size && bytes + size > 32 * 1024 * 1024) {
@@ -52,7 +53,8 @@ function MapThumb({ data, opts }: { data: MapResponse; opts: MapOptions }) {
     const observer = new IntersectionObserver(([entry]) => { visible = entry.isIntersecting; if (visible) schedule(); });
     observer.observe(canvas);
     const resize = new ResizeObserver(schedule); resize.observe(canvas);
-    return () => { cancelAnimationFrame(frame); observer.disconnect(); resize.disconnect(); };
+    window.addEventListener('resize',schedule);
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); resize.disconnect(); window.removeEventListener('resize',schedule); };
   }, [data, opts]);
   return <canvas className="binmap-canvas" ref={ref} />;
 }

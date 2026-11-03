@@ -4,6 +4,7 @@ import type { DatasetInfo } from "../types";
 import { resolutionOptions, referenceKey } from "../lib/reportReferences";
 import { reportResolutionTree, type ResolutionMemory, type ResolutionNode } from "../lib/reportResolution";
 import { IconAlert } from "./Icons";
+import { SearchCombobox } from "./SearchCombobox";
 
 function ResolutionCard({node,info}:{node:ResolutionNode;info:DatasetInfo}){
   const [target,setTarget]=useState("");
@@ -25,10 +26,7 @@ function ResolutionCard({node,info}:{node:ResolutionNode;info:DatasetInfo}){
     </div>
     {issue&&<div className="muted">Used by {items.length} report item{items.length===1?"":"s"}</div>}
     {issue?.reference&&!blocked&&<>
-      <select className="input" aria-label={`Replacement for ${issue.label}`} value={target} onChange={e=>setTarget(e.target.value)}>
-        <option value="">Choose a replacement…</option>
-        {candidates.map(c=><option key={c.value} value={c.value}>{c.label}</option>)}
-      </select>
+      <SearchCombobox options={candidates} value={target||null} onChange={setTarget} label={`Replacement for ${issue.label}`} placeholder="Choose a replacement…"/>
       <button className="btn" disabled={!target||!candidates.some(c=>c.value===target)} onClick={()=>{try{resolve(issue.key,target);}catch(error){setError(String(error));}}}>Apply to {items.length} item{items.length===1?"":"s"}</button>
     </>}
     {issue&&!issue.reference&&!blocked&&<button className="btn" onClick={()=>items.forEach(item=>useStore.getState().setReportItemError(item.id))}>Retry on next export</button>}

@@ -160,8 +160,8 @@ impl Dataset {
                 geom.$field = Some(v);
             } } };
         }
-        collect!(diameter_mm); collect!(die_w_mm); collect!(die_h_mm); collect!(center_x); collect!(center_y); collect!(flat);
-        if source.wafer_geom.iter().all(|g| g.diameter_mm.is_none() && g.die_w_mm.is_none() && g.die_h_mm.is_none() && g.flat.is_none() && g.center_x.is_none() && g.center_y.is_none()) && source.sbin_names.is_empty() && source.hbin_names.is_empty() {
+        collect!(diameter_mm); collect!(die_w_mm); collect!(die_h_mm); collect!(center_x); collect!(center_y); collect!(flat); collect!(pos_x); collect!(pos_y);
+        if source.wafer_geom.iter().all(|g| g.diameter_mm.is_none() && g.die_w_mm.is_none() && g.die_h_mm.is_none() && g.flat.is_none() && g.center_x.is_none() && g.center_y.is_none() && g.pos_x.is_none() && g.pos_y.is_none()) && source.sbin_names.is_empty() && source.hbin_names.is_empty() {
             return Err("No wafer geometry or bin descriptions found in reference STDF".into());
         }
         for w in &mut self.wafers {
@@ -171,6 +171,8 @@ impl Dataset {
             if w.center_x.is_none() { w.center_x = geom.center_x; }
             if w.center_y.is_none() { w.center_y = geom.center_y; }
             if w.flat.is_none() { w.flat = geom.flat.map(|v| v.to_string()); }
+            if w.pos_x.is_none() {w.pos_x=geom.pos_x.map(|v|v.to_string());}
+            if w.pos_y.is_none() {w.pos_y=geom.pos_y.map(|v|v.to_string());}
         }
         for (code, (name, _)) in source.sbin_names { if self.sbin_names.get(&code).is_none_or(|v| v.is_empty()) { self.sbin_names.insert(code, name); } }
         for (code, (name, _)) in source.hbin_names { if self.hbin_names.get(&code).is_none_or(|v| v.is_empty()) { self.hbin_names.insert(code, name); } }
@@ -275,6 +277,8 @@ impl Dataset {
                 if w.flat.is_none() {
                     w.flat = geom.flat.map(|c| c.to_string());
                 }
+                if w.pos_x.is_none(){w.pos_x=geom.pos_x.map(|c|c.to_string());}
+                if w.pos_y.is_none(){w.pos_y=geom.pos_y.map(|c|c.to_string());}
                 wafer_map.push(j as u16);
             } else {
                 self.wafers.push(WaferInfo {
@@ -291,6 +295,8 @@ impl Dataset {
                     center_x: geom.center_x,
                     center_y: geom.center_y,
                     flat: geom.flat.map(|c| c.to_string()),
+                    pos_x:geom.pos_x.map(|c|c.to_string()),
+                    pos_y:geom.pos_y.map(|c|c.to_string()),
                 });
                 wafer_map.push((self.wafers.len() - 1) as u16);
             }

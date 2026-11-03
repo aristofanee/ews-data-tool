@@ -147,6 +147,8 @@ export class WaferMapRenderer {
   private cy = 0;
   private dieCx = 0;
   private dieCy = 0;
+  private signX = 1;
+  private signY = 1;
   private radiusPx = 1;
   private zoom = 1;
   private panX = 0;
@@ -170,6 +172,23 @@ export class WaferMapRenderer {
   private baseCanvas: HTMLCanvasElement | null = null;
   private baseCtx: CanvasRenderingContext2D | null = null;
   private baseDirty = true;
+  private paths: Map<string,Path2D> | null = null;
+  private legendDirty = true;
+  private legendBox: {left:number;top:number;right:number;bottom:number} | null = null;
+  private bounds: [number,number,number,number] | null = null;
+  private frame: number | null = null;
+  private interactive = false;
+  private cachePad = 0;
+  private cachePanX = 0;
+  private cachePanY = 0;
+  private cachePadPixels = 0;
+
+  private invalidateDrawing():void {this.baseDirty=true;this.paths=null;this.legendDirty=true;}
+  private scheduleDraw():void {
+    if(this.frame!==null)return;
+    this.frame=requestAnimationFrame(()=>{this.frame=null;this.draw();});
+  }
+  dispose():void {if(this.frame!==null)cancelAnimationFrame(this.frame);this.frame=null;}
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -179,6 +198,7 @@ export class WaferMapRenderer {
   }
 
   resize(): boolean {
+    this.interactive=true;
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return false;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -189,19 +209,20 @@ export class WaferMapRenderer {
     this.scale = 1;
     this.canvas.width = Math.round(rect.width * dpr);
     this.canvas.height = Math.round(rect.height * dpr);
-    this.baseDirty = true;
+    this.invalidateDrawing();
     return true;
   }
 
   /** Size the backing store explicitly (used for off-screen report rendering). */
   setSize(width: number, height: number, scale = 1): void {
+    this.interactive=false;
     this.w = width;
     this.h = height;
     this.dpr = 1;
     this.scale = scale;
     this.canvas.width = width;
     this.canvas.height = height;
-    this.baseDirty = true;
+    this.invalidateDrawing();
   }
 
   setData(data: MapResponse, opts: MapOptions): void {
@@ -210,16 +231,17 @@ export class WaferMapRenderer {
     this.data = data;
     this.opts = opts;
     this.byKey.clear();
+    this.bounds=null;
     this.binCounts = null;
     for (const d of data.dice) this.byKey.set(`${d.x},${d.y}`, d);
-    this.baseDirty = true;
+    this.invalidateDrawing();
     if (prev !== next) this.resetView();
     this.draw();
   }
 
   setOptions(opts: MapOptions): void {
     this.opts = opts;
-    this.baseDirty = true;
+    this.invalidateDrawing();
     this.draw();
   }
 
@@ -251,8 +273,10 @@ export class WaferMapRenderer {
     this.panX += dx;
     this.panY += dy;
     this.clampPan();
-    this.baseDirty = true;
-    this.draw();
+    // Reuse an exact-resolution raster around the viewport until panning
+    // reaches its edge. No die paths need repainting for a small movement.
+    if(Math.abs(this.panX-this.cachePanX)>this.cachePad||Math.abs(this.panY-this.cachePanY)>this.cachePad)this.baseDirty=true;
+    this.scheduleDraw();
   }
 
   zoomAt(clientX: number, clientY: number, factor: number): void {
@@ -274,7 +298,7 @@ export class WaferMapRenderer {
       this.clampPan();
     }
     this.baseDirty = true;
-    this.draw();
+    this.scheduleDraw();
   }
 
   private clampPan(): void {
@@ -289,8 +313,8 @@ export class WaferMapRenderer {
     if ((clientX - rect.left) / this.scale >= this.legendLeft) return null;
     const px = clientX - rect.left;
     const py = clientY - rect.top;
-    const gx = (px - this.cx - this.panX) / this.zoom / this.cellW + this.dieCx;
-    const gy = -(py - this.cy - this.panY) / this.zoom / this.cellH + this.dieCy;
+    const gx = (px - this.cx - this.panX) / this.zoom / (this.cellW*this.signX) + this.dieCx;
+    const gy = -(py - this.cy - this.panY) / this.zoom / (this.cellH*this.signY) + this.dieCy;
     const x = Math.round(gx);
     const y = Math.round(gy);
     if (Math.abs(gx - x) > 0.5 || Math.abs(gy - y) > 0.5) return null;
@@ -324,7 +348,9 @@ export class WaferMapRenderer {
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    ctx.drawImage(this.baseCanvas, 0, 0);
+    const pixels=this.dpr*this.scale;
+    ctx.drawImage(this.baseCanvas,Math.round((this.panX-this.cachePanX)*pixels)-this.cachePadPixels,Math.round((this.panY-this.cachePanY)*pixels)-this.cachePadPixels);
+    this.drawLegend();
     this.drawHover();
   }
 
@@ -340,9 +366,13 @@ export class WaferMapRenderer {
     const base = this.baseCanvas;
     const ctx = this.baseCtx;
     if (!base || !ctx) return;
-    if (base.width !== this.canvas.width || base.height !== this.canvas.height) {
-      base.width = this.canvas.width;
-      base.height = this.canvas.height;
+    this.cachePad=this.interactive?128:0;
+    this.cachePanX=this.panX;this.cachePanY=this.panY;
+    const padPixels=Math.ceil(this.cachePad*this.dpr*this.scale),cacheWidth=this.canvas.width+padPixels*2,cacheHeight=this.canvas.height+padPixels*2;
+    this.cachePadPixels=padPixels;
+    if (base.width !== cacheWidth || base.height !== cacheHeight) {
+      base.width = cacheWidth;
+      base.height = cacheHeight;
     }
     const { dpr } = this;
     const t = mapColors(this.opts.theme);
@@ -350,10 +380,10 @@ export class WaferMapRenderer {
     const mode = this.opts.mode;
     const pres = this.opts.presentation === true;
 
-    ctx.setTransform(dpr * this.scale, 0, 0, dpr * this.scale, 0, 0);
-    ctx.clearRect(0, 0, w, h);
+    ctx.setTransform(dpr * this.scale, 0, 0, dpr * this.scale, padPixels, padPixels);
+    ctx.clearRect(-this.cachePad, -this.cachePad, w+this.cachePad*2, h+this.cachePad*2);
     ctx.fillStyle = t.bg;
-    ctx.fillRect(0, 0, w, h);
+    ctx.fillRect(-this.cachePad, -this.cachePad, w+this.cachePad*2, h+this.cachePad*2);
 
     // Die coordinates are not necessarily centred on (0, 0): older STDF
     // writers often use positive-only grid coordinates. Centre the map on the
@@ -362,7 +392,7 @@ export class WaferMapRenderer {
     let maxX = -Infinity;
     let minY = Infinity;
     let maxY = -Infinity;
-    for (const d of data.dice) {
+    if(!this.bounds)for (const d of data.dice) {
       if (d.x < minX) minX = d.x;
       if (d.x > maxX) maxX = d.x;
       if (d.y < minY) minY = d.y;
@@ -374,7 +404,10 @@ export class WaferMapRenderer {
       minY = -1;
       maxY = 1;
     }
+    if(this.bounds)[minX,maxX,minY,maxY]=this.bounds;else this.bounds=[minX,maxX,minY,maxY];
     const wf = data.wafer;
+    this.signX=wf?.posX==="L"?-1:1;
+    this.signY=wf?.posY==="D"?-1:1;
     const dieWmm = wf?.dieWMm && wf.dieWMm > 0 ? wf.dieWMm : null;
     const dieHmm = wf?.dieHMm && wf.dieHMm > 0 ? wf.dieHMm : null;
     const hasDieDims = dieWmm !== null && dieHmm !== null;
@@ -415,7 +448,7 @@ export class WaferMapRenderer {
           ? Math.min(290, Math.max(190, w * 0.34))
           : 164;
     const pad = !showLegend ? 4 : pres ? 20 : 14;
-    this.legendLeft = showLegend ? w - cbarW : Infinity;
+    if(this.legendDirty)this.legendLeft = showLegend ? w - cbarW : Infinity;
     const availW = Math.max(40, w - cbarW - pad * 2);
     const availH = Math.max(40, h - pad * 2);
     const cx = pad + availW / 2;
@@ -488,6 +521,7 @@ export class WaferMapRenderer {
     // calling fillRect 50k times is dramatically slower in WebView2 than
     // filling a handful of batched paths, and a 256-colour palette means at
     // most 256 fills per redraw.
+    if(!this.paths){
     const paths = new Map<string, Path2D>();
     for (const d of data.dice) {
       let color: string;
@@ -508,13 +542,15 @@ export class WaferMapRenderer {
         paths.set(color, path);
       }
       path.rect(
-        (d.x - centerX) * cellW - dw / 2,
-        -(d.y - centerY) * cellH - dh / 2,
+        (d.x - centerX) * cellW * this.signX - dw / 2,
+        -(d.y - centerY) * cellH * this.signY - dh / 2,
         dw,
         dh
       );
     }
-    for (const [color, path] of paths) {
+    this.paths=paths;
+    }
+    for (const [color, path] of this.paths) {
       ctx.fillStyle = color;
       ctx.fill(path);
     }
@@ -537,14 +573,16 @@ export class WaferMapRenderer {
     ctx.stroke();
     ctx.restore();
 
+    if(this.legendDirty){
+    this.legendBox=null;
     const barX = w - cbarW + (pres ? 14 : 10);
     const legendColors = this.opts.exportInk ? {...mapColors("light"),text:"#000000",muted:"#000000",outline:"#000000"} : mapColors("light");
     const bounds = new LegendBounds();
     let legendCtx: CanvasRenderingContext2D | null = null;
     if (showLegend) {
       this.legendCanvas ??= document.createElement("canvas");
-      if (this.legendCanvas.width !== base.width || this.legendCanvas.height !== base.height) {
-        this.legendCanvas.width = base.width; this.legendCanvas.height = base.height;
+      if (this.legendCanvas.width !== this.canvas.width || this.legendCanvas.height !== this.canvas.height) {
+        this.legendCanvas.width = this.canvas.width; this.legendCanvas.height = this.canvas.height;
       }
       legendCtx = this.legendCanvas.getContext("2d");
       legendCtx?.setTransform(dpr * this.scale, 0, 0, dpr * this.scale, 0, 0);
@@ -572,13 +610,28 @@ export class WaferMapRenderer {
     if (legendCtx && this.legendCanvas && Number.isFinite(bounds.left)) {
       const padding = 16;
       this.legendLeft = bounds.left - padding;
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(bounds.left - padding, bounds.top - padding,
-        bounds.right - bounds.left + padding * 2, bounds.bottom - bounds.top + padding * 2);
-      ctx.drawImage(this.legendCanvas, 0, 0, w, h);
+      this.legendBox={left:Math.max(0,bounds.left-padding),top:Math.max(0,bounds.top-padding),right:Math.min(w,bounds.right+padding),bottom:Math.min(h,bounds.bottom+padding)};
+    }
+    this.legendDirty=false;
     }
 
     this.baseDirty = false;
+  }
+
+  private drawLegend():void {
+    if(this.legendBox&&this.legendCanvas){
+      const ctx=this.ctx,pixels=this.dpr*this.scale;
+      // Text is already rasterized at device resolution. Copy integral physical
+      // pixels directly; a CSS-sized drawImage can resample the glyphs again at
+      // 125% scaling, especially when the available canvas size is fractional.
+      const box=this.legendBox,left=Math.max(0,Math.floor(box.left*pixels)),top=Math.max(0,Math.floor(box.top*pixels));
+      const right=Math.min(this.canvas.width,Math.ceil(box.right*pixels)),bottom=Math.min(this.canvas.height,Math.ceil(box.bottom*pixels));
+      const width=right-left,height=bottom-top;
+      if(width<=0||height<=0)return;
+      ctx.setTransform(1,0,0,1,0,0);
+      ctx.fillStyle='#ffffff';ctx.fillRect(left,top,width,height);
+      ctx.drawImage(this.legendCanvas,left,top,width,height,left,top,width,height);
+    }
   }
 
   private drawHover(): void {
@@ -601,8 +654,8 @@ export class WaferMapRenderer {
 
     const hw = Math.max(cellW, (pres ? 6 : 4) / this.zoom);
     const hh = Math.max(cellH, (pres ? 6 : 4) / this.zoom);
-    const hx = (this.hover.x - this.dieCx) * cellW;
-    const hy = -(this.hover.y - this.dieCy) * cellH;
+    const hx = (this.hover.x - this.dieCx) * cellW * this.signX;
+    const hy = -(this.hover.y - this.dieCy) * cellH * this.signY;
     ctx.lineWidth = (pres ? 3 : 2) / this.zoom;
     ctx.strokeStyle = this.opts.theme === "dark" ? "#ffffff" : "#0f172a";
     ctx.strokeRect(hx - hw / 2, hy - hh / 2, hw, hh);
@@ -889,13 +942,16 @@ function rightBinLegend(ctx: CanvasRenderingContext2D, dice: MapDie[], opts: Map
   throw new Error("The complete bin legend cannot fit. Filter to fewer bins before exporting.");
 }
 
-/** Count full source measurements against the exact colour range of this map. */
+/** Count plotted coordinates against their colour range; mean maps contain means. */
 export async function mapExportFooter(data: MapResponse, opts: MapOptions, filter: Filter): Promise<string> {
   const spec=opts.exportSpec;
-  const total=data.testTotal??data.dice.filter(d=>Number.isFinite(d.v)).length;
+  const total=data.isMean?data.dice.filter(d=>Number.isFinite(d.v)).length:data.testTotal??data.dice.filter(d=>Number.isFinite(d.v)).length;
   if (opts.mode==="bin" || !spec || spec.test===null) return limitFooter(opts.mode==="bin"?data.dice.length:total,null);
   const lo=opts.vmin??data.vmin, hi=opts.vmax??data.vmax;
   if (!Number.isFinite(lo)||!Number.isFinite(hi)) return limitFooter(total,null);
+  if(data.isMean){const inside=data.dice.filter(d=>Number.isFinite(d.v)&&d.v>=lo&&d.v<=hi).length;
+    const explicit=Number.isFinite(opts.vmin)||Number.isFinite(opts.vmax);
+    return limitFooter(total,inside,spec.lsl??data.lsl,spec.usl??data.usl,explicit?spec:{...spec,limitMode:"auto"});}
   const grouped=!data.isMean&&!!data.wafer;
   const counts=await api.limitCounts({test:spec.test,filter,lsl:lo,usl:hi,groupBy:grouped?"wafer":null});
   const label=`${data.lotName} / ${data.wafer?.name}`;

@@ -53,7 +53,9 @@ pan or hidden traces.
 “In Limits” refers to the selected plotting/colour range, not acceptance limits.
 Plotly resolves actual numeric axis bounds before exact source counts are
 computed. Scatter counts require finite paired X/Y values and match joint
-statistical filtering. Maps use resolved colour bounds and the source cohort.
+statistical filtering. Single-wafer maps use resolved colour bounds and their
+source cohort. Mean maps count their finite, plotted coordinate means against
+the colour bounds; Total is the number of plotted coordinates, not source rows.
 
 Auto and Custom show Total and In Limits without a range-type description.
 Resolved sigma, IQR and specification ranges identify their type. Plots without

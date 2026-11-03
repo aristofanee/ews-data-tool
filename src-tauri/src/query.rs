@@ -2181,6 +2181,7 @@ mod tests {
                 center_x: None,
                 center_y: None,
                 flat: None,
+                pos_x:None,pos_y:None,
             },
             WaferInfo {
                 lot: 0,
@@ -2196,6 +2197,7 @@ mod tests {
                 center_x: None,
                 center_y: None,
                 flat: None,
+                pos_x:None,pos_y:None,
             },
         ];
         ds.rows = 10;

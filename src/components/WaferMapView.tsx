@@ -177,6 +177,7 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
     });
 
     return () => {
+      r.dispose();
       ro.disconnect();
       canvas.removeEventListener("wheel", onWheel);
       document.removeEventListener("wheel", onPinch, true);

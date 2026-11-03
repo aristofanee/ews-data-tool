@@ -34,7 +34,7 @@ try{
   const md=await api.waferMap({test:0,wafer:null,mode:'value',filter});
   const ms={...defaultSpec('map',0,'ignored'),limitMode:'manual',yMin:.4,yMax:.42};const opts={theme:'light',palette:'brand',mode:'value',lsl:md.lsl,usl:md.usl,exportSpec:ms,...mapColorLimits(ms,md)};
   opts.exportFooter=await mapExportFooter(md,opts,filter);window.texts=[];
-  results.push({name:'map-custom',image:renderMapImage(md,opts,2400,2100,'ignored','','png'),footer:opts.exportFooter,expected:results[1].expected,text:[...window.texts]});
+  results.push({name:'map-custom',image:renderMapImage(md,opts,2400,2100,'ignored','','png'),footer:opts.exportFooter,expected:`Total: ${md.dice.length.toLocaleString('en-US')} - In Limits: ${md.dice.filter(d=>d.v>=.4&&d.v<=.42).length.toLocaleString('en-US')}`,text:[...window.texts]});
   HTMLAnchorElement.prototype.click=function(){if(this.href.startsWith('data:image/'))window.saved.push({name:this.download,url:this.href});};
   const {generateReport}=await import('/src/lib/report.ts');window.texts=[];
   const dirs=new Set(['audit']);const directory=path=>({name:path.split('\\').at(-1),getDirectoryHandle:async(name,options)=>{const next=path+'\\'+name;if(!dirs.has(next)&&!options?.create)throw new DOMException('Missing','NotFoundError');dirs.add(next);return directory(next);},getFileHandle:async name=>({createWritable:async()=>({write:async value=>{if(value instanceof Blob&&value.type.startsWith('image/')){const url=await new Promise(resolve=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.readAsDataURL(value);});window.saved.push({name,url});}},close:async()=>{},abort:async()=>{}})})});window.showDirectoryPicker=async()=>directory('audit');await api.pickFolder();

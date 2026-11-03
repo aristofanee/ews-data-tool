@@ -88,6 +88,8 @@ pub struct WaferGeom {
     pub center_y: Option<i16>,
     /// `U`, `D`, `L`, `R` from WF_FLAT.
     pub flat: Option<char>,
+    pub pos_x: Option<char>,
+    pub pos_y: Option<char>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -106,6 +108,8 @@ pub struct WaferInfo {
     pub center_x: Option<i16>,
     pub center_y: Option<i16>,
     pub flat: Option<String>,
+    pub pos_x: Option<String>,
+    pub pos_y: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -6,6 +6,7 @@ import * as api from "../lib/api";
 import { emptyFilter } from "../types";
 import { testLabelWithUnits } from "../lib/format";
 import { graphFontOffset } from "../lib/demoFonts";
+import { drawExportBoundaryLimits } from "./limitLineClipping";
 
 export type ImageFormat = "png" | "jpeg";
 export const IMAGE_WIDTH = 2400, IMAGE_HEIGHT = 1500;
@@ -150,6 +151,7 @@ export async function renderExportFigure(fig: Figure, format: ImageFormat = "jpe
     const url = await Plotly.toImage(host, { format: "png", width: 1200, height: frame.contentHeight, scale: frame.scale });
     const image = new Image(); image.src = url; await image.decode();
     frame.ctx.drawImage(image, 0, frame.top, 1200, frame.contentHeight);
+    drawExportBoundaryLimits(host,frame.ctx,frame.top);
     return encodeImage(frame.canvas, format);
   } finally { Plotly.purge(host); host.remove(); }
 }

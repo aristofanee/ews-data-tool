@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ReportResolver } from "./ReportResolver";
 import { bindReportItem } from "../lib/reportReferences";
 import { reportItemDescription } from "../lib/reportDescription";
@@ -73,6 +73,14 @@ export function ReportDrawer() {
   const ready=report.length-failed;
   const editing=useStore(s=>s.editingReportId);
   const [generating,setGenerating]=useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
+  const listScrollTop = useRef(0);
+
+  useLayoutEffect(() => {
+    if (!report.length) listScrollTop.current = 0;
+    const list = listRef.current;
+    if (list) list.scrollTop = listScrollTop.current;
+  }, [open, resolving, report.length]);
 
   if (!open) return null;
 
@@ -172,7 +180,11 @@ export function ReportDrawer() {
           <span>{ready} ready · {failed} with errors</span>
           <button className="link-btn" onClick={()=>setResolving(!resolving)}>{resolving?"Show items":`Resolve errors${failed?` (${failed})`:""}`}</button>
         </div>
-        {resolving?<ReportResolver onBack={()=>setResolving(false)}/>:<div className="report-list">
+        {resolving?<ReportResolver onBack={()=>setResolving(false)}/>:<div
+          className="report-list"
+          ref={listRef}
+          onScroll={(event) => { listScrollTop.current = event.currentTarget.scrollTop; }}
+        >
           {report.length === 0 && (
             <div className="report-empty">
               <div className="report-empty-icon">

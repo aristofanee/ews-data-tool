@@ -390,7 +390,10 @@ export const useStore = create<AppState>((set, get) => ({
     const item: ReportItem = { id: spec.id, spec, filters: structuredClone(s.filters), selection: selection ? structuredClone(selection) : undefined };
     item.references=captureReferences(item,s.info);
     set({ report: [...s.report, item] });
-    s.notify(`Added “${spec.title}${selection ? ` · ${selection.label}` : ""}” to the report.`);
+    const title = spec.type === "map" && spec.test !== null && s.info?.tests[spec.test]
+      ? `${testLabelWithUnits(s.info.tests[spec.test])} · Wafer map`
+      : spec.title;
+    s.notify(`Added “${title}${selection ? ` · ${selection.label}` : ""}” to the report.`);
   },
   addReportItems: (items) => {
     const s = get();

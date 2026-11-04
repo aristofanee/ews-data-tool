@@ -74,11 +74,28 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     const saved = cacheKey ? views.get(cacheKey) : undefined;
     const defaults: Record<string, unknown> = {};
     const reset = () => {
-      void Plotly.relayout(el, defaults);
+      // Plotly can retain and mutate the supplied range arrays during zoom.
+      void Plotly.relayout(el, structuredClone(defaults));
     };
-    const resetFromPointer=(event:MouseEvent)=>{
-      if(event.button!==0||event.detail!==2||!(event.target instanceof Element)||!event.target.closest('.nsewdrag'))return;
-      event.preventDefault();event.stopImmediatePropagation();reset();
+    let press: MouseEvent | null = null;
+    let lastClick: MouseEvent | null = null;
+    let resetFrame = 0;
+    const nearby = (a: MouseEvent, b: MouseEvent) =>
+      Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) <= 6;
+    const resetFromPointer = (event: MouseEvent) => {
+      if (!event.isTrusted || event.button !== 0 || !(event.target instanceof Element) || !event.target.closest(".nsewdrag")) return;
+      press = event;
+    };
+    const finishClick = (event: MouseEvent) => {
+      const click = event.button === 0 && press && nearby(press, event);
+      press = null;
+      if (click && lastClick && event.timeStamp - lastClick.timeStamp <= 500 && nearby(lastClick, event)) {
+        lastClick = null;
+        // Let Plotly finish its drag before restoring the axes.
+        resetFrame = requestAnimationFrame(reset);
+      } else {
+        lastClick = click ? event : null;
+      }
     };
     const capture = () => {
       if (!cacheKey || isStatic || !graph._fullLayout) return;
@@ -96,28 +113,25 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
       ? rasterScatterPreview(figure, el.clientWidth, el.clientHeight) : figure;
     const layout=structuredClone(rendered.layout);
     for(const [key,axis]of Object.entries(layout)as[string,any][]){
-      if(/^[xy]axis\d*$/.test(key))axis.autorange=!Array.isArray(axis.range);
+      if (!/^[xy]axis\d*$/.test(key)) continue;
+      axis.autorange = !Array.isArray(axis.range);
+      defaults[key + ".autorange"] = axis.autorange;
+      if (!axis.autorange) defaults[key + ".range"] = [...axis.range];
     }
     void Plotly.react(el, rendered.data, layout, config).then(async () => {
       if (!alive) return;
       restoreLimitLines();
       graph.on?.("plotly_afterplot", restoreLimitLines);
       if (!isStatic) {
-        for (const [key, axis] of Object.entries(graph._fullLayout) as [string, any][]) {
-          if (/^[xy]axis\d*$/.test(key) && Array.isArray(axis.range)) {
-            defaults[`${key}.range`] = [...axis.range]; defaults[`${key}.autorange`] = false;
-          }
-        }
-        // Detect the second native press before Plotly starts another drag.
-        // Its drag handlers can suppress the browser's later dblclick event.
-        el.addEventListener('mousedown',resetFromPointer,true);
-        graph.on?.('plotly_doubleclick',reset);
+        // Plotly can suppress native click counts after handling a drag.
+        el.addEventListener("mousedown", resetFromPointer, true);
+        window.addEventListener("mouseup", finishClick, true);
       }
       if (isStatic || !cacheKey) { el.style.visibility = "visible"; return; }
       if (saved) {
         const update: Record<string, unknown> = {};
         for (const [key, axis] of Object.entries(saved.axes)) {
-          update[`${key}.range`] = axis.range; update[`${key}.autorange`] = axis.autorange;
+          update[`${key}.range`] = [...axis.range]; update[`${key}.autorange`] = axis.autorange;
         }
         await Plotly.relayout(el, update);
         if (!alive) return;
@@ -130,8 +144,9 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     }).catch((error: unknown) => { if (alive) console.error("Unable to render plot", error); });
     return () => {
       alive = false;
+      cancelAnimationFrame(resetFrame);
       el.removeEventListener('mousedown',resetFromPointer,true);
-      graph.removeListener?.('plotly_doubleclick',reset);
+      window.removeEventListener("mouseup", finishClick, true);
       graph.removeListener?.("plotly_afterplot", restoreLimitLines);
       capture();
       graph.removeListener?.("plotly_relayout", capture);

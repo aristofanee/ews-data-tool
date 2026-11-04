@@ -39,7 +39,24 @@ try{
    if(i===1){await page.evaluate(()=>window.S.getState().patchSpec({showLimits:!window.S.getState().spec.showLimits}));await page.waitForTimeout(200);}
    rect=await page.locator('.chart-body .nsewdrag').first().boundingBox();await page.mouse.dblclick(rect.x+rect.width*.5,rect.y+rect.height*.5);await page.waitForTimeout(150);const result=await ranges();
    for(const [key,range]of Object.entries(baseline))for(let j=0;j<2;j++)assert.ok(Math.abs(result[key][j]-range[j])<1e-6,`${type}/${i} failed to reset ${key}: ${JSON.stringify(result)} vs ${JSON.stringify(baseline)}`);
-  }resets.push(type);
+  }
+  if(type==='box'){
+   // Reproduce the second zoom after a successful pan/double-click reset.
+   for(const resetWithHome of [false,true,false]){
+    const rect=await page.locator('.chart-body .nsewdrag').first().boundingBox();
+    const x=rect.x+rect.width*.5,y=rect.y+rect.height*.5;
+    await page.mouse.move(x,y);
+    await page.mouse.wheel(0,-500);
+    await page.waitForTimeout(400);
+    assert.notDeepEqual(await ranges(),baseline);
+    if(resetWithHome)await page.locator('.chart-body [data-title="Reset axes"]').click();
+    else await page.mouse.dblclick(x,y);
+    await page.waitForTimeout(150);
+    const result=await ranges();
+    for(const [key,range]of Object.entries(baseline))for(let j=0;j<2;j++)assert.ok(Math.abs(result[key][j]-range[j])<1e-6,`Zoom reset failed (${JSON.stringify(result)} vs ${JSON.stringify(baseline)}) for ${key} using ${resetWithHome?'Home':'double-click'}`);
+   }
+  }
+  resets.push(type);
  }
  // Sort only the editor view; the checkbox must retain the original index.
  await page.evaluate(()=>{const s=window.S.getState();window.originalInfo=s.info;window.S.setState({info:{...s.info,wafers:s.info.wafers.slice(0,3).map((w,i)=>({...w,lot:0,name:['10','2','1'][i]}))}});});

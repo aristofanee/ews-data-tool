@@ -42,6 +42,18 @@ export const PALETTES: Palette[] = [
     ],
   },
   {
+    id: "jet",
+    label: "Jet",
+    stops: [
+      [0, "#000080"],
+      [0.125, "#0000ff"],
+      [0.375, "#00ffff"],
+      [0.625, "#ffff00"],
+      [0.875, "#ff0000"],
+      [1, "#800000"],
+    ],
+  },
+  {
     id: "viridis",
     label: "Viridis",
     stops: [

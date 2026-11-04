@@ -39,24 +39,33 @@ function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+type ReportImage = {
+  file: string;
+  title: string;
+  subtitle: string;
+  section: { key: string; label: string };
+};
+
 function buildIndex(
-  entries: { file: string; title: string; subtitle: string; cluster?: string }[],
+  entries: ReportImage[],
   meta: { template: string; lots: string; wafers: number; generated: string }
 ): string {
-  let lastCluster = "";
-  const cards = entries
-    .map((e) => {
-      const head =
-        e.cluster && e.cluster !== lastCluster
-          ? `    <h2 class="cluster">${esc(e.cluster)}</h2>\n`
-          : "";
-      if (e.cluster) lastCluster = e.cluster;
-      return `${head}    <figure>
+  const sections = new Map<string, ReportImage[]>([["binmap", []], ["pareto", []]]);
+  for (const entry of entries) {
+    const images = sections.get(entry.section.key);
+    if (images) images.push(entry);
+    else sections.set(entry.section.key, [entry]);
+  }
+  const cards = [...sections.values()].flatMap(images => {
+    if (!images.length) return [];
+    return [
+      `    <h2 class="cluster">${esc(images[0].section.label)}</h2>`,
+      ...images.map(e => `    <figure>
       <img src="${esc(e.file)}" alt="${esc(e.title)}" loading="lazy">
       <figcaption><b>${esc(e.title)}</b><span>${esc(e.subtitle)}</span></figcaption>
-    </figure>`;
-    })
-    .join("\n");
+    </figure>`),
+    ];
+  }).join("\n");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -142,7 +151,7 @@ export async function generateReport(opts: {
   // Reports are pasted into PowerPoint and viewed on a white page. Force the
   // light chart theme so a dark in-app theme never produces dark slides.
   const theme: Theme = "light";
-  const entries: { file: string; title: string; subtitle: string; cluster?: string }[] = [];
+  const entries: ReportImage[] = [];
   const files: string[] = [];
   // Metadata gives a lightweight upper bound; queries refine it as empty groups
   // are discovered, without buffering every report's measurement arrays.
@@ -174,8 +183,7 @@ export async function generateReport(opts: {
   const addImage = async (
     title: string,
     subtitle: string,
-    dataUrl: string,
-    cluster?: string
+    dataUrl: string
   ) => {
     if (!dataUrl) throw new Error("The image renderer returned no image.");
     imageNo++;
@@ -184,7 +192,13 @@ export async function generateReport(opts: {
     await paintExportProgress();
     try { await api.saveImage(join(folder, file), dataUrl); } catch(error) { throw new WriteError(String(error)); }
     files.push(file);
-    entries.push({ file, title, subtitle, cluster });
+    const { spec } = valid[currentItem];
+    const testIndex = spec.type === "scatter" ? spec.scatterX : spec.test;
+    const test = testIndex === null ? undefined : info.tests[testIndex];
+    const section = spec.type === "binmap" || spec.type === "pareto"
+      ? { key: spec.type, label: spec.type === "binmap" ? "Bin maps" : "Pareto" }
+      : { key: `test:${testIndex}`, label: test ? testLabelWithUnits(test) : "Other plots" };
+    entries.push({ file, title, subtitle, section });
     workDone++;
     imageProgress(`Saved JPG ${workDone} of ${totalImages()}`);
   };
@@ -307,8 +321,7 @@ export async function generateReport(opts: {
         const title=`${spec.title} · Lot ${lot}`;
         await beginImage(title);
         await addImage(title, `${lot} · ${wafers.length} wafers`,
-          renderBinOverviewImage(wafers, base, BIN_OVERVIEW_WIDTH, Math.round(BIN_OVERVIEW_WIDTH*9/16), title, "", "jpeg"),
-          lots.length>1 ? spec.title : undefined);
+          renderBinOverviewImage(wafers, base, BIN_OVERVIEW_WIDTH, Math.round(BIN_OVERVIEW_WIDTH*9/16), title, "", "jpeg"));
       }
       continue;
     }
@@ -330,8 +343,7 @@ export async function generateReport(opts: {
         await addImage(
           title,
           `${group.label} · Yield ${binYieldText(md.yieldPct, md.dice, 2, md.unknownBins)}`,
-          await mapImage(md, title, spec, group.filter,group.label),
-          groups.length > 1 ? spec.title : undefined
+          await mapImage(md, title, spec, group.filter,group.label)
         );
       }
       continue;
@@ -339,7 +351,6 @@ export async function generateReport(opts: {
 
     let fig: Figure | null = null;
     let subtitle = "";
-    let cluster: string | undefined;
 
     switch (spec.type) {
       case "box": {
@@ -361,8 +372,7 @@ export async function generateReport(opts: {
             await addImage(
               title,
               `${baseSubtitle} · ${block}`,
-              await renderFigure(fig),
-              spec.title
+              await renderFigure(fig)
             );
           }
           continue;
@@ -395,8 +405,7 @@ export async function generateReport(opts: {
             await addImage(
               title,
               `${group.label} · ${detail} · yield ${d.unknownTotal ? "N/A (unknown bins)" : d.yieldPct.toFixed(2) + "%"}`,
-              await renderFigure(fig),
-              spec.title
+              await renderFigure(fig)
             );
           }
           continue;
@@ -433,8 +442,7 @@ export async function generateReport(opts: {
             await addImage(
               title,
               `${baseSubtitle} · ${g.label}`,
-              await renderFigure(fig),
-              spec.title
+              await renderFigure(fig)
             );
           }
           continue;
@@ -453,7 +461,7 @@ export async function generateReport(opts: {
             const title = `${spec.title} · ${block}`;
             fig = figureTrend(d, { theme, spec, title, facetLabel: block });
             await addImage(title, `${testLabelWithUnits(test)} · ${block}`,
-              await renderFigure(fig), spec.title);
+              await renderFigure(fig));
           }
           continue;
         }
@@ -487,8 +495,7 @@ export async function generateReport(opts: {
             await addImage(
               title,
               `${baseSubtitle} · ${s.name}`,
-              await renderFigure(fig),
-              spec.title
+              await renderFigure(fig)
             );
           }
           continue;
@@ -505,8 +512,7 @@ export async function generateReport(opts: {
       await addImage(
         spec.title,
         subtitle,
-        await renderFigure(fig),
-        cluster
+        await renderFigure(fig)
       );
     }
     } catch(error) {

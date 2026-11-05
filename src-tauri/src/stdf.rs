@@ -343,18 +343,48 @@ pub fn import_stdf(path: &Path, progress: &mut dyn FnMut(f32, &str)) -> Result<I
     import_stdf_bytes(&mmap, &path.display().to_string(), progress)
 }
 
+pub fn import_metadata_files<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Result<Imported, String> {
+    let mut source = Imported::new();
+    for path in paths {
+        let metadata = import_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        source.wafer_geom.extend(metadata.wafer_geom);
+        for (target, bins) in [
+            (&mut source.sbin_names, metadata.sbin_names),
+            (&mut source.hbin_names, metadata.hbin_names),
+        ] {
+            for (code, entry) in bins {
+                if target.get(&code).is_none_or(|(name, _)| name.is_empty()) {
+                    target.insert(code, entry);
+                }
+            }
+        }
+    }
+    Ok(source)
+}
+
 /// Read only product geometry and bin dictionaries. Measurement records are
 /// validated for length and skipped without constructing die/test columns.
-pub fn import_metadata(path: &Path) -> Result<Imported, String> {
+fn import_metadata(path: &Path) -> Result<Imported, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     if file.metadata().map_err(|e| e.to_string())?.len() == 0 { return Err("Empty STDF metadata file".into()); }
     let mapped = unsafe { Mmap::map(&file) }.map_err(|e| e.to_string())?;
-    let decoded;
-    let bytes = if mapped.starts_with(&[0x1f, 0x9d]) {
-        decoded = crate::z_decode::decompress(&mapped).map_err(|e| e.to_string())?;
-        decoded.as_slice()
-    } else { &mapped[..] };
-    metadata_bytes(bytes)
+    let decoded = decompress_stdf(&mapped, || {})?;
+    metadata_bytes(decoded.as_deref().unwrap_or(&mapped))
+}
+
+fn decompress_stdf(bytes: &[u8], on_start: impl FnOnce()) -> Result<Option<Vec<u8>>, String> {
+    if bytes.starts_with(&[0x1f, 0x9d]) {
+        on_start();
+        crate::z_decode::decompress(bytes).map(Some).map_err(|e| e.to_string())
+    } else if bytes.starts_with(&[0x1f, 0x8b]) {
+        use std::io::Read;
+        on_start();
+        let mut data = Vec::new();
+        flate2::read::MultiGzDecoder::new(bytes)
+            .read_to_end(&mut data).map(|_| Some(data)).map_err(|e| e.to_string())
+    } else {
+        Ok(None)
+    }
 }
 
 fn metadata_bytes(bytes: &[u8]) -> Result<Imported, String> {
@@ -381,10 +411,9 @@ fn metadata_bytes(bytes: &[u8]) -> Result<Imported, String> {
 /// Shared by standalone files and ZIP members; no temporary extraction or
 /// Read-adapter copies are needed for either plain STDF or Unix compress.
 pub fn import_stdf_bytes(bytes: &[u8], source: &str, progress: &mut dyn FnMut(f32, &str)) -> Result<Imported, String> {
-    if bytes.starts_with(&[0x1f, 0x9d]) {
-        progress(1.0, &format!("Decompressing .Z: {source}"));
-        let data = crate::z_decode::decompress(bytes)
-            .map_err(|e| format!("Cannot decompress {source}: {e}"))?;
+    let decoded = decompress_stdf(bytes, || progress(1.0, &format!("Decompressing: {source}")))
+        .map_err(|e| format!("Cannot decompress {source}: {e}"))?;
+    if let Some(data) = decoded {
         progress(10.0, &format!("Parsing STDF: {source}"));
         let mut cb = |pct: f32, msg: &str| progress(10.0 + pct * 0.9, msg);
         return parse_stdf_bytes(&data, &mut cb).map_err(|e| format!("{source}: {e}"));
@@ -1064,11 +1093,26 @@ mod tests {
         bytes.extend(rec(15, 10, &[0; 8]));
         let mut sbr = vec![1, 1, 7, 0, 0, 0, 0, 0, b'F', 4]; sbr.extend(b"Leak");
         bytes.extend(rec(1, 50, &sbr));
-        let source = metadata_bytes(&bytes).unwrap();
+        let mut other = rec(0, 10, &[2, 4]);
+        let mut sbr = vec![1, 1, 8, 0, 0, 0, 0, 0, b'F', 4]; sbr.extend(b"Open");
+        other.extend(rec(1, 50, &sbr));
+        use std::io::Write;
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gzip.write_all(&other).unwrap();
+        let dir = std::env::temp_dir();
+        let first = dir.join(format!("ews-metadata-{}.stdf", std::process::id()));
+        let second = first.with_extension("gZ");
+        std::fs::write(&first, bytes).unwrap();
+        std::fs::write(&second, gzip.finish().unwrap()).unwrap();
+        let source = import_metadata_files([first.as_path(), second.as_path()]);
+        std::fs::remove_file(first).unwrap();
+        std::fs::remove_file(second).unwrap();
+        let source = source.unwrap();
         assert!(source.cols.is_empty()); assert!(source.row_lot.is_empty());
-        assert_eq!(source.wafer_geom.last().unwrap().diameter_mm, Some(300.0));
-        assert_eq!(source.wafer_geom.last().unwrap().pos_x,Some('L'));
-        assert_eq!(source.wafer_geom.last().unwrap().pos_y,Some('D'));
+        let geom = source.wafer_geom.iter().find(|g| g.diameter_mm.is_some()).unwrap();
+        assert_eq!(geom.diameter_mm, Some(300.0));
+        assert_eq!(geom.pos_x, Some('L'));
+        assert_eq!(geom.pos_y, Some('D'));
         let mut imp = Imported::new(); let l = imp.lot_index("CSV"); let w = imp.wafer_index(l, "1"); let row = imp.new_row(l, w);
         imp.column((1, 0), row, 42.0); imp.wafer_geom[0].center_x = Some(10);
         let mut ds = crate::model::Dataset::new(); ds.merge(imp);
@@ -1077,6 +1121,7 @@ mod tests {
         assert_eq!(ds.rows, 1); assert_eq!(ds.cols, before); assert_eq!(ds.hbin, bins); assert_eq!(ds.files, files);
         assert_eq!(ds.wafers[0].diameter_mm, Some(300.0)); assert_eq!(ds.wafers[0].die_w_mm, Some(2.8));
         assert_eq!(ds.wafers[0].center_x, Some(10)); assert_eq!(ds.sbin_names[&7], "Leak");
+        assert_eq!(ds.sbin_names[&8], "Open");
         assert_eq!(ds.wafers[0].pos_x.as_deref(),Some("L"));assert_eq!(ds.wafers[0].pos_y.as_deref(),Some("D"));
         let mut conflicting = Imported::new();
         conflicting.wafer_geom = vec![WaferGeom { diameter_mm: Some(200.0), ..Default::default() }, WaferGeom { diameter_mm: Some(300.0), ..Default::default() }];

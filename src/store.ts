@@ -25,16 +25,6 @@ export const PLOT_LABELS: Record<PlotType, string> = {
   scatter: "Scatter",
 };
 
-const PLOT_TITLE_LABELS: Record<PlotType, string> = {
-  box: "BoxPlot",
-  map: "Wafer map",
-  binmap: "Bin map",
-  pareto: "Pareto",
-  hist: "Histogram",
-  trend: "Trend",
-  scatter: "Scatter",
-};
-
 const PLOT_TYPES: PlotType[] = ["box", "map", "hist", "scatter", "trend", "binmap", "pareto"];
 const BUILTIN_CATEGORIES = ["lot", "wafer", "hbin", "sbin", "site"];
 
@@ -104,16 +94,13 @@ function tidyTitle(s: string): string {
 }
 
 export function autoTitle(test: TestInfo | null, type: PlotType): string {
-  if (type === "pareto") return "Fail Pareto";
-  if (type === "map") return "Wafer map";
-  if (type === "binmap") return "Bin map";
-  if (!test) return PLOT_LABELS[type];
-  return `${tidyTitle(testLabelWithUnits(test))} · ${PLOT_TITLE_LABELS[type]}`;
+  if (!test || type === "pareto" || type === "binmap") return PLOT_LABELS[type];
+  return `${tidyTitle(testLabelWithUnits(test))} · ${PLOT_LABELS[type]}`;
 }
 
 export function scatterTitle(x: TestInfo | null, y: TestInfo | null): string {
   if (x && y) {
-    return `${tidyTitle(testLabelWithUnits(x))} vs ${tidyTitle(testLabelWithUnits(y))} - Scatter`;
+    return `${tidyTitle(testLabelWithUnits(x))} vs ${tidyTitle(testLabelWithUnits(y))} · Scatter`;
   }
   return "Scatter";
 }
@@ -159,6 +146,8 @@ interface AppState {
   spec: PlotSpec;
   /** Inspector state is remembered independently for every plot type. */
   specs: Record<PlotType, PlotSpec>;
+  /** Range edits invalidate the saved axes for just this plot type. */
+  rangeRevisions: Partial<Record<PlotType, number>>;
   filters: Filter;
   report: ReportItem[];
   plotSelection: PlotSelection | null;
@@ -217,6 +206,7 @@ export const useStore = create<AppState>((set, get) => ({
   presentation: initialPresentation,
   spec: { ...defaultSpec("box", null, "Box plot"), presentation: initialPresentation },
   specs: Object.fromEntries(Object.entries(defaultSpecs()).map(([key, spec]) => [key, { ...spec, presentation: initialPresentation }])) as Record<PlotType, PlotSpec>,
+  rangeRevisions: {},
   filters: emptyFilter(),
   report: [],
   plotSelection: null,
@@ -345,7 +335,15 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
     const spec = sanitizeSpec({ ...next, title }, s.info);
-    set({ spec, specs: { ...s.specs, [spec.type]: spec } });
+    const rangeChanged = p.limitMode !== undefined ||
+      (["limitK", "yMin", "yMax", "lsl", "usl", "logY"] as const).some(key => spec[key] !== s.spec[key]);
+    set({
+      spec,
+      specs: { ...s.specs, [spec.type]: spec },
+      rangeRevisions: rangeChanged
+        ? { ...s.rangeRevisions, [spec.type]: (s.rangeRevisions[spec.type] ?? 0) + 1 }
+        : s.rangeRevisions,
+    });
   },
   selectTest: (index) => {
     const s = get();
@@ -390,9 +388,8 @@ export const useStore = create<AppState>((set, get) => ({
     const item: ReportItem = { id: spec.id, spec, filters: structuredClone(s.filters), selection: selection ? structuredClone(selection) : undefined };
     item.references=captureReferences(item,s.info);
     set({ report: [...s.report, item] });
-    const title = spec.type === "map" && spec.test !== null && s.info?.tests[spec.test]
-      ? `${testLabelWithUnits(s.info.tests[spec.test])} · Wafer map`
-      : spec.title;
+    const title = spec.type === "map" && spec.test !== null
+      ? autoTitle(s.info?.tests[spec.test] ?? null, "map") : spec.title;
     s.notify(`Added “${title}${selection ? ` · ${selection.label}` : ""}” to the report.`);
   },
   addReportItems: (items) => {

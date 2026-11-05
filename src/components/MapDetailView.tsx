@@ -4,6 +4,8 @@ import { fmtInt, testLabelWithUnits } from "../lib/format";
 import { WaferMapView, type MapExportApi } from "./WaferMapView";
 import { IconArrowLeft, IconChevronLeft, IconChevronRight } from "./Icons";
 import { binYieldText } from "../lib/theme";
+import { valueMapStats } from "../lib/plotStats";
+import { DetailStats } from "./DetailStats";
 
 interface Props {
   maps: MapResponse[];
@@ -12,7 +14,7 @@ interface Props {
   index: number;
   spec: PlotSpec;
   mode: "value" | "bin";
-  onBack: () => void;
+  onBack?: () => void;
   onIndex: (index: number) => void;
   onReady?: (api: MapExportApi | null) => void;
 }
@@ -29,7 +31,10 @@ export function MapDetailView({ maps, labels, index, spec, mode, onBack, onIndex
     [spec, mode]
   );
 
+  const stats = useMemo(() => md && mode === "value" ? valueMapStats(md) : [], [md, mode]);
+
   useEffect(() => {
+    if (!onBack) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
       const target = e.target as HTMLElement | null;
@@ -71,10 +76,10 @@ export function MapDetailView({ maps, labels, index, spec, mode, onBack, onIndex
   return (
     <div className="map-detail">
       <div className="map-detail-head">
-        <button className="btn map-detail-back" onClick={onBack} title="Back to all maps">
+        {onBack && <button className="btn map-detail-back" onClick={onBack} title="Back to all maps">
           <IconArrowLeft size={14} />
           All maps
-        </button>
+        </button>}
         <div className="map-detail-heading">
           <div
             className="map-detail-title"
@@ -87,31 +92,13 @@ export function MapDetailView({ maps, labels, index, spec, mode, onBack, onIndex
             {md.lotName} · {scope}
           </div>
         </div>
-        <div className="map-detail-stats">
-          <div className="map-detail-stat">
-            <span>Wafer yield (HBIN 1)</span>
-            <b className="yield-value">{binYieldText(md.yieldPct, md.dice, 2, md.unknownBins)}</b>
-          </div>
-          {mode === "value" && md.testYieldPct != null && (
-            <div className="map-detail-stat">
-              <span>Test yield (LSL/USL)</span>
-              <b className="yield-value">{md.testYieldPct.toFixed(2)}%</b>
-            </div>
-          )}
-          <div className="map-detail-stat">
-            <span>Bin 1</span>
-            <b>{fmtInt(md.pass)}</b>
-          </div>
-          <div className="map-detail-stat">
-            <span>Other bins</span>
-            <b>{fmtInt(md.fail)}</b>
-          </div>
-          <div className="map-detail-stat">
-            <span>Dice</span>
-            <b>{fmtInt(md.dice.length)}</b>
-          </div>
-        </div>
-        <div className="map-detail-nav">
+        <DetailStats stats={mode === "value" ? stats : [
+          { k: "Wafer yield (HBIN 1)", v: binYieldText(md.yieldPct, md.dice, 2, md.unknownBins), tone: "good" },
+          { k: "Bin 1", v: fmtInt(md.pass) },
+          { k: "Other bins", v: fmtInt(md.fail) },
+          { k: "Dice", v: fmtInt(md.dice.length) },
+        ]} />
+        {maps.length > 1 && <div className="map-detail-nav">
           <button
             className="btn icon"
             onClick={() => onIndex(index - 1)}
@@ -131,7 +118,7 @@ export function MapDetailView({ maps, labels, index, spec, mode, onBack, onIndex
           >
             <IconChevronRight size={16} />
           </button>
-        </div>
+        </div>}
       </div>
       <div className="map-detail-body">
         <WaferMapView data={md} spec={mapSpec} onReady={onReady} />

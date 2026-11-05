@@ -467,9 +467,9 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
     }
   }
 
-  const lsl = spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null;
-  const usl = spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null;
-  const limits = preview
+  const lsl = spec.lsl ?? data.test.loSpec;
+  const usl = spec.usl ?? data.test.hiSpec;
+  const limits = preview || !spec.showLimits
     ? { shapes: [], annotations: [] }
     : limitLines(t, lsl, usl, "y", style, spec.logY);
 
@@ -532,15 +532,16 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
     type: spec.logY ? "log" : "linear",
   };
   if (!preview) {
+    const summary = (opts.facetLabel === undefined ? undefined : data.groupStats?.[opts.facetLabel]?.summary) ?? data.summary;
     applyAxisRange(
       layout,
       "y",
       spec,
-      data.summary,
+      summary,
       lsl,
       usl,
-      data.summary.min,
-      data.summary.max
+      summary.min,
+      summary.max
     );
   }
   layout.shapes = limits.shapes;
@@ -811,7 +812,6 @@ function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
   const style = chartStyle(opts.preview ? false : spec.presentation);
-  const s = data.summary;
   const nb = data.counts.length;
   const preview = opts.preview === true;
   if (nb === 0) return { data: [], layout: baseLayout(t, preview ? "" : opts.title, spec.presentation) };
@@ -820,6 +820,7 @@ function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
   const facet = opts.facetLabel;
   const grouped = data.groups.length > 0 && facet === undefined;
   const facetGroup = facet !== undefined ? data.groups.find((g) => g.label === facet) : undefined;
+  const s = facetGroup?.stats.summary ?? data.summary;
   const traces: any[] = [];
 
   const addBars = (
@@ -882,12 +883,20 @@ function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
     });
   }
 
-  const lsl = spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null;
-  const usl = spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null;
-  const limits = preview
+  const lsl = spec.lsl ?? data.test.loSpec;
+  const usl = spec.usl ?? data.test.hiSpec;
+  const limits = preview || !spec.showLimits
     ? { shapes: [], annotations: [] }
     : limitLinesX(t, lsl, usl, style);
   const { shapes, annotations } = limits;
+  if (grouped) {
+    // Keep the horizontal legend above the plot and the limit labels inside it.
+    for (const annotation of annotations) {
+      annotation.yanchor = "top";
+      annotation.yshift = -Math.max(3, Math.round(style.annotation * 0.3));
+      annotation.bgcolor = t.paper;
+    }
+  }
   if (!preview && !grouped && !facetGroup && Number.isFinite(s.mean)) {
     shapes.push({
       type: "line",
@@ -1008,9 +1017,11 @@ function figureTrendCore(data: TrendResponse, opts: FigureOpts): Figure {
         "sd %{customdata[0]:.4~g} · n %{customdata[1]}<extra></extra>", showlegend: false });
     offset += block.length;
   }
-  const lsl = spec.showLimits ? (spec.lsl ?? data.test.loSpec) : null;
-  const usl = spec.showLimits ? (spec.usl ?? data.test.hiSpec) : null;
-  const { shapes, annotations } = limitLines(t, lsl, usl, "y", style, spec.logY);
+  const lsl = spec.lsl ?? data.test.loSpec;
+  const usl = spec.usl ?? data.test.hiSpec;
+  const { shapes, annotations } = spec.showLimits
+    ? limitLines(t, lsl, usl, "y", style, spec.logY)
+    : { shapes: [], annotations: [] };
   const short = labels.map(shortTick);
   const stride = n > (spec.presentation ? 30 : 40) ? 2 : 1;
   const angle = n > (spec.presentation ? 10 : 12) && short.some((s) => s.length > 5) ? -45 : 0;
@@ -1362,8 +1373,8 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
         "y",
         spec,
         s,
-        null,
-        null,
+        spec.lsl ?? data.yTest.loSpec,
+        spec.usl ?? data.yTest.hiSpec,
         s.min,
         s.max
       );

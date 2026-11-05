@@ -12,7 +12,6 @@ import {
   type MapOptions,
 } from "../charts/waferMap";
 import { dataGroups, type DataGroup } from "../lib/grouping";
-import { WaferMapView } from "./WaferMapView";
 import { MapGallery, useMapSelection } from "./MapGallery";
 import { MapDetailView } from "./MapDetailView";
 import type { ImageExportJob } from "../lib/exportJobs";
@@ -180,26 +179,17 @@ export function MapFacetView({ spec, filter, onReady, onSelection }: Props) {
 
   const labels = entries.map((e) => e.label);
 
-  if (selected !== null && entries[selected]) {
+  const detailIndex = selected ?? (entries.length === 1 ? 0 : null);
+  if (detailIndex !== null && entries[detailIndex]) {
     return (
       <MapDetailView
         maps={entries.map((e) => e.md)}
         labels={labels}
-        index={selected}
+        index={detailIndex}
         spec={spec}
         mode="value"
         onIndex={setSelected}
-        onBack={() => setSelected(null)}
-      />
-    );
-  }
-
-  if (entries.length === 1) {
-    const entry = entries[0];
-    return (
-      <WaferMapView
-        data={entry.md}
-        spec={{ ...spec, mapMode: "value", title: `${spec.title} · ${entry.label}` }}
+        onBack={entries.length > 1 ? () => setSelected(null) : undefined}
       />
     );
   }

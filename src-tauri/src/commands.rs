@@ -42,9 +42,9 @@ pub async fn pick_files(state: State<'_, AppState>) -> Result<Vec<String>, Strin
     let mut dlg = rfd::FileDialog::new()
         .add_filter(
             "Semiconductor data",
-            &["stdf", "std", "atdf", "csv", "txt", "tsv", "z", "zip"],
+            &["stdf", "std", "atdf", "csv", "txt", "tsv", "z", "gz", "zip"],
         )
-        .add_filter("STDF (including .Z and ZIP)", &["stdf", "std", "z", "zip"])
+        .add_filter("STDF (including .Z, .gz and ZIP)", &["stdf", "std", "z", "gz", "zip"])
         .add_filter("CSV / text", &["csv", "txt", "tsv"])
         .add_filter("All files", &["*"]);
     if let Some(dir) = state.last_dir.lock().unwrap().clone() {
@@ -229,10 +229,15 @@ pub fn inspect_csv(path: String) -> Result<csv_io::CsvInspection, String> {
 }
 
 #[tauri::command]
-pub async fn import_product_metadata(state: State<'_, AppState>, path: String) -> Result<DatasetInfo, String> {
+pub async fn import_product_metadata(
+    state: State<'_, AppState>,
+    paths: Option<Vec<String>>,
+    path: Option<String>,
+) -> Result<DatasetInfo, String> {
     let target = state.ds.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let source = stdf::import_metadata(std::path::Path::new(&path))?;
+        let paths = paths.unwrap_or_else(|| path.into_iter().collect());
+        let source = stdf::import_metadata_files(paths.iter().map(std::path::Path::new))?;
         let mut guard = target.lock().map_err(|e| e.to_string())?;
         let ds = guard.as_mut().ok_or("Import CSV data before adding product metadata")?;
         ds.fill_product_metadata(source)?;

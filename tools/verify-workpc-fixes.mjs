@@ -55,6 +55,23 @@ try{
     const result=await ranges();
     for(const [key,range]of Object.entries(baseline))for(let j=0;j<2;j++)assert.ok(Math.abs(result[key][j]-range[j])<1e-6,`Zoom reset failed (${JSON.stringify(result)} vs ${JSON.stringify(baseline)}) for ${key} using ${resetWithHome?'Home':'double-click'}`);
    }
+   const rangeSelect=page.getByRole('combobox',{name:'Y axis range',exact:true});
+   const chooseRange=async mode=>{
+    await rangeSelect.selectOption(mode);
+    await page.waitForFunction(()=>document.querySelector('.chart-body .plotly-host')?.style.visibility==='visible');
+   };
+   await chooseRange('iqr');
+   const iqr=await ranges();
+   for(const revisit of [true,false]){
+    const rect=await page.locator('.chart-body .nsewdrag').first().boundingBox();
+    await page.mouse.move(rect.x+rect.width*.5,rect.y+rect.height*.5);
+    await page.mouse.wheel(0,-500);
+    await page.waitForTimeout(400);
+    assert.notDeepEqual(await ranges(),iqr);
+    if(revisit)await chooseRange('auto');
+    await chooseRange('iqr');
+    assert.deepEqual(await ranges(),iqr);
+   }
   }
   resets.push(type);
  }

@@ -2,7 +2,7 @@ import { useStore } from "../store";
 import { defaultSpec, type LimitMode, type PlotType } from "../types";
 import { PALETTES, paletteGradient } from "../lib/theme";
 import { fmt, fmtInt, testLabelWithUnits } from "../lib/format";
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { TestCombobox } from "./TestCombobox";
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -483,13 +483,18 @@ export function Inspector() {
           <Row label={spec.type === "map" ? "Range" : `${valueAxis} range`}>
             <select
               className="input"
-              value={spec.limitMode}
-              onChange={(e) => patch({ limitMode: e.target.value as LimitMode })}
+              aria-label={spec.type === "map" ? "Range" : `${valueAxis} range`}
+              value=""
+              onChange={(e) => {
+                if (e.target.value) patch({ limitMode: e.target.value as LimitMode });
+              }}
             >
               {RANGE_OPTIONS.map((o) => (
-                <option key={o.v} value={o.v} disabled={o.v === "spec" && !supportsSpecRange}>
-                  {o.label}
-                </option>
+                <Fragment key={o.v}>
+                  <option value={o.v} disabled={o.v === "spec" && !supportsSpecRange}>{o.label}</option>
+                  {/* Keep the displayed label separate so selecting it again fires change. */}
+                  {o.v === spec.limitMode && <option value="" hidden disabled>{o.label}</option>}
+                </Fragment>
               ))}
             </select>
           </Row>

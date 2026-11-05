@@ -40,6 +40,8 @@ interface Props {
 export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: Props) {
   const theme = useStore((s) => s.theme);
   const info = useStore((s) => s.info);
+  const rangeRevision = useStore(s => !preview && spec.mapMode === "value" ? s.rangeRevisions.map ?? 0 : 0);
+  const lastRangeRevision = useRef(rangeRevision);
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<WaferMapRenderer | null>(null);
@@ -189,9 +191,14 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
   useEffect(() => {
     const r = rendererRef.current;
     if (!r) return;
+    if (lastRangeRevision.current !== rangeRevision) {
+      lastRangeRevision.current = rangeRevision;
+      r.resetView();
+      setHover(null);
+    }
     r.resize();
     r.setData(data, opts);
-  }, [data, opts]);
+  }, [data, opts, rangeRevision]);
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.button !== 0 && (e.button !== 1 || preview)) return;

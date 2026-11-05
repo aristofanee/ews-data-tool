@@ -46,11 +46,11 @@ export function TopBar() {
     try {
       const paths = await api.pickFiles();
       if (!paths.length) return;
-      if (paths.length !== 1 || !/\.(stdf|std|z)$/i.test(paths[0])) throw new Error("Select one reference STDF or .Z file of the same product.");
+      if (paths.some(path => !/\.(stdf|std|z|gz)$/i.test(path))) throw new Error("Select reference STDF files of the same product (.stdf, .std, .Z or .gz).");
       store.setBusy(true, 0, "Reading product metadata…");
-      const updated = await api.importProductMetadata(paths[0]);
+      const updated = await api.importProductMetadata(paths);
       store.setInfo(updated, { keepFilters: true }); store.bumpData();
-      store.notify("Missing wafer geometry and bin descriptions filled from reference STDF.");
+      store.notify("Missing wafer geometry and bin descriptions filled from the selected reference files.");
     } catch (e) { store.setError(String(e)); } finally { store.setBusy(false); }
   };
 
@@ -92,7 +92,7 @@ export function TopBar() {
           {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
         </button>
         <span className="topbar-sep" />
-        <button className="btn primary" onClick={() => open()} title="Open STDF, .Z, ZIP or CSV files">
+        <button className="btn primary" onClick={() => open()} title="Open STDF, .Z, .gz, ZIP or CSV files">
           <IconFolder size={15} /> Open data
         </button>
         <button
@@ -104,7 +104,7 @@ export function TopBar() {
           <IconDownload size={15} /> Export CSV
         </button>
         <button className="btn" disabled={!info || !api.isTauri} onClick={importMetadata}
-          title="Fill missing wafer geometry and bin descriptions from a reference STDF of the same product; no measurements are added">Metadata</button>
+          title="Fill missing wafer geometry and bin descriptions from reference STDF files of the same product">Metadata</button>
         <span className="topbar-sep" />
         <button className="btn icon" onClick={saveTemplate} title="Save template (all report plots + settings)">
           <IconSave size={16} />

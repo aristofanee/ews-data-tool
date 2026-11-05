@@ -147,6 +147,7 @@ pub fn limit_counts(ds: &Dataset, req: &LimitCountsRequest) -> LimitCountsRespon
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxRequest {
+    pub population: Option<PopulationRequest>,
     pub test: usize,
     #[serde(default)]
     pub x_axis: String,
@@ -155,6 +156,32 @@ pub struct BoxRequest {
     #[serde(default)]
     pub filter: Filter,
     pub max_points: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PopulationRequest {
+    pub lsl: Option<f32>,
+    pub usl: Option<f32>,
+    #[serde(default)]
+    pub split: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PopulationStats {
+    pub summary: Summary,
+    pub test_yield_pct: Option<f64>,
+}
+
+fn test_yield(values: &[f32], test: &TestInfo, request: Option<&PopulationRequest>) -> Option<f64> {
+    let lo = request.and_then(|r| r.lsl).or(test.lo_spec);
+    let hi = request.and_then(|r| r.usl).or(test.hi_spec);
+    if values.is_empty() || (lo.is_none() && hi.is_none()) || lo.zip(hi).is_some_and(|(l, h)| l > h) {
+        return None;
+    }
+    let pass = values.iter().filter(|&&v| lo.is_none_or(|l| v >= l) && hi.is_none_or(|h| v <= h)).count();
+    Some(100.0 * pass as f64 / values.len() as f64)
 }
 
 #[derive(Serialize)]
@@ -175,6 +202,8 @@ pub struct BoxGroup {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxResponse {
+    pub test_yield_pct: Option<f64>,
+    pub group_stats: HashMap<String, PopulationStats>,
     pub groups: Vec<BoxGroup>,
     pub summary: Summary,
     pub test: TestInfo,
@@ -194,6 +223,8 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
         .unwrap_or_else(|| TestInfo::new("?"));
     if req.test >= ds.cols.len() || ds.cols[req.test].is_empty() {
         return BoxResponse {
+            test_yield_pct: None,
+            group_stats: HashMap::new(),
             groups: Vec::new(),
             summary: Summary::default(),
             test,
@@ -253,7 +284,9 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
         1
     };
 
-    let mut all: Vec<f32> = Vec::new();
+    let mut all: Vec<f32> = Vec::with_capacity(total);
+    let mut group_values: HashMap<u16, Vec<f32>> = HashMap::new();
+    let split = group_category.is_some() && req.population.as_ref().is_some_and(|p| p.split);
     let mut groups = Vec::new();
     for x_key in x_keys {
         for group_key in &group_keys {
@@ -263,6 +296,9 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
             let n = vals.len();
             let full_values: Vec<f32> = vals.iter().map(|(v, _, _)| *v).collect();
             let group_summary = summarize(&full_values);
+            if split {
+                group_values.entry(*group_key).or_default().extend_from_slice(&full_values);
+            }
             let positive_summary = summarize(&full_values.iter().copied().filter(|v| *v > 0.0).collect::<Vec<_>>());
             let mut values = Vec::with_capacity(n / stride + 1);
             let mut xs = Vec::with_capacity(n / stride + 1);
@@ -293,7 +329,15 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
 
     let summary = summarize(&all);
     let (cp, cpk) = cp_cpk(&all, test.lo_spec, test.hi_spec);
+    let group_stats = group_values.into_iter().map(|(key, values)| {
+        (group_labels[&key].clone(), PopulationStats {
+            summary: summarize(&values),
+            test_yield_pct: test_yield(&values, &test, req.population.as_ref()),
+        })
+    }).collect();
     BoxResponse {
+        test_yield_pct: test_yield(&all, &test, req.population.as_ref()),
+        group_stats,
         groups,
         summary,
         lsl: test.lo_spec,
@@ -1049,6 +1093,7 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistRequest {
+    pub population: Option<PopulationRequest>,
     pub test: usize,
     #[serde(default)]
     pub filter: Filter,
@@ -1060,6 +1105,7 @@ pub struct HistRequest {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistGroup {
+    pub stats: PopulationStats,
     pub key: u16,
     pub label: String,
     pub counts: Vec<u32>,
@@ -1068,6 +1114,7 @@ pub struct HistGroup {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistResponse {
+    pub test_yield_pct: Option<f64>,
     pub edges: Vec<f32>,
     pub counts: Vec<u32>,
     pub groups: Vec<HistGroup>,
@@ -1097,6 +1144,7 @@ pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
         .unwrap_or_else(|| TestInfo::new("?"));
     if req.test >= ds.cols.len() || ds.cols[req.test].is_empty() {
         return HistResponse {
+            test_yield_pct: None,
             edges: Vec::new(),
             counts: Vec::new(),
             groups: Vec::new(),
@@ -1132,6 +1180,7 @@ pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
     let summary = summarize(&vals);
     if vals.is_empty() {
         return HistResponse {
+            test_yield_pct: None,
             edges: Vec::new(),
             counts: Vec::new(),
             groups: Vec::new(),
@@ -1174,10 +1223,14 @@ pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
         .into_iter()
         .map(|(key, label, values)| {
             let mut gc = vec![0u32; n_bins];
-            for v in values {
+            for &v in &values {
                 gc[bin_index(v)] += 1;
             }
             HistGroup {
+                stats: PopulationStats {
+                    summary: summarize(&values),
+                    test_yield_pct: test_yield(&values, &test, req.population.as_ref()),
+                },
                 key,
                 label,
                 counts: gc,
@@ -1185,6 +1238,7 @@ pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
         })
         .collect();
     HistResponse {
+        test_yield_pct: test_yield(&vals, &test, req.population.as_ref()),
         edges,
         counts,
         groups,
@@ -1764,7 +1818,7 @@ mod tests {
         let c=limit_counts(&ds,&req); assert_eq!((c.total,c.in_limits),(3,Some(2)));
         req.filter.stat=Some(StatFilter {kind:StatKind::Sigma,k:1.0,per_wafer:false});
         let c=limit_counts(&ds,&req); assert_eq!((c.total,c.in_limits),(2,Some(2)));
-        let bx=box_plot(&ds,&BoxRequest {test:0,x_axis:"site".into(),group_by:None,filter:req.filter.clone(),max_points:Some(1)});
+        let bx=box_plot(&ds,&BoxRequest { population: None,test:0,x_axis:"site".into(),group_by:None,filter:req.filter.clone(),max_points:Some(1)});
         assert_eq!(c.total,bx.summary.n);
         let scatter = scatter(&ds, &ScatterRequest {x_test:0,y_test:0,z_mode:ScatterZMode::None,z_test:None,z_col:None,
             group_by:Some("site".into()),filter:Filter::default(),max_points:Some(1)});
@@ -1780,7 +1834,7 @@ mod tests {
     #[test]
     fn box_statistics_are_exact_even_when_points_are_sampled() {
         let ds = small_dataset(&[-100.0, 1.0, 2.0, 3.0, 100.0]);
-        let b = box_plot(&ds, &BoxRequest {
+        let b = box_plot(&ds, &BoxRequest { population: None,
             test: 0, x_axis: "wafer".into(), group_by: None,
             filter: Filter::default(), max_points: Some(1),
         });
@@ -1790,6 +1844,33 @@ mod tests {
         assert_eq!(b.groups[0].summary.q1, 1.0);
         assert_eq!(b.groups[0].summary.whisker_hi, 3.0);
         assert_eq!(b.groups[0].positive_summary.median, 2.5);
+    }
+
+    #[test]
+    fn box_and_histogram_split_stats_use_full_populations_and_inclusive_limits() {
+        let mut ds = small_dataset(&[1.0, 2.0, 3.0, 6.0, 8.0, f32::NAN]);
+        ds.site = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
+        let population = || Some(PopulationRequest { lsl: Some(2.0), usl: Some(6.0), split: true });
+        let b = box_plot(&ds, &BoxRequest {
+            population: population(), test: 0, x_axis: "wafer".into(), group_by: Some("site".into()),
+            filter: Filter::default(), max_points: Some(1),
+        });
+        let h = histogram(&ds, &HistRequest {
+            population: population(), test: 0, group_by: Some("site".into()),
+            filter: Filter::default(), bins: Some(2),
+        });
+        assert!(b.truncated);
+        assert_eq!(b.test_yield_pct, Some(60.0));
+        assert_eq!(h.test_yield_pct, Some(60.0));
+        for (label, n, median, yield_pct) in [("Site 0", 3, 2.0, 200.0 / 3.0), ("Site 1", 2, 7.0, 50.0)] {
+            let box_stats = &b.group_stats[label];
+            let hist_stats = &h.groups.iter().find(|g| g.label == label).unwrap().stats;
+            for stats in [box_stats, hist_stats] {
+                assert_eq!(stats.summary.n, n);
+                assert_eq!(stats.summary.median, median);
+                assert_eq!(stats.test_yield_pct, Some(yield_pct));
+            }
+        }
     }
 
     #[test]
@@ -1804,7 +1885,7 @@ mod tests {
             let filter = Filter { stat, ..Filter::default() };
             for by in ["site", "wafer", "hbin"] {
                 for group in ["none", "wafer", "site"] {
-                    let b = box_plot(&ds, &BoxRequest { test: 0, x_axis: by.into(),
+                    let b = box_plot(&ds, &BoxRequest { population: None, test: 0, x_axis: by.into(),
                         group_by: Some(group.into()), filter: filter.clone(), max_points: Some(1) });
                     let t = trend(&ds, &TrendRequest { test: 0, by: by.into(),
                         group_by: Some(group.into()), filter: filter.clone() });
@@ -1848,13 +1929,13 @@ mod tests {
         let site = pareto(&ds, &req);
         assert_eq!(site.total, 2);
         assert_eq!(site.bars[0].pct, 50.0);
-        let b = box_plot(&ds, &BoxRequest { test: 0, x_axis: "site".into(), group_by: None, filter: Filter::default(), max_points: None });
+        let b = box_plot(&ds, &BoxRequest { population: None, test: 0, x_axis: "site".into(), group_by: None, filter: Filter::default(), max_points: None });
         assert_eq!(b.groups.len(), 2);
         assert_eq!(b.groups[0].x_label, "Site 0");
         assert_eq!(b.groups[0].n, 2);
         ds.site[0] = None;
         assert!(ds.info().sites.contains(&65535));
-        let unknown = box_plot(&ds, &BoxRequest { test: 0, x_axis: "site".into(), group_by: None, filter: Filter::default(), max_points: None });
+        let unknown = box_plot(&ds, &BoxRequest { population: None, test: 0, x_axis: "site".into(), group_by: None, filter: Filter::default(), max_points: None });
         assert!(unknown.groups.iter().any(|g| g.x_label == "Unknown site" && g.n == 1));
     }
 
@@ -1923,7 +2004,7 @@ mod tests {
         ds.resolve_retests();
         let import_ms = start.elapsed().as_millis();
         let start = std::time::Instant::now();
-        let bx = box_plot(&ds, &BoxRequest { test: 0, x_axis: "wafer".into(), group_by: None,
+        let bx = box_plot(&ds, &BoxRequest { population: None, test: 0, x_axis: "wafer".into(), group_by: None,
             filter: Filter::default(), max_points: None });
         let box_ms = start.elapsed().as_millis();
         let start = std::time::Instant::now();
@@ -1976,6 +2057,7 @@ mod tests {
         let bx = box_plot(
             &ds,
             &BoxRequest {
+                population: None,
                 test,
                 x_axis: "wafer".to_string(),
                 group_by: None,
@@ -2051,6 +2133,7 @@ mod tests {
         let hi = histogram(
             &ds,
             &HistRequest {
+                population: None,
                 test,
                 filter: filter.clone(),
                 bins: Some(40),
@@ -2102,6 +2185,7 @@ mod tests {
         let bx2 = box_plot(
             &ds2,
             &BoxRequest {
+                population: None,
                 test,
                 x_axis: "wafer".to_string(),
                 group_by: Some("Split".to_string()),

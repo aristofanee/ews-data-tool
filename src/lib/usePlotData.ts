@@ -52,6 +52,7 @@ export function usePlotData(): PlotDataState {
     scatterZMode: spec.scatterZMode,
     scatterZTest: spec.scatterZTest,
     filters,
+    population: spec.type === "box" || spec.type === "hist" ? [spec.lsl, spec.usl, spec.splitPlots] : null,
     dataVersion,
   });
 
@@ -71,6 +72,7 @@ export function usePlotData(): PlotDataState {
             result = {
               kind: "box",
               data: await api.boxPlot({
+                population: { lsl: spec.lsl, usl: spec.usl, split: spec.splitPlots },
                 test: spec.test,
                 xAxis: spec.xAxis,
                 groupBy: spec.groupBy,
@@ -117,6 +119,7 @@ export function usePlotData(): PlotDataState {
             result = {
               kind: "hist",
               data: await api.histogram({
+                population: { lsl: spec.lsl, usl: spec.usl, split: spec.splitPlots },
                 test: spec.test,
                 filter: filters,
                 bins: spec.bins,

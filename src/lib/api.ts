@@ -1,3 +1,4 @@
+import type { PopulationRequest } from "../types";
 import type {
   BinOverviewResponse,
   BoxResponse,
@@ -93,9 +94,9 @@ export async function inspectCsv(path: string): Promise<CsvInspection> {
   return invoke<CsvInspection>("inspect_csv", { path });
 }
 
-export async function importProductMetadata(path: string): Promise<DatasetInfo> {
+export async function importProductMetadata(paths: string[]): Promise<DatasetInfo> {
   if (!isTauri) throw new Error("STDF metadata import requires the desktop application.");
-  const info = await invoke<DatasetInfo>("import_product_metadata", { path });
+  const info = await invoke<DatasetInfo>("import_product_metadata", { paths });
   invalidateMaps();
   return info;
 }
@@ -155,6 +156,7 @@ export function onImportProgress(cb: (pct: number, msg: string) => void): () => 
 /* ------------------------------------------------------------------ */
 
 export async function boxPlot(req: {
+  population?: PopulationRequest;
   test: number;
   xAxis: string;
   groupBy?: string | null;
@@ -203,6 +205,7 @@ export async function pareto(req: {
 }
 
 export async function histogram(req: {
+  population?: PopulationRequest;
   test: number;
   filter: Filter;
   bins?: number | null;

@@ -99,6 +99,17 @@ export interface Summary {
   whiskerHi: number;
 }
 
+export interface PopulationStats {
+  summary: Summary;
+  testYieldPct: number | null;
+}
+
+export interface PopulationRequest {
+  lsl: number | null;
+  usl: number | null;
+  split: boolean;
+}
+
 export interface BoxGroup {
   summary: Summary;
   positiveSummary: Summary;
@@ -112,9 +123,9 @@ export interface BoxGroup {
   n: number;
 }
 
-export interface BoxResponse {
+export interface BoxResponse extends PopulationStats {
+  groupStats: Record<string, PopulationStats>;
   groups: BoxGroup[];
-  summary: Summary;
   test: TestInfo;
   lsl: number | null;
   usl: number | null;
@@ -227,16 +238,16 @@ export interface CsvInspection {
 }
 
 export interface HistGroup {
+  stats: PopulationStats;
   key: number;
   label: string;
   counts: number[];
 }
 
-export interface HistResponse {
+export interface HistResponse extends PopulationStats {
   edges: number[];
   counts: number[];
   groups: HistGroup[];
-  summary: Summary;
   test: TestInfo;
   lsl: number | null;
   usl: number | null;

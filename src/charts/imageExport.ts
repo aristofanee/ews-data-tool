@@ -19,7 +19,7 @@ export interface ExportPlotStyle {
 export { categoryName } from "../lib/categoryNames";
 import { categoryName } from "../lib/categoryNames";
 export function exportPlotTitle(spec: PlotSpec, test: Pick<TestInfo,"number"|"name"|"units"> | null, xLabel: string, groupLabel?: string): string {
-  const kind = ({box:"BoxPlot",map:"Map",binmap:"BinMap",hist:"Histogram",scatter:"Scatter",trend:"Trend",pareto:"Pareto"})[spec.type];
+  const kind = ({box:"Box plot",map:"Map",binmap:"BinMap",hist:"Histogram",scatter:"Scatter",trend:"Trend",pareto:"Pareto"})[spec.type];
   const measured = spec.type === "pareto" || spec.type === "binmap" ? (spec.binCategory === "soft" ? "SBIN" : "HBIN") : testLabelWithUnits(test);
   const prefix = groupLabel ? `[${categoryName(spec.groupBy === "none" ? "wafer" : spec.groupBy)} ${groupLabel}] ` : "";
   return `${prefix}${measured} vs ${xLabel} · ${kind}`;

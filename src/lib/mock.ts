@@ -1,3 +1,4 @@
+import type { PopulationRequest } from "../types";
 import type {
   BinInfo,
   BinOverviewResponse,
@@ -428,7 +429,16 @@ export async function inspectCsv(_path: string): Promise<CsvInspection> {
   });
 }
 
+function testYield(values: number[], test: TestInfo | undefined, request?: PopulationRequest): number | null {
+  const lo = request?.lsl ?? test?.loSpec;
+  const hi = request?.usl ?? test?.hiSpec;
+  if (!values.length || (lo == null && hi == null) || (lo != null && hi != null && lo > hi)) return null;
+  const passed = values.filter(v => (lo == null || v >= lo) && (hi == null || v <= hi)).length;
+  return 100 * passed / values.length;
+}
+
 export async function boxPlot(req: {
+  population?: PopulationRequest;
   test: number;
   xAxis: string;
   groupBy?: string | null;
@@ -518,7 +528,20 @@ export async function boxPlot(req: {
   const summary = summarize(all);
   const test = ds.tests[req.test];
   const { cp, cpk } = cpCpk(all, test?.loSpec ?? null, test?.hiSpec ?? null);
+  const populations = new Map<string, number[]>();
+  if (groupBy && req.population?.split) {
+    for (const group of ordered) {
+      const values = populations.get(group.groupLabel) ?? [];
+      for (const v of group.values) values.push(v);
+      populations.set(group.groupLabel, values);
+    }
+  }
+  const groupStats = Object.fromEntries([...populations].map(([label, values]) => [label, {
+    summary: summarize(values), testYieldPct: testYield(values, test, req.population),
+  }]));
   return Promise.resolve({
+    groupStats,
+    testYieldPct: testYield(all, test, req.population),
     groups: ordered.map((g) => {
       const summary = summarize(g.values);
       return {
@@ -981,6 +1004,7 @@ export async function pareto(req: {
 }
 
 export async function histogram(req: {
+  population?: PopulationRequest;
   test: number;
   filter: Filter;
   bins?: number | null;
@@ -1013,6 +1037,7 @@ export async function histogram(req: {
       counts: [],
       groups: [],
       summary: emptySummary(),
+      testYieldPct: null,
       test,
       lsl: test?.loSpec ?? null,
       usl: test?.hiSpec ?? null,
@@ -1041,24 +1066,29 @@ export async function histogram(req: {
   for (const v of vals) counts[binIndex(v)]++;
 
   const groupBy = req.groupBy && req.groupBy !== "none" ? req.groupBy : null;
-  const grouped = new Map<string, { key: number; label: string; counts: number[] }>();
+  const grouped = new Map<string, { key: number; label: string; counts: number[]; values: number[] }>();
   if (groupBy) {
     for (const r of kept) {
       const c = categoryFor(ds, r.w, r.i, groupBy);
       let g = grouped.get(c.name);
       if (!g) {
-        g = { key: c.code, label: c.name, counts: new Array(nBins).fill(0) };
+        g = { key: c.code, label: c.name, counts: new Array(nBins).fill(0), values: [] };
         grouped.set(c.name, g);
       }
       g.counts[binIndex(r.v)]++;
+      g.values.push(r.v);
     }
   }
-  const groups = [...grouped.values()].sort((a, b) => naturalCompare(a.label, b.label));
+  const groups = [...grouped.values()].sort((a, b) => naturalCompare(a.label, b.label))
+    .map(({ values, ...group }) => ({
+      ...group, stats: { summary: summarize(values), testYieldPct: testYield(values, test, req.population) },
+    }));
   return delay({
     edges,
     counts,
     groups,
     summary,
+    testYieldPct: testYield(vals, test, req.population),
     test,
     lsl: test?.loSpec ?? null,
     usl: test?.hiSpec ?? null,

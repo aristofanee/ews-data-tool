@@ -1,3 +1,5 @@
+import { DetailStats } from "./DetailStats";
+import { statsFor } from "../lib/plotStats";
 import { useRestorePlotSelection } from "../lib/usePlotMemory";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Filter, ParetoResponse, PlotSpec, PlotSelection } from "../types";
@@ -160,41 +162,43 @@ export function ParetoFacetView({ spec, filter, onReady, onSelection }: Props) {
     return <div className="chart-placeholder">No dice match the current filters.</div>;
   }
 
-  if (selected !== null && entries[selected]) {
-    const entry = entries[selected];
+  const detailIndex = selected ?? (entries.length === 1 ? 0 : null);
+  if (detailIndex !== null && entries[detailIndex]) {
+    const entry = entries[detailIndex];
     return (
       <div className="facet-detail">
         <div className="facet-detail-head">
-          <button className="btn map-detail-back" onClick={() => setSelected(null)} title="Back to all plots">
+          {entries.length > 1 && <button className="btn map-detail-back" onClick={() => setSelected(null)} title="Back to all plots">
             <IconArrowLeft size={14} />
             All plots
-          </button>
+          </button>}
           <div className="facet-detail-title">{entry.label}</div>
-          <div className="map-detail-nav">
+          <DetailStats stats={statsFor({ kind: "pareto", data: entry.data }, spec, { label: entry.label })} />
+          {entries.length > 1 && <div className="map-detail-nav">
             <button
               className="btn icon"
-              onClick={() => setSelected(Math.max(0, selected - 1))}
-              disabled={selected <= 0}
+              onClick={() => setSelected(Math.max(0, detailIndex - 1))}
+              disabled={detailIndex <= 0}
               title="Previous plot (left arrow)"
             >
               <IconChevronLeft size={16} />
             </button>
             <span className="map-detail-count">
-              {selected + 1} / {entries.length}
+              {detailIndex + 1} / {entries.length}
             </span>
             <button
               className="btn icon"
-              onClick={() => setSelected(Math.min(entries.length - 1, selected + 1))}
-              disabled={selected >= entries.length - 1}
+              onClick={() => setSelected(Math.min(entries.length - 1, detailIndex + 1))}
+              disabled={detailIndex >= entries.length - 1}
               title="Next plot (right arrow)"
             >
               <IconChevronRight size={16} />
             </button>
-          </div>
+          </div>}
         </div>
         <div className="facet-detail-body">
           <PlotlyChart
-            cacheKey={`${viewKey}:${entries[selected].label}`}
+            cacheKey={`${viewKey}:${entry.label}`}
             key={entry.label}
             figure={figurePareto(entry.data, { theme, spec, title: undefined })}
           />

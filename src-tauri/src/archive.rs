@@ -7,7 +7,7 @@ fn is_stdf_member(name: &str) -> bool {
     let parts: Vec<_> = normalized.split('/').collect();
     let base = parts.last().copied().unwrap_or("");
     if base.is_empty() || base.starts_with("._") || parts.contains(&"__MACOSX") { return false; }
-    matches!(base.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str(), "stdf" | "std" | "z")
+    matches!(base.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str(), "stdf" | "std" | "z" | "gz")
 }
 
 /// Process one member at a time in archive order. Member paths are provenance
@@ -22,7 +22,7 @@ fn import_zip_reader<R: Read + Seek>(reader: R, source: &str, progress: &mut dyn
     let members: Vec<_> = (0..archive.len()).filter_map(|index| {
         archive.name_for_index(index).filter(|name| is_stdf_member(name)).map(|name| (index, name.to_owned()))
     }).collect();
-    if members.is_empty() { return Err(format!("ZIP {source} contains no .stdf, .std or .Z files")); }
+    if members.is_empty() { return Err(format!("ZIP {source} contains no .stdf, .std, .Z or .gz files")); }
     let count = members.len() as f32;
     for (position, (index, name)) in members.into_iter().enumerate() {
         let label = format!("{source}!{name}");
@@ -77,18 +77,22 @@ mod tests {
     }
 
     #[test]
-    fn reads_nested_plain_and_z_stdf_from_stored_and_deflated_zip() {
+    fn reads_nested_plain_z_and_gzip_stdf_from_stored_and_deflated_zip() {
+        use std::io::Write;
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gzip.write_all(&stdf(2, 3.75)).unwrap();
         let entries = [
             ("nested/first.STDF.Z", crate::z_decode::tests::literal_stream(&stdf(0, 1.25))),
             ("nested/second.std", stdf(1, 2.5)),
+            ("nested/third.stdf.gZ", gzip.finish().unwrap()),
             ("readme.txt", b"ignored".to_vec()),
             ("__MACOSX/._third.stdf.Z", b"resource fork ignored".to_vec()),
         ];
         for method in [CompressionMethod::Stored, CompressionMethod::Deflated] {
             let ds = load(zip(&entries, method)).unwrap();
-            assert_eq!(ds.rows, 2); assert_eq!(ds.cols[0], vec![1.25, 2.5]);
-            assert_eq!(ds.site, vec![Some(3), Some(3)]);
-            assert_eq!(ds.files.len(), 2);
+            assert_eq!(ds.rows, 3); assert_eq!(ds.cols[0], vec![1.25, 2.5, 3.75]);
+            assert_eq!(ds.site, vec![Some(3), Some(3), Some(3)]);
+            assert_eq!(ds.files.len(), 3);
             assert_eq!(ds.files[0], "lot.zip!nested/first.STDF.Z");
         }
     }

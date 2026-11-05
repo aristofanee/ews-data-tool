@@ -2,6 +2,7 @@ import { useStore } from "../store";
 import { isTauri } from "../lib/api";
 import { fmtInt } from "../lib/format";
 import { IconAlert, IconX } from "./Icons";
+import { version } from "../../package.json";
 
 export function StatusBar() {
   const info = useStore((s) => s.info);
@@ -22,7 +23,7 @@ export function StatusBar() {
       </div>
       <div className="status-right">
         {!isTauri && <span className="demo-badge">browser demo</span>}
-        <span>v0.5.2</span>
+        <span>v{version}</span>
         <span className="meta-dot" />
         <span>offline</span>
       </div>

@@ -1093,6 +1093,7 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistRequest {
+    pub range: Option<HistRange>,
     pub population: Option<PopulationRequest>,
     pub test: usize,
     #[serde(default)]
@@ -1102,9 +1103,28 @@ pub struct HistRequest {
     pub group_by: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistRange {
+    limit_mode: String,
+    limit_k: f64,
+    y_min: Option<f64>,
+    y_max: Option<f64>,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistogramBins {
+    pub edges: Vec<f64>,
+    pub counts: Vec<u32>,
+    pub bin_range: Option<[f64; 2]>,
+    pub fit_summary: Summary,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistGroup {
+    pub histogram: Option<HistogramBins>,
     pub stats: PopulationStats,
     pub key: u16,
     pub label: String,
@@ -1115,8 +1135,8 @@ pub struct HistGroup {
 #[serde(rename_all = "camelCase")]
 pub struct HistResponse {
     pub test_yield_pct: Option<f64>,
-    pub edges: Vec<f32>,
-    pub counts: Vec<u32>,
+    #[serde(flatten)]
+    pub histogram: HistogramBins,
     pub groups: Vec<HistGroup>,
     pub summary: Summary,
     pub test: TestInfo,
@@ -1136,6 +1156,76 @@ fn auto_hist_bins(n: usize, s: &Summary) -> usize {
     proposed.clamp(8.min(cap), cap)
 }
 
+fn histogram_window(s: &Summary, req: &HistRequest, test: &TestInfo) -> Option<[f64; 2]> {
+    let [min, max, q1, q3, mean, sd] = [s.min, s.max, s.q1, s.q3, s.mean, s.sd].map(f64::from);
+    let iqr = q3 - q1;
+    if let Some(range) = req.range.as_ref() {
+        let k = range.limit_k;
+        let population = req.population.as_ref();
+        let window = match range.limit_mode.as_str() {
+            "manual" => [range.y_min.unwrap_or(min), range.y_max.unwrap_or(max)],
+            "spec" => [
+                population.and_then(|p| p.lsl).or(test.lo_spec).map(f64::from).unwrap_or(min),
+                population.and_then(|p| p.usl).or(test.hi_spec).map(f64::from).unwrap_or(max),
+            ],
+            "iqr" if iqr > 0.0 => [q1 - k * iqr, q3 + k * iqr],
+            "sigma" if sd > 0.0 => [mean - k * sd, mean + k * sd],
+            "auto" => [f64::NAN; 2],
+            _ => return None,
+        };
+        if range.limit_mode != "auto" {
+            return (window[0].is_finite() && window[1].is_finite() && window[1] > window[0]).then_some(window);
+        }
+    }
+    // Keep ordinary tails. Only focus Auto when the full span dwarfs the outer IQR fences.
+    let lo = min.max(q1 - 3.0 * iqr);
+    let hi = max.min(q3 + 3.0 * iqr);
+    (iqr > 0.0 && max - min > 4.0 * (hi - lo)).then_some([lo, hi])
+}
+
+fn histogram_counts(values: &[f32], edges: &[f64]) -> Vec<u32> {
+    let n = edges.len() - 1;
+    let lo = edges[0];
+    let hi = edges[n];
+    let width = (hi - lo) / n as f64;
+    let mut counts = vec![0; n];
+    for &value in values {
+        if value >= lo as f32 && value <= hi as f32 {
+            let index = ((f64::from(value) - lo) / width) as usize;
+            counts[index.min(n - 1)] += 1;
+        }
+    }
+    counts
+}
+
+fn histogram_bins(values: &[f32], summary: &Summary, req: &HistRequest, test: &TestInfo) -> HistogramBins {
+    let mut bin_range = histogram_window(summary, req, test);
+    let [mut lo, mut hi] = bin_range.unwrap_or([f64::from(summary.min), f64::from(summary.max)]);
+    let visible_summary = if bin_range.is_some() && (lo > f64::from(summary.min) || hi < f64::from(summary.max)) {
+        summarize(&values.iter().copied().filter(|&v| v >= lo as f32 && v <= hi as f32).collect::<Vec<_>>())
+    } else {
+        summary.clone()
+    };
+    if bin_range.is_some() && req.range.as_ref().is_none_or(|r| r.limit_mode == "auto") &&
+        visible_summary.min < visible_summary.max {
+        lo = f64::from(visible_summary.min);
+        hi = f64::from(visible_summary.max);
+        bin_range = Some([lo, hi]);
+    }
+    let mut bin_stats = visible_summary.clone();
+    if bin_range.is_some() {
+        bin_stats.min = lo as f32;
+        bin_stats.max = hi as f32;
+    }
+    let n = req.bins.filter(|&n| n > 0).unwrap_or_else(|| auto_hist_bins(bin_stats.n, &bin_stats));
+    if hi <= lo { hi = lo + lo.abs().max(1.0) * 1e-6; }
+    let width = (hi - lo) / n as f64;
+    let mut edges: Vec<_> = (0..n).map(|i| lo + width * i as f64).collect();
+    edges.push(hi);
+    let counts = histogram_counts(values, &edges);
+    HistogramBins { edges, counts, bin_range, fit_summary: visible_summary }
+}
+
 pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
     let test = ds
         .tests
@@ -1145,8 +1235,7 @@ pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
     if req.test >= ds.cols.len() || ds.cols[req.test].is_empty() {
         return HistResponse {
             test_yield_pct: None,
-            edges: Vec::new(),
-            counts: Vec::new(),
+            histogram: HistogramBins::default(),
             groups: Vec::new(),
             summary: Summary::default(),
             test,
@@ -1181,8 +1270,7 @@ pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
     if vals.is_empty() {
         return HistResponse {
             test_yield_pct: None,
-            edges: Vec::new(),
-            counts: Vec::new(),
+            histogram: HistogramBins::default(),
             groups: Vec::new(),
             summary,
             test,
@@ -1191,29 +1279,7 @@ pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
             excluded,
         };
     }
-    let (lo, hi) = (summary.min, summary.max);
-    let n_bins = req.bins.unwrap_or_else(|| auto_hist_bins(vals.len(), &summary));
-    let n_bins = n_bins.max(1);
-    let width = if hi > lo {
-        (hi - lo) / n_bins as f32
-    } else {
-        1.0
-    };
-    let mut edges = Vec::with_capacity(n_bins + 1);
-    for i in 0..=n_bins {
-        edges.push(lo + width * i as f32);
-    }
-    let bin_index = |v: f32| {
-        let mut idx = ((v - lo) / width) as usize;
-        if idx >= n_bins {
-            idx = n_bins - 1;
-        }
-        idx
-    };
-    let mut counts = vec![0u32; n_bins];
-    for v in vals.iter() {
-        counts[bin_index(*v)] += 1;
-    }
+    let histogram = histogram_bins(&vals, &summary, req, &test);
     let mut group_rows: Vec<(u16, String, Vec<f32>)> = grouped
         .into_iter()
         .map(|(key, (label, values))| (key, label, values))
@@ -1222,25 +1288,23 @@ pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
     let groups = group_rows
         .into_iter()
         .map(|(key, label, values)| {
-            let mut gc = vec![0u32; n_bins];
-            for &v in &values {
-                gc[bin_index(v)] += 1;
-            }
+            let summary = summarize(&values);
+            let split = req.population.as_ref().is_some_and(|p| p.split);
             HistGroup {
+                histogram: split.then(|| histogram_bins(&values, &summary, req, &test)),
                 stats: PopulationStats {
-                    summary: summarize(&values),
+                    summary,
                     test_yield_pct: test_yield(&values, &test, req.population.as_ref()),
                 },
                 key,
                 label,
-                counts: gc,
+                counts: histogram_counts(&values, &histogram.edges),
             }
         })
         .collect();
     HistResponse {
         test_yield_pct: test_yield(&vals, &test, req.population.as_ref()),
-        edges,
-        counts,
+        histogram,
         groups,
         summary,
         lsl: test.lo_spec,
@@ -1780,6 +1844,37 @@ mod tests {
         assert_eq!(super::auto_hist_bins(1000, &crate::stats::summarize(&vec![1.0; 1000])), 1);
         assert!(super::auto_hist_bins(2, &crate::stats::summarize(&[1.0, 2.0])) <= 2);
     }
+
+    #[test]
+    fn histogram_ranges_rebin_without_changing_population_statistics() {
+        let core: Vec<f32> = (0..1000).map(|i| 1.0 + (i % 100) as f32 * 0.001).collect();
+        let mut values = core.clone();
+        values.push(100000.0);
+        let mut ds = small_dataset(&values);
+        ds.site = (0..values.len()).map(|i| Some(if i < 500 { 0 } else { 1 })).collect();
+        let mut request = HistRequest {
+            range: None, population: Some(PopulationRequest { lsl: Some(1.01), usl: Some(1.08), split: true }),
+            test: 0, filter: Filter::default(), bins: None, group_by: Some("site".into()),
+        };
+        let auto = histogram(&ds, &request);
+        let clean = histogram(&small_dataset(&core), &request);
+        assert_eq!(auto.histogram.edges, clean.histogram.edges);
+        assert_eq!(auto.histogram.counts, clean.histogram.counts);
+        assert_eq!(auto.summary.n, 1001);
+        assert_eq!(auto.histogram.fit_summary.n, 1000);
+
+        request.range = Some(HistRange { limit_mode: "manual".into(), limit_k: 3.0, y_min: Some(1.01), y_max: Some(1.08) });
+        request.bins = Some(20);
+        let manual = histogram(&ds, &request);
+        assert_eq!(manual.histogram.bin_range, Some([1.01, 1.08]));
+        assert_eq!(manual.histogram.counts.len(), 20);
+        assert_eq!(manual.summary.n, auto.summary.n);
+        assert_eq!(manual.summary.mean, auto.summary.mean);
+        assert_eq!(manual.summary.sd, auto.summary.sd);
+        assert_eq!(manual.test_yield_pct, auto.test_yield_pct);
+        assert_eq!(manual.histogram.fit_summary.n, 710);
+        assert_eq!(manual.groups.iter().map(|g| g.histogram.as_ref().unwrap().fit_summary.n).sum::<usize>(), 710);
+    }
     use super::*;
     use crate::model::{StatFilter, StatKind, TestInfo, WaferInfo};
     use crate::stdf::import_stdf;
@@ -1855,7 +1950,7 @@ mod tests {
             population: population(), test: 0, x_axis: "wafer".into(), group_by: Some("site".into()),
             filter: Filter::default(), max_points: Some(1),
         });
-        let h = histogram(&ds, &HistRequest {
+        let h = histogram(&ds, &HistRequest { range: None,
             population: population(), test: 0, group_by: Some("site".into()),
             filter: Filter::default(), bins: Some(2),
         });
@@ -2132,7 +2227,7 @@ mod tests {
 
         let hi = histogram(
             &ds,
-            &HistRequest {
+            &HistRequest { range: None,
                 population: None,
                 test,
                 filter: filter.clone(),
@@ -2140,8 +2235,8 @@ mod tests {
                 group_by: None,
             },
         );
-        assert_eq!(hi.counts.len(), 40);
-        assert!(hi.counts.iter().map(|c| *c as usize).sum::<usize>() > 0);
+        assert_eq!(hi.histogram.counts.len(), 40);
+        assert!(hi.histogram.counts.iter().map(|c| *c as usize).sum::<usize>() > 0);
 
         let tr = trend(
             &ds,

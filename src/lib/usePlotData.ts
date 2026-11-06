@@ -34,6 +34,7 @@ export function usePlotData(): PlotDataState {
   const dataVersion = useStore((s) => s.dataVersion);
   const [state, setState] = useState<PlotDataState>({ data: null, loading: false, error: null });
   const [responseKey, setResponseKey] = useState<string | null>(null);
+  const maxPoints = api.plotPointLimit(spec);
 
   const key = JSON.stringify({
     generation: mapGeneration(),
@@ -51,8 +52,10 @@ export function usePlotData(): PlotDataState {
     scatterY: spec.scatterY,
     scatterZMode: spec.scatterZMode,
     scatterZTest: spec.scatterZTest,
+    maxPoints,
     filters,
     population: spec.type === "box" || spec.type === "hist" ? [spec.lsl, spec.usl, spec.splitPlots] : null,
+    histogramRange: spec.type === "hist" ? api.histogramOptions(spec).range : null,
     dataVersion,
   });
 
@@ -72,6 +75,7 @@ export function usePlotData(): PlotDataState {
             result = {
               kind: "box",
               data: await api.boxPlot({
+                maxPoints,
                 population: { lsl: spec.lsl, usl: spec.usl, split: spec.splitPlots },
                 test: spec.test,
                 xAxis: spec.xAxis,
@@ -119,7 +123,7 @@ export function usePlotData(): PlotDataState {
             result = {
               kind: "hist",
               data: await api.histogram({
-                population: { lsl: spec.lsl, usl: spec.usl, split: spec.splitPlots },
+                ...api.histogramOptions(spec),
                 test: spec.test,
                 filter: filters,
                 bins: spec.bins,
@@ -143,6 +147,7 @@ export function usePlotData(): PlotDataState {
             result = {
               kind: "scatter",
               data: await api.scatter({
+                maxPoints,
                 xTest: spec.scatterX,
                 yTest: spec.scatterY,
                 zMode: spec.scatterZMode,

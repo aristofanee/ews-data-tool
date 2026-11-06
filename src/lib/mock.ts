@@ -8,6 +8,8 @@ import type {
   DatasetInfo,
   Filter,
   HistResponse,
+  HistogramBins,
+  PlotSpec,
   MapResponse,
   ParetoGroup,
   ParetoResponse,
@@ -20,7 +22,7 @@ import type {
   TrendResponse,
   WaferInfo,
 } from "../types";
-import { cpCpk, keepMask, naturalCompare, summarize, scatterStatistics } from "./stats";
+import { cpCpk, keepMask, limitRange, naturalCompare, summarize, scatterStatistics } from "./stats";
 
 /* ------------------------------------------------------------------ */
 /* Synthetic dataset used when the app runs in a plain browser (dev).  */
@@ -526,6 +528,9 @@ export async function boxPlot(req: {
   }
 
   const summary = summarize(all);
+  // Match the desktop query's marker budget without sampling the statistics.
+  const cap = Math.max(1, req.maxPoints ?? 30_000);
+  const stride = Math.max(1, Math.ceil(all.length / cap));
   const test = ds.tests[req.test];
   const { cp, cpk } = cpCpk(all, test?.loSpec ?? null, test?.hiSpec ?? null);
   const populations = new Map<string, number[]>();
@@ -544,16 +549,33 @@ export async function boxPlot(req: {
     testYieldPct: testYield(all, test, req.population),
     groups: ordered.map((g) => {
       const summary = summarize(g.values);
+      const positiveSummary = g.values.every(v => v > 0) ? summary : summarize(g.values.filter(v => v > 0));
+      let { values, xs, ys } = g;
+      if (stride > 1) {
+        values = []; xs = []; ys = [];
+        const fences = [summary, positiveSummary].map(s => {
+          const pad = 1.5 * (s.q3 - s.q1);
+          return [s.q1 - pad, s.q3 + pad];
+        });
+        const [[lo, hi], [positiveLo, positiveHi]] = fences;
+        for (const [i, v] of g.values.entries()) {
+          if (i % stride === 0 || v < lo || v > hi || (v > 0 && (v < positiveLo || v > positiveHi))) {
+            values.push(v);
+            xs.push(g.xs[i]);
+            ys.push(g.ys[i]);
+          }
+        }
+      }
       return {
         summary,
-        positiveSummary: g.values.every((v) => v > 0) ? summary : summarize(g.values.filter((v) => v > 0)),
+        positiveSummary,
         xKey: g.xKey,
         xLabel: g.xLabel,
         groupKey: g.groupKey,
         groupLabel: g.groupLabel,
-        values: g.values,
-        xs: g.xs,
-        ys: g.ys,
+        values,
+        xs,
+        ys,
         n: g.values.length,
       };
     }),
@@ -576,7 +598,7 @@ export async function boxPlot(req: {
     cp,
     cpk,
     excluded,
-    truncated: false,
+    truncated: stride > 1,
   });
 }
 
@@ -1003,8 +1025,56 @@ export async function pareto(req: {
   });
 }
 
+type HistogramRange = Pick<PlotSpec, "limitMode" | "limitK" | "yMin" | "yMax">;
+
+function histogramCounts(values: number[], edges: number[]): number[] {
+  const n = edges.length - 1;
+  const lo = edges[0], hi = edges[n];
+  const width = (hi - lo) / n;
+  const counts = new Array<number>(n).fill(0);
+  for (const v of values) {
+    if (v >= lo && v <= hi) counts[Math.min(n - 1, Math.floor((v - lo) / width))]++;
+  }
+  return counts;
+}
+
+function histogramBins(values: number[], summary: Summary, req: {
+  bins?: number | null;
+  range?: HistogramRange;
+  population?: PopulationRequest;
+}, test: TestInfo): HistogramBins {
+  const { min, max, q1, q3 } = summary;
+  const iqr = q3 - q1;
+  const robustLo = Math.max(min, q1 - 3 * iqr);
+  const robustHi = Math.min(max, q3 + 3 * iqr);
+  const candidate: HistogramBins["binRange"] = req.range && req.range.limitMode !== "auto"
+    ? limitRange(req.range, summary, req.population?.lsl ?? test.loSpec, req.population?.usl ?? test.hiSpec, min, max)
+    : iqr > 0 && max - min > 4 * (robustHi - robustLo) ? [robustLo, robustHi] : null;
+  let binRange = candidate?.every(Number.isFinite) && candidate[1] > candidate[0] ? candidate : null;
+  let [lo, hi] = binRange ?? [min, max];
+  const fitSummary = lo > min || hi < max
+    ? summarize(values.filter(v => v >= lo && v <= hi)) : summary;
+  if (binRange && (!req.range || req.range.limitMode === "auto") && fitSummary.min < fitSummary.max) {
+    lo = fitSummary.min;
+    hi = fitSummary.max;
+    binRange = [lo, hi];
+  }
+  const n = fitSummary.n;
+  let nBins = req.bins ?? 0;
+  if (!nBins) {
+    const cap = Math.max(1, Math.min(80, Math.ceil(2 * (Math.log2(n) + 1)), Math.ceil(Math.sqrt(n))));
+    const width = 2 * (fitSummary.q3 - fitSummary.q1) / Math.cbrt(n);
+    const proposed = width > 0 ? Math.ceil((hi - lo) / width) : cap;
+    nBins = n <= 1 || hi <= lo ? 1 : Math.min(cap, Math.max(Math.min(8, cap), proposed));
+  }
+  const end = hi > lo ? hi : lo + Math.max(Math.abs(lo), 1) * 1e-6;
+  const edges = Array.from({ length: nBins + 1 }, (_, i) => i === nBins ? end : lo + (end - lo) / nBins * i);
+  return { edges, counts: histogramCounts(values, edges), fitSummary, binRange };
+}
+
 export async function histogram(req: {
   population?: PopulationRequest;
+  range?: HistogramRange;
   test: number;
   filter: Filter;
   bins?: number | null;
@@ -1035,6 +1105,8 @@ export async function histogram(req: {
     return delay({
       edges: [],
       counts: [],
+      binRange: null,
+      fitSummary: emptySummary(),
       groups: [],
       summary: emptySummary(),
       testYieldPct: null,
@@ -1044,48 +1116,32 @@ export async function histogram(req: {
       excluded: before,
     });
   }
-  let nBins = req.bins ?? 0;
-  if (!nBins) {
-    const cap = Math.max(1, Math.min(80, Math.ceil(2 * (Math.log2(vals.length) + 1)), Math.ceil(Math.sqrt(vals.length))));
-    const iqr = summary.q3 - summary.q1;
-    const w = iqr > 0 ? (2 * iqr) / Math.cbrt(vals.length) : 0;
-    nBins = w > 0 ? Math.ceil((summary.max - summary.min) / w) : Math.ceil(Math.sqrt(vals.length));
-    nBins = summary.max <= summary.min ? 1 : Math.min(cap, Math.max(Math.min(8, cap), nBins));
-  }
-  const lo = summary.min;
-  const hi = summary.max;
-  const width = hi > lo ? (hi - lo) / nBins : 1;
-  const edges = Array.from({ length: nBins + 1 }, (_, i) => lo + width * i);
-  const binIndex = (v: number) => {
-    let idx = Math.floor((v - lo) / width);
-    if (idx < 0) idx = 0;
-    if (idx >= nBins) idx = nBins - 1;
-    return idx;
-  };
-  const counts = new Array(nBins).fill(0);
-  for (const v of vals) counts[binIndex(v)]++;
+  const histogram = histogramBins(vals, summary, req, test);
 
   const groupBy = req.groupBy && req.groupBy !== "none" ? req.groupBy : null;
-  const grouped = new Map<string, { key: number; label: string; counts: number[]; values: number[] }>();
+  const grouped = new Map<string, { key: number; label: string; values: number[] }>();
   if (groupBy) {
     for (const r of kept) {
       const c = categoryFor(ds, r.w, r.i, groupBy);
       let g = grouped.get(c.name);
       if (!g) {
-        g = { key: c.code, label: c.name, counts: new Array(nBins).fill(0), values: [] };
+        g = { key: c.code, label: c.name, values: [] };
         grouped.set(c.name, g);
       }
-      g.counts[binIndex(r.v)]++;
       g.values.push(r.v);
     }
   }
   const groups = [...grouped.values()].sort((a, b) => naturalCompare(a.label, b.label))
-    .map(({ values, ...group }) => ({
-      ...group, stats: { summary: summarize(values), testYieldPct: testYield(values, test, req.population) },
-    }));
+    .map(({ values, ...group }) => {
+      const summary = summarize(values);
+      return {
+        ...group, counts: histogramCounts(values, histogram.edges),
+        stats: { summary, testYieldPct: testYield(values, test, req.population) },
+        histogram: req.population?.split ? histogramBins(values, summary, req, test) : null,
+      };
+    });
   return delay({
-    edges,
-    counts,
+    ...histogram,
     groups,
     summary,
     testYieldPct: testYield(vals, test, req.population),
@@ -1467,7 +1523,7 @@ export async function limitCounts(req: import("./api").LimitCountsRequest): Prom
     const groups=data.series.map(s=>({label:s.name,total:s.points.length,inLimits:has?s.points.filter(p=>(req.lsl===null||p.y>=req.lsl)&&(req.usl===null||p.y<=req.usl)).length:null}));
     return {total:groups.reduce((n,g)=>n+g.total,0),inLimits:has?groups.reduce((n,g)=>n+(g.inLimits??0),0):null,groups};
   }
-  const box = await boxPlot({test: req.test, filter: req.filter, xAxis: "wafer", groupBy: req.groupBy});
+  const box = await boxPlot({test: req.test, filter: req.filter, xAxis: "wafer", groupBy: req.groupBy, maxPoints: Number.MAX_SAFE_INTEGER});
   const hasLimits = req.lsl !== null || req.usl !== null;
   const groups = new Map<string, import("./api").LimitCount>();
   let total = 0, inLimits = 0;

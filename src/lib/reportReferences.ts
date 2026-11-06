@@ -204,7 +204,7 @@ export function validateTemplate(value:unknown):asserts value is import("../stor
     if(!p?.spec||!types.includes(p.spec.type)||typeof p.spec.title!=="string"||p.filters&&!filter(p.filters))throw new Error("Invalid report item in template.");
     for(const field of ["test","scatterX","scatterY","scatterZTest"])if(p.spec[field]!=null&&(!Number.isInteger(p.spec[field])||p.spec[field]<0))throw new Error("Invalid test reference in template.");
     for(const field of ["xAxis","groupBy","title"])if(p.spec[field]!==undefined&&typeof p.spec[field]!=="string")throw new Error("Invalid plot category or title.");
-    for(const field of ["logY","showLimits","splitPlots","showNormal","showBand","scatterFit"])if(p.spec[field]!==undefined&&typeof p.spec[field]!=="boolean")throw new Error("Invalid plot option.");
+    for(const field of ["logY","showLimits","splitPlots","showNormal","showBand","scatterFit","displayAllData"])if(p.spec[field]!==undefined&&typeof p.spec[field]!=="boolean")throw new Error("Invalid plot option.");
     for(const field of ["lsl","usl","yMin","yMax","limitK","top","bins","edgeExclusion"])if(p.spec[field]!=null&&!Number.isFinite(p.spec[field]))throw new Error("Invalid numeric plot option.");
     if(p.spec.limitMode!==undefined&&!["auto","manual","spec","sigma","iqr"].includes(p.spec.limitMode))throw new Error("Invalid limit mode.");
     if(p.spec.binCategory!==undefined&&!["hard","soft"].includes(p.spec.binCategory))throw new Error("Invalid bin category.");

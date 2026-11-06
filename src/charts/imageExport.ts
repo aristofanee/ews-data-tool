@@ -1,10 +1,10 @@
 import Plotly from "plotly.js-dist-min";
 import type { Figure } from "./figures";
-import type { DatasetInfo, Filter, PlotSpec, TestInfo, PlotType } from "../types";
+import type { DatasetInfo, Filter, PlotSpec, Summary, TestInfo, PlotType } from "../types";
 import { EXPORT_CONFIG, CHART_FONT } from "./plotlyTheme";
 import * as api from "../lib/api";
 import { emptyFilter } from "../types";
-import { testLabelWithUnits } from "../lib/format";
+import { fmt, testLabelWithUnits } from "../lib/format";
 import { graphFontOffset } from "../lib/demoFonts";
 import { drawExportBoundaryLimits } from "./limitLineClipping";
 
@@ -15,6 +15,7 @@ export const SQUARE_IMAGE_HEIGHT = 2100;
 export const imageHeight = (type: PlotType) => ["map", "binmap", "scatter"].includes(type) ? SQUARE_IMAGE_HEIGHT : IMAGE_HEIGHT;
 export interface ExportPlotStyle {
   spec: PlotSpec; test: TestInfo | null; xLabel: string; total: number; facetLabel?: string;
+  statistics?: string;
 }
 export { categoryName } from "../lib/categoryNames";
 import { categoryName } from "../lib/categoryNames";
@@ -35,6 +36,12 @@ export function limitFooter(total: number, inside: number | null, lsl: number | 
 }
 export const JPEG_QUALITY = 0.96;
 
+export function statisticsFooter(summary: Pick<Summary, "n" | "mean" | "sd">, cpk: number | null = null): string {
+  if (!summary.n || !Number.isFinite(summary.mean) || !Number.isFinite(summary.sd)) return "";
+  const suffix = cpk !== null && Number.isFinite(cpk) ? ` - Cpk: ${fmt(cpk, 2)}` : "";
+  return `Mean: ${fmt(summary.mean)} - SD: ${fmt(summary.sd)}${suffix}`;
+}
+
 /** Wrap every character, including identifiers with no spaces, without clipping. */
 export function wrapImageText(ctx: CanvasRenderingContext2D, text: string, width: number): string[] {
   const lines: string[] = [];
@@ -54,7 +61,7 @@ export function wrapImageText(ctx: CanvasRenderingContext2D, text: string, width
 }
 
 /** One layout coordinate system for all chart/map exports; final dimensions are exact. */
-export function imageFrame(width: number, height: number, title: string, subtitle = "", presentation = false, notes: string[] = []) {
+export function imageFrame(width: number, height: number, title: string, subtitle = "", presentation = false, notes: string[] = [], statistics = "") {
   const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
   const ctx = canvas.getContext("2d"); if (!ctx) throw new Error("Image canvas unavailable");
   const scale = width / 1200, logicalHeight = height / scale;
@@ -70,15 +77,23 @@ export function imageFrame(width: number, height: number, title: string, subtitl
   for (const line of wrapImageText(ctx, subtitle, available)) { ctx.fillText(line, padding, y); y += textSize * 1.4; }
   const top = Math.ceil(y + 12);
   ctx.font = `400 ${Math.min(textSize, 15)}px ${CHART_FONT}`;
-  const foot = notes.flatMap(note => wrapImageText(ctx, note, available));
+  const leftWidth = statistics ? available - ctx.measureText(statistics).width - 24 : available;
+  const foot = notes.flatMap(note => wrapImageText(ctx, note, leftWidth));
   const lineHeight = Math.min(textSize, 15) * 1.4;
-  const bottom = foot.length ? foot.length * lineHeight + 20 : 12;
+  const rows = Math.max(foot.length, statistics ? 1 : 0);
+  const bottom = rows ? rows * lineHeight + 20 : 12;
   const contentHeight = Math.floor(logicalHeight - top - bottom);
   if (contentHeight < 180) throw new Error("The image title or notes are too long to leave space for the plot. Shorten the title.");
   const drawNotes = (values: string[]) => {
     ctx.fillStyle="#ffffff";ctx.fillRect(0,logicalHeight-bottom,1200,bottom);
     ctx.font=`400 ${Math.min(textSize,15)}px ${CHART_FONT}`;ctx.fillStyle="#000000";ctx.textAlign="left";ctx.textBaseline="top";
-    values.flatMap(note=>wrapImageText(ctx,note,available)).forEach((line,i)=>ctx.fillText(line,padding,logicalHeight-bottom+4+i*lineHeight));
+    const y = logicalHeight - bottom + 4;
+    values.flatMap(note => wrapImageText(ctx, note, leftWidth)).forEach((line, i) => ctx.fillText(line, padding, y + i * lineHeight));
+    if (statistics) {
+      ctx.textAlign = "right";
+      ctx.fillText(statistics, 1200 - padding, y);
+      ctx.textAlign = "left";
+    }
   };
   drawNotes(notes);
   return { canvas, ctx, scale, top, contentHeight, drawNotes };
@@ -99,12 +114,19 @@ export async function renderExportFigure(fig: Figure, format: ImageFormat = "jpe
   let notes: string[] = [];
   if (style) {
     notes = [limitFooter(style.total,null)];
-    if (style.spec.groupBy !== "none" && !style.facetLabel) {
+    if (style.spec.groupBy !== "none" && !style.facetLabel && style.spec.type !== "scatter") {
       const size = layout.font?.size ?? 18;
-      layout.annotations = [...(layout.annotations ?? []), {xref:"paper",yref:"paper",x:0.5,y:1,
-        yshift:size * 2.8,text:categoryName(style.spec.groupBy),showarrow:false,
-        xanchor:"center",yanchor:"bottom",font:{size,color:"#000000"}}];
-      layout.margin = {...layout.margin,t:(layout.margin?.t ?? 54)+size*3.4};
+      const text = categoryName(style.spec.groupBy);
+      if (style.spec.type === "hist") {
+        if (layout.showlegend && layout.legend) {
+          layout.legend.title = { text, side: "top", font: { size, color: "#000000", weight: 400 } };
+        }
+      } else {
+        layout.annotations = [...(layout.annotations ?? []), {xref:"paper",yref:"paper",x:0.5,y:1,
+          yshift:size * 2.8,text,showarrow:false,
+          xanchor:"center",yanchor:"bottom",font:{size,color:"#000000"}}];
+        layout.margin = {...layout.margin,t:(layout.margin?.t ?? 54)+size*3.4};
+      }
     }
   }
   // Stronger export-only typography; preserve data, limit and yield colors.
@@ -122,7 +144,11 @@ export async function renderExportFigure(fig: Figure, format: ImageFormat = "jpe
     annotation.font = {...annotation.font,weight:400};
     if (!/LSL|USL/.test(annotation.text ?? "")) annotation.font = {...annotation.font,color:"#000000",weight:400};
   }
-  const frame = imageFrame(width, height, title, "", layout.meta?.ewsPresentation === true, notes);
+  // Reserve room for the final counts, which are resolved against the rendered axis.
+  const footerSpace = style?.statistics ? [limitFooter(style.total, style.total,
+    style.spec.lsl ?? style.test?.loSpec ?? null, style.spec.usl ?? style.test?.hiSpec ?? null, style.spec)] : notes;
+  const frame = imageFrame(width, height, title, "", layout.meta?.ewsPresentation === true, footerSpace, style?.statistics);
+  if (footerSpace !== notes) frame.drawNotes(notes);
   layout.title = undefined;
   layout.width = 1200; layout.height = frame.contentHeight; layout.autosize = false;
   layout.margin = { ...layout.margin, t: Math.max(24, (layout.margin?.t ?? 54) - 25) };

@@ -49,7 +49,7 @@ mod tests {
         let ds=fixture();let category="data:test:1000 - Code";
         let b=box_plot(&ds,&BoxRequest{population:None,test:1,x_axis:category.into(),group_by:Some(category.into()),filter:Default::default(),max_points:Some(1)});
         assert_eq!(b.groups.len(),2);assert_eq!(b.groups.iter().map(|g|g.summary.n).sum::<usize>(),200);
-        let h=histogram(&ds,&HistRequest{population:None,test:1,bins:Some(4),group_by:Some(category.into()),filter:Default::default()});assert_eq!(h.groups.len(),2);assert_eq!(h.groups.iter().flat_map(|g|&g.counts).sum::<u32>(),200);
+        let h=histogram(&ds,&HistRequest{range:None,population:None,test:1,bins:Some(4),group_by:Some(category.into()),filter:Default::default()});assert_eq!(h.groups.len(),2);assert_eq!(h.groups.iter().flat_map(|g|&g.counts).sum::<u32>(),200);
         let t=trend(&ds,&TrendRequest{test:1,by:category.into(),group_by:Some(category.into()),filter:Default::default()});assert_eq!(t.points.iter().map(|p|p.n).sum::<usize>(),200);
         let s=scatter(&ds,&ScatterRequest{x_test:0,y_test:1,z_mode:ScatterZMode::None,z_col:None,z_test:None,group_by:Some(category.into()),filter:Default::default(),max_points:Some(5)});assert_eq!(s.series.len(),2);assert_eq!(s.group_totals.values().sum::<usize>(),200);
         let p=pareto(&ds,&ParetoRequest{category:BinCategory::Hard,group_by:Some(category.into()),top:Some(10),filter:Default::default()});assert_eq!(p.groups.len(),2);assert_eq!(p.groups.iter().find(|g|g.label=="0").unwrap().yield_pct,100.0);assert_eq!(p.groups.iter().find(|g|g.label=="1").unwrap().yield_pct,0.0);

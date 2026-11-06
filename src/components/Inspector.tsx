@@ -77,14 +77,16 @@ function Check({
   checked,
   onChange,
   disabled,
+  title,
 }: {
   label: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   disabled?: boolean;
+  title?: string;
 }) {
   return (
-    <label className="check-row">
+    <label className="check-row" title={title}>
       <input
         type="checkbox"
         checked={checked}
@@ -239,6 +241,11 @@ export function Inspector() {
               {categoryOptions("None")}
             </select>
           </Row>
+          <Check
+            label="Split into different plots"
+            checked={spec.splitPlots}
+            onChange={(v) => patch({ splitPlots: v })}
+          />
           <Row label="Points">
             <Seg
               value={spec.showPoints}
@@ -251,9 +258,10 @@ export function Inspector() {
             />
           </Row>
           <Check
-            label="Split into different plots"
-            checked={spec.splitPlots}
-            onChange={(v) => patch({ splitPlots: v })}
+            label="Display all data"
+            checked={spec.displayAllData}
+            onChange={(v) => patch({ displayAllData: v })}
+            title="In All points mode, draw every eligible dot in full-size plots and exports. Split thumbnails still sample regular dots."
           />
         </Section>
       )}
@@ -354,6 +362,11 @@ export function Inspector() {
               {categoryOptions("None")}
             </select>
           </Row>
+          <Check
+            label="Split into different plots"
+            checked={spec.splitPlots}
+            onChange={(v) => patch({ splitPlots: v })}
+          />
           <Row label="Bins">
             <Num value={spec.bins} onChange={(v) => patch({ bins: v })} placeholder="auto" step="1" />
           </Row>
@@ -361,12 +374,7 @@ export function Inspector() {
             label="Normal curve overlay"
             checked={spec.showNormal}
             onChange={(v) => patch({ showNormal: v })}
-          />
-          <Check
-            label="Split into different plots"
-            checked={spec.splitPlots}
-            onChange={(v) => patch({ splitPlots: v })}
-            disabled={spec.groupBy === "none"}
+            disabled={spec.groupBy !== "none" && !spec.splitPlots}
           />
         </Section>
       )}
@@ -408,6 +416,11 @@ export function Inspector() {
               {categoryOptions("None")}
             </select>
           </Row>
+          <Check
+            label="Split into different plots"
+            checked={spec.splitPlots}
+            onChange={(v) => patch({ splitPlots: v })}
+          />
           <Row label="Z colour">
             <Seg
               value={spec.scatterZMode}
@@ -437,10 +450,10 @@ export function Inspector() {
             onChange={(v) => patch({ scatterFit: v })}
           />
           <Check
-            label="Split into different plots"
-            checked={spec.splitPlots}
-            onChange={(v) => patch({ splitPlots: v })}
-            disabled={spec.groupBy === "none"}
+            label="Display all data"
+            checked={spec.displayAllData}
+            onChange={(v) => patch({ displayAllData: v })}
+            title="Draw every eligible X/Y pair. Large datasets may take longer to render."
           />
         </Section>
       )}

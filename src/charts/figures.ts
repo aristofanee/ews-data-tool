@@ -8,8 +8,8 @@ import type {
   TrendResponse,
 } from "../types";
 import { axisTitle, fmt, fmtInt, testLabel, tidyName } from "../lib/format";
-import { normalPdf, summarize, scatterStatistics } from "../lib/stats";
-import { categoryName, type ExportPlotStyle } from "./imageExport";
+import { capability, limitRange, mean, normalPdf, stdDev, summarize, scatterStatistics, type AxisStats } from "../lib/stats";
+import { categoryName, statisticsFooter, type ExportPlotStyle } from "./imageExport";
 import type { Filter } from "../types";
 import { graphFontOffset } from "../lib/demoFonts";
 import type { Theme } from "../lib/theme";
@@ -34,6 +34,7 @@ export interface Figure {
   data: any[];
   layout: any;
   rasterScatter?: boolean;
+  sampledMarkers?: boolean;
 }
 
 export interface FigureOpts {
@@ -267,45 +268,6 @@ export function limitLinesX(
   return { shapes, annotations };
 }
 
-interface AxisStats {
-  mean: number;
-  sd: number;
-  min: number;
-  max: number;
-  q1: number;
-  q3: number;
-}
-
-/** Resolve the inspector range mode into an explicit [lo, hi] pair. */
-export function limitRange(
-  spec: PlotSpec,
-  stats: AxisStats,
-  lsl: number | null,
-  usl: number | null,
-  fallbackLo: number,
-  fallbackHi: number
-): [number, number] | null {
-  const finite = (v: number) => Number.isFinite(v);
-  if (spec.limitMode === "manual") {
-    const lo = spec.yMin ?? fallbackLo;
-    const hi = spec.yMax ?? fallbackHi;
-    return finite(lo) && finite(hi) && hi > lo ? [lo, hi] : null;
-  }
-  if (spec.limitMode === "sigma" && finite(stats.mean) && finite(stats.sd) && stats.sd > 0) {
-    return [stats.mean - spec.limitK * stats.sd, stats.mean + spec.limitK * stats.sd];
-  }
-  if (spec.limitMode === "iqr" && finite(stats.q1) && finite(stats.q3)) {
-    const iqr = stats.q3 - stats.q1;
-    if (iqr > 0) return [stats.q1 - spec.limitK * iqr, stats.q3 + spec.limitK * iqr];
-  }
-  if (spec.limitMode === "spec") {
-    const lo = lsl ?? fallbackLo;
-    const hi = usl ?? fallbackHi;
-    if (finite(lo) && finite(hi) && hi > lo) return [lo, hi];
-  }
-  return null;
-}
-
 function applyAxisRange(
   layout: any,
   axis: "x" | "y",
@@ -368,6 +330,12 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
   const xLabels = groups.map((g) => g.xLabel);
   const n = groups.length;
   const traces: any[] = [];
+  // A thumbnail uses SVG. Bound regular markers across the whole thumbnail,
+  // including when the split contains many boxes.
+  const previewStride = preview && spec.showPoints === "all"
+    ? Math.ceil(groups.reduce((total, group) => total + group.values.length, 0) / 800)
+    : 1;
+  let sampledMarkers = false;
 
   for (const [xIndex, g] of groups.entries()) {
     const xPos = xIndex;
@@ -426,12 +394,13 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
           if (ys[k] < lo || ys[k] > hi) pick.push(k);
         }
       } else {
-        const stride = Math.max(1, Math.ceil(ys.length / 2500));
+        const stride = spec.displayAllData && !preview ? 1 : Math.max(1, previewStride, Math.ceil(ys.length / 2500));
         const lo = summary.q1 - 1.5 * (summary.q3 - summary.q1);
         const hi = summary.q3 + 1.5 * (summary.q3 - summary.q1);
         for (let k = 0; k < ys.length; k++) {
           if (k % stride === 0 || ys[k] < lo || ys[k] > hi) pick.push(k);
         }
+        sampledMarkers ||= pick.length < summary.n;
       }
       if (pick.length > 0) {
         const px = pick.map(
@@ -561,8 +530,9 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
     for (const column of columns) for (const value of trace[column]) batch[column].push(value);
   }
   const result = previewFigure([...boxes, ...batches.values()], layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${units ? ` [${units}]` : ""}`);
+  result.sampledMarkers = sampledMarkers;
   result.exportNotes = [`${fmtInt(groups.reduce((n, g) => n + g.summary.n, 0))} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} excluded by statistical filtering` : ""}`,
-    ...(data.truncated && spec.showPoints === "all" ? ["Regular markers are sampled; every outlier is retained. Box statistics use all considered measurements."] : [])];
+    ...(sampledMarkers ? ["Regular markers are sampled; every outlier is retained. Box statistics use all considered measurements."] : [])];
   return result;
 }
 
@@ -812,15 +782,18 @@ function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
   const t = chartTheme(opts.theme);
   const spec = opts.spec;
   const style = chartStyle(opts.preview ? false : spec.presentation);
-  const nb = data.counts.length;
   const preview = opts.preview === true;
-  if (nb === 0) return { data: [], layout: baseLayout(t, preview ? "" : opts.title, spec.presentation) };
-  const width = data.edges[1] - data.edges[0];
-  const mids = data.counts.map((_, i) => (data.edges[i] + data.edges[i + 1]) / 2);
   const facet = opts.facetLabel;
-  const grouped = data.groups.length > 0 && facet === undefined;
+  const grouped = data.groups.length > 0 && facet === undefined &&
+    !(spec.splitPlots && data.groups.length === 1);
   const facetGroup = facet !== undefined ? data.groups.find((g) => g.label === facet) : undefined;
-  const s = facetGroup?.stats.summary ?? data.summary;
+  const bins = facetGroup?.histogram ?? data;
+  const nb = bins.counts.length;
+  if (nb === 0) return { data: [], layout: baseLayout(t, preview ? "" : opts.title, spec.presentation) };
+  const { edges } = bins;
+  const width = edges[1] - edges[0];
+  const mids = bins.counts.map((_, i) => (edges[i] + edges[i + 1]) / 2);
+  const s = facetGroup ? facetGroup.histogram?.fitSummary ?? facetGroup.stats.summary : data.fitSummary ?? data.summary;
   const traces: any[] = [];
 
   const addBars = (
@@ -842,7 +815,7 @@ function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
         opacity,
         line: { color: t.paper, width: Math.max(0.5, style.line * 0.25) },
       },
-      customdata: counts.map((_, i) => [data.edges[i], data.edges[i + 1]]),
+      customdata: counts.map((_, i) => [edges[i], edges[i + 1]]),
       hovertemplate:
         `<b>%{y} dice</b><br>` +
         "%{customdata[0]:.5~g} – %{customdata[1]:.5~g}<extra></extra>",
@@ -850,7 +823,7 @@ function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
   };
 
   if (facetGroup) {
-    addBars(facetGroup.counts, t.blue, facetGroup.label, false, 0.88);
+    addBars(facetGroup.histogram?.counts ?? facetGroup.counts, t.blue, facetGroup.label, false, 0.88);
   } else if (grouped) {
     for (const g of data.groups) {
       addBars(g.counts, categoricalColor(t, g.key, g.label), g.label, !preview, 0.52);
@@ -859,9 +832,9 @@ function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
     addBars(data.counts, t.blue, "", false, 0.88);
   }
 
-  if (spec.showNormal && s.sd > 0 && !grouped && !facetGroup) {
-    const lo = data.edges[0];
-    const hi = data.edges[nb];
+  if (spec.showNormal && s.sd > 0 && !grouped) {
+    const lo = edges[0];
+    const hi = edges[nb];
     const steps = 220;
     const xs: number[] = [];
     const ys: number[] = [];
@@ -961,18 +934,7 @@ function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
     rangemode: spec.logY ? undefined : "tozero",
     type: spec.logY ? "log" : "linear",
   };
-  if (!preview) {
-    applyAxisRange(
-      layout,
-      "x",
-      spec,
-      s,
-      lsl,
-      usl,
-      data.edges[0],
-      data.edges[nb]
-    );
-  }
+  if (bins.binRange) layout.xaxis.range = bins.binRange;
   layout.shapes = shapes;
   layout.annotations = annotations;
   return { ...previewFigure(traces, layout, preview, `${testLabel(data.test)}${data.test.units ? ` [${data.test.units}]` : ""}`, "Count"),
@@ -1109,9 +1071,10 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
     opts.facetKey === undefined
       ? data.series
       : data.series.filter((s) => s.key === opts.facetKey);
-  const totalPoints = series.reduce((n, s) => n + s.points.length, 0);
-  const traceType = totalPoints > 12000 ? "scattergl" : "scatter";
   const facet = opts.facetKey !== undefined;
+  // Sampling must not switch a dense plot from WebGL to SVG.
+  const population = facet ? data.groupTotals?.[series[0]?.name] ?? series[0]?.points.length ?? 0 : data.total;
+  const traceType = population > 12000 ? "scattergl" : "scatter";
   const hasGroups = data.series.length > 1 || !!data.groupLabel;
   const showLegend = hasGroups && series.length > 1 && !facet && !preview;
   const symbols = ["circle", "square", "diamond", "triangle-up", "cross", "x", "star", "hexagon"];
@@ -1412,7 +1375,7 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
   if (annotations.length && !preview) layout.annotations = annotations;
   return { ...previewFigure(traces, layout, preview, `${testLabel(data.xTest)}${data.xTest.units ? ` [${data.xTest.units}]` : ""}`, `${testLabel(data.yTest)}${data.yTest.units ? ` [${data.yTest.units}]` : ""}`), rasterScatter: preview,
     exportNotes: [`${fmtInt(series.reduce((n, s) => n + s.points.length, 0))} displayed points · ${fmtInt(data.total)} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} excluded` : ""}`,
-      ...(data.truncated ? ["Sampled display. Correlation uses all considered measurements; the fitted line uses displayed points."] : [])] };
+      ...(data.truncated ? ["Sampled display. Correlation and the fitted line use all considered measurements."] : [])] };
 }
 
 /** Small helper used by the report to summarise a plot in text. */
@@ -1426,17 +1389,32 @@ export function describeHist(data: HistResponse): string {
   return `${fmtInt(s.n)} dice · mean ${fmt(s.mean)} · sd ${fmt(s.sd)}`;
 }
 
-function exportStyle(figure: Figure, opts: FigureOpts, test: import("../types").TestInfo | null, xLabel: string, total: number, facetLabel = opts.facetLabel): Figure {
-  return {...figure, exportStyle:{spec:opts.spec,test,xLabel,total,facetLabel}};
+function exportStyle(figure: Figure, opts: FigureOpts, test: import("../types").TestInfo | null, xLabel: string,
+  total: number, facetLabel = opts.facetLabel, statistics?: string): Figure {
+  return {...figure, exportStyle:{spec:opts.spec,test,xLabel,total,facetLabel,statistics}};
+}
+
+function capabilityFooter(summary: BoxResponse["summary"] | undefined, test: BoxResponse["test"], spec: PlotSpec) {
+  if (!summary?.n) return "";
+  const { cpk } = capability(summary.mean, summary.sd, spec.lsl ?? test.loSpec, spec.usl ?? test.hiSpec);
+  return statisticsFooter(summary, cpk);
 }
 export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
-  return exportStyle(figureBoxCore(data,opts),opts,data.test,categoryName(opts.spec.xAxis),data.summary.n);
+  const summary = opts.facetLabel === undefined ? data.summary : data.groupStats?.[opts.facetLabel]?.summary;
+  return exportStyle(figureBoxCore(data,opts),opts,data.test,categoryName(opts.spec.xAxis),summary?.n ?? data.summary.n,
+    opts.facetLabel, opts.preview ? undefined : capabilityFooter(summary, data.test, opts.spec));
 }
 export function figureHist(data: HistResponse, opts: FigureOpts): Figure {
-  return exportStyle(figureHistCore(data,opts),opts,data.test,"Count",data.summary.n);
+  const summary = opts.facetLabel === undefined ? data.summary : data.groups.find(g => g.label === opts.facetLabel)?.stats.summary;
+  return exportStyle(figureHistCore(data,opts),opts,data.test,"Count",summary?.n ?? data.summary.n,
+    opts.facetLabel, opts.preview ? undefined : capabilityFooter(summary, data.test, opts.spec));
 }
 export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
-  return exportStyle(figureTrendCore(data,opts),opts,data.test,categoryName(opts.spec.xAxis),data.points.reduce((n,p)=>n+p.n,0));
+  const points = opts.facetLabel === undefined ? data.points : data.points.filter(p => p.groupLabel === opts.facetLabel);
+  const values = points.map(p => p.mean).filter(v => Number.isFinite(v) && (!opts.spec.logY || v > 0));
+  const average = mean(values);
+  return exportStyle(figureTrendCore(data,opts),opts,data.test,categoryName(opts.spec.xAxis),points.reduce((n,p)=>n+p.n,0),
+    opts.facetLabel, opts.preview ? undefined : statisticsFooter({ n: values.length, mean: average, sd: stdDev(values, average) }));
 }
 export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
   return exportStyle(figureParetoCore(data,opts),opts,null,categoryName(opts.spec.xAxis),data.total);

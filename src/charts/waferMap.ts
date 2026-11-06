@@ -1,11 +1,11 @@
 import type { BinOverviewWafer, MapDie, MapResponse, PlotSpec, Filter } from "../types";
 import { fmtMap } from "../lib/format";
-import { quantileSorted } from "../lib/stats";
+import { quantileSorted, valueMapSummary } from "../lib/stats";
 import type { Theme } from "../lib/theme";
 import { binColor, binLabel, paletteColor, binYieldText } from "../lib/theme";
 import * as api from "../lib/api";
 import { graphFontOffset } from "../lib/demoFonts";
-import { imageFrame, encodeImage, wrapImageText, exportPlotTitle, limitFooter } from "./imageExport";
+import { imageFrame, encodeImage, wrapImageText, exportPlotTitle, limitFooter, statisticsFooter } from "./imageExport";
 
 export interface MapOptions {
   showDieGrid?: boolean;
@@ -971,7 +971,8 @@ export function renderMapImage(data: MapResponse, opts: MapOptions, width: numbe
   const numericTotal = (data.testPass ?? 0) + (data.testFail ?? 0);
   const total = bin ? data.dice.length : data.testTotal ?? (numericTotal || data.dice.filter(d=>Number.isFinite(d.v)).length);
 
-  const frame = imageFrame(width, height, title, "", opts.presentation, [opts.exportFooter??limitFooter(total,null)]);
+  const statistics = bin ? "" : statisticsFooter(valueMapSummary(data.dice));
+  const frame = imageFrame(width, height, title, "", opts.presentation, [opts.exportFooter??limitFooter(total,null)], statistics);
   const right = bin ? rightBinLegend(frame.ctx, data.dice, opts, frame.contentHeight) : null;
   const mapWidth = right ? 1152 - right.width - 16 : 1200;
   const mapHeight = frame.contentHeight;

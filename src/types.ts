@@ -242,11 +242,17 @@ export interface HistGroup {
   key: number;
   label: string;
   counts: number[];
+  histogram?: HistogramBins | null;
 }
 
-export interface HistResponse extends PopulationStats {
+export interface HistogramBins {
   edges: number[];
   counts: number[];
+  binRange: [number, number] | null;
+  fitSummary: Summary;
+}
+
+export interface HistResponse extends PopulationStats, HistogramBins {
   groups: HistGroup[];
   test: TestInfo;
   lsl: number | null;
@@ -341,6 +347,7 @@ export interface PlotSpec {
   groupBy: string;
   logY: boolean;
   showPoints: ShowPoints;
+  displayAllData: boolean;
   lsl: number | null;
   usl: number | null;
   showLimits: boolean;
@@ -380,6 +387,7 @@ export const defaultSpec = (type: PlotType, test: number | null, title: string):
   groupBy: "none",
   logY: false,
   showPoints: "outliers",
+  displayAllData: type === "box" || type === "scatter",
   lsl: null,
   usl: null,
   showLimits: true,

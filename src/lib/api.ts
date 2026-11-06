@@ -10,6 +10,7 @@ import type {
   HistResponse,
   MapResponse,
   ParetoResponse,
+  PlotSpec,
   ScatterResponse,
   TrendResponse,
 } from "../types";
@@ -155,6 +156,13 @@ export function onImportProgress(cb: (pct: number, msg: string) => void): () => 
 /* Queries                                                             */
 /* ------------------------------------------------------------------ */
 
+export function plotPointLimit(spec: Pick<PlotSpec, "type" | "showPoints" | "displayAllData">): number | undefined {
+  // The sampled box query already retains every outlier.
+  if (spec.displayAllData && (spec.type === "scatter" || (spec.type === "box" && spec.showPoints === "all"))) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+}
+
 export async function boxPlot(req: {
   population?: PopulationRequest;
   test: number;
@@ -204,14 +212,20 @@ export async function pareto(req: {
   return cachedPlot("pareto", req, () => !isTauri ? mock.pareto(req) : invoke<ParetoResponse>("pareto", { req }), (d) => 1024 + d.bars.length * 128 + d.groups.length * 128 + d.series.reduce((n, s) => n + s.counts.length * 16 + 128, 0));
 }
 
+export function histogramOptions(spec: PlotSpec) {
+  const { limitMode, limitK, yMin, yMax, lsl, usl, splitPlots } = spec;
+  return { range: { limitMode, limitK, yMin, yMax }, population: { lsl, usl, split: splitPlots } };
+}
+
 export async function histogram(req: {
   population?: PopulationRequest;
+  range?: Pick<PlotSpec, "limitMode" | "limitK" | "yMin" | "yMax">;
   test: number;
   filter: Filter;
   bins?: number | null;
   groupBy?: string | null;
 }): Promise<HistResponse> {
-  return cachedPlot("histogram", req, () => !isTauri ? mock.histogram(req) : invoke<HistResponse>("histogram", { req }), (d) => 1024 + d.counts.length * 16 + d.groups.reduce((n, g) => n + g.counts.length * 8 + 128, 0));
+  return cachedPlot("histogram", req, () => !isTauri ? mock.histogram(req) : invoke<HistResponse>("histogram", { req }), (d) => 1024 + d.counts.length * 16 + d.groups.reduce((n, g) => n + g.counts.length * 8 + (g.histogram?.counts.length ?? 0) * 16 + 128, 0));
 }
 
 export async function trend(req: {

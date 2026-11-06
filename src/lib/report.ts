@@ -240,6 +240,7 @@ export async function generateReport(opts: {
     let itemFailed=false;
     try {
     const spec = item.spec;
+    const maxPoints = api.plotPointLimit(spec);
     const renderFigure = async(fig: Figure) => {
       await beginImage(fig.exportStyle?.facetLabel?`${spec.title} · ${fig.exportStyle.facetLabel}`:spec.title);
       return renderExportFigure({ ...fig, exportFilter: item.filters }, "jpeg");
@@ -272,19 +273,21 @@ export async function generateReport(opts: {
         figure=figurePareto(d,{theme,spec,title,facetLabel:selected.label});
       }else if(spec.type==="scatter"){
         if(spec.scatterX===null||spec.scatterY===null)throw new Error("Select both scatter tests.");
-        const d=await api.scatter({xTest:spec.scatterX,yTest:spec.scatterY,zMode:spec.scatterZMode,zTest:spec.scatterZTest,groupBy:spec.groupBy,filter:item.filters});
+        const d=await api.scatter({xTest:spec.scatterX,yTest:spec.scatterY,zMode:spec.scatterZMode,zTest:spec.scatterZTest,groupBy:spec.groupBy,filter:item.filters,maxPoints});
         const series=d.series.find(s=>s.name===selected.label);
         if(!series)throw new Error(`Scatter group “${selected.label}” is not present in this dataset.`);
         figure=figureScatter(d,{theme,spec,title,facetKey:series.key});
       }else{
         if(spec.test===null)throw new Error("Select a test.");
         if(spec.type==="box"){
-          const d=await api.boxPlot({test:spec.test,xAxis:spec.xAxis,groupBy:spec.groupBy,filter:item.filters});
+          const d=await api.boxPlot({test:spec.test,xAxis:spec.xAxis,groupBy:spec.groupBy,filter:item.filters,maxPoints,
+            population:{lsl:spec.lsl,usl:spec.usl,split:true}});
           if(!d.groups.some(g=>g.groupLabel===selected.label))throw new Error(`Missing group “${selected.label}”.`);
           if(!d.summary.n)throw new Error("No measurements for this report item.");
           figure=figureBox(d,{theme,spec,title,facetLabel:selected.label});
         }else if(spec.type==="hist"){
-          const d=await api.histogram({test:spec.test,bins:spec.bins,groupBy:spec.groupBy,filter:item.filters});
+          const d=await api.histogram({test:spec.test,bins:spec.bins,groupBy:spec.groupBy,filter:item.filters,
+            ...api.histogramOptions({...spec,splitPlots:true})});
           if(!d.groups.some(g=>g.label===selected.label))throw new Error(`Missing group “${selected.label}”.`);
           figure=figureHist(d,{theme,spec,title,facetLabel:selected.label});
         }else if(spec.type==="trend"){
@@ -357,9 +360,11 @@ export async function generateReport(opts: {
         if (spec.test === null) throw new Error("No test selected.");
         const d = await api.boxPlot({
           test: spec.test,
+          maxPoints,
           xAxis: spec.xAxis,
           groupBy: spec.groupBy,
           filter: item.filters,
+          population: { lsl: spec.lsl, usl: spec.usl, split: spec.splitPlots },
         });
         if(!d.summary.n)throw new Error("No measurements for this report item.");
         const baseSubtitle = `${testLabelWithUnits(test)} · ${d.summary.n.toLocaleString("en-US")} dice · X ${spec.xAxis}${spec.groupBy !== "none" ? ` · group ${spec.groupBy}` : ""}`;
@@ -428,6 +433,7 @@ export async function generateReport(opts: {
         if (spec.test === null) throw new Error("No test selected.");
         const d = await api.histogram({
           test: spec.test,
+          ...api.histogramOptions(spec),
           filter: item.filters,
           bins: spec.bins,
           groupBy: spec.groupBy,
@@ -474,6 +480,7 @@ export async function generateReport(opts: {
         const d = await api.scatter({
           xTest: spec.scatterX,
           yTest: spec.scatterY,
+          maxPoints,
           zMode: spec.scatterZMode,
           zTest: spec.scatterZTest,
           zCol: null,

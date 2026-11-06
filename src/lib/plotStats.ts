@@ -2,7 +2,7 @@ import type { MapResponse, PlotSelection, PlotSpec, Summary } from "../types";
 import type { PlotData } from "./usePlotData";
 import { categoryName } from "./categoryNames";
 import { fmt, fmtInt } from "./format";
-import { summarize } from "./stats";
+import { capability, valueMapSummary } from "./stats";
 import { binLabel } from "./theme";
 
 export interface Stat {
@@ -10,16 +10,6 @@ export interface Stat {
   v: string;
   tone?: "good" | "warn" | "bad";
   title?: string;
-}
-
-function cpk(mean: number, sd: number, lsl: number | null, usl: number | null): { cp: number | null; cpk: number | null } {
-  if (!(sd > 0)) return { cp: null, cpk: null };
-  const cp = lsl !== null && usl !== null ? (usl - lsl) / (6 * sd) : null;
-  let k: number | null = null;
-  if (lsl !== null && usl !== null) k = Math.min((usl - mean) / (3 * sd), (mean - lsl) / (3 * sd));
-  else if (lsl !== null) k = (mean - lsl) / (3 * sd);
-  else if (usl !== null) k = (usl - mean) / (3 * sd);
-  return { cp, cpk: k };
 }
 
 function categoryLabel(value: string): string {
@@ -45,15 +35,13 @@ function addTestYield(stats: Stat[], yieldPct: number | null, title?: string) {
 }
 
 export function valueMapStats(data: MapResponse): Stat[] {
-  const values: number[] = [];
-  for (const die of data.dice) if (die.v !== null) values.push(die.v);
-  const out = measurementStats(summarize(values));
+  const out = measurementStats(valueMapSummary(data.dice));
   addTestYield(out, data.testYieldPct ?? null, data.isMean ? "Test yield uses the individual dice that contributed to this map." : undefined);
   if (data.excluded > 0) out.push({ k: "Excluded", v: fmtInt(data.excluded), tone: "warn" });
   return out;
 }
 
-export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection): Stat[] {
+export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection, sampledMarkers = false, boxInLimits?: number): Stat[] {
   switch (data.kind) {
     case "box":
     case "hist": {
@@ -64,14 +52,30 @@ export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection):
       if (!population) return [];
       const s = population.summary;
       const out = measurementStats(s);
-      const capability = cpk(s.mean, s.sd, spec.lsl ?? d.test.loSpec, spec.usl ?? d.test.hiSpec);
-      if (capability.cp !== null) out.push({ k: "Cp", v: fmt(capability.cp, 2) });
-      if (capability.cpk !== null) {
-        const k = capability.cpk;
+      let inLimits = boxInLimits;
+      if (data.kind === "hist") {
+        const group = facet ? data.data.groups.find(g => g.key === facet.key) : undefined;
+        const bins = group?.histogram ?? data.data;
+        const counts = group?.histogram?.counts ?? group?.counts ?? bins.counts;
+        const plotted = counts.reduce((n, count) => n + count, 0);
+        if (s.n && (bins.binRange || plotted < s.n)) inLimits = plotted;
+      }
+      if (inLimits !== undefined) out.splice(1, 0, {
+        k: "In Limits", v: fmtInt(inLimits), tone: inLimits < s.n ? "warn" : undefined,
+        title: "Dice inside the plot range. Statistics use the full filtered population.",
+      });
+      const process = capability(s.mean, s.sd, spec.lsl ?? d.test.loSpec, spec.usl ?? d.test.hiSpec);
+      if (process.cp !== null) out.push({ k: "Cp", v: fmt(process.cp, 2) });
+      if (process.cpk !== null) {
+        const k = process.cpk;
         out.push({ k: "Cpk", v: fmt(k, 2), tone: k < 1.33 ? "warn" : k >= 1.67 ? "good" : undefined });
       }
       addTestYield(out, population.testYieldPct);
       if (!facet && d.excluded > 0) out.push({ k: "Excluded", v: fmtInt(d.excluded), tone: "warn" });
+      if (data.kind === "box" && sampledMarkers) out.push({
+        k: "Rendering", v: "Sampled", tone: "warn",
+        title: "Some regular markers are skipped. All outliers are retained and statistics use the full filtered population.",
+      });
       return out;
     }
     case "map": {
@@ -154,7 +158,7 @@ export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection):
       const total = facet ? d.groupTotals?.[facet.label] ?? points : d.total;
       const r = facet ? d.groupStatistics?.[facet.label]?.fit?.r : d.r;
       const out: Stat[] = [
-        { k: "Considered dice", v: fmtInt(total) },
+        { k: "Dice", v: fmtInt(total) },
         { k: "Displayed points", v: fmtInt(points) },
       ];
       if (r != null && Number.isFinite(r)) {
@@ -163,6 +167,10 @@ export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection):
       }
       if (series.length > 1) out.push({ k: "Groups", v: fmtInt(series.length) });
       if (!facet && d.excluded > 0) out.push({ k: "Excluded", v: fmtInt(d.excluded), tone: "warn" });
+      if (points < total) out.push({
+        k: "Rendering", v: "Sampled", tone: "warn",
+        title: "The fit line, correlation and statistics use all eligible X/Y pairs.",
+      });
       return out;
     }
   }

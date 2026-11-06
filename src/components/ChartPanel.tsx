@@ -25,7 +25,7 @@ import { renderExportFigure, splitImageName, IMAGE_WIDTH, imageHeight } from "..
 import type { Theme } from "../lib/theme";
 import * as api from "../lib/api";
 import { paintExportProgress, type ImageExportJob } from "../lib/exportJobs";
-import { fmtInt, safeName } from "../lib/format";
+import { safeName } from "../lib/format";
 import {
   IconArrowLeft,
   IconBox,
@@ -54,6 +54,32 @@ const TABS: { type: PlotType; label: string; Icon: ComponentType<{ size?: number
 interface Facet {
   key?: number;
   label: string;
+}
+
+function useBoxRangeCount(spec: PlotSpec, figure: Figure | null, facet?: Facet) {
+  const filter = useStore(s => s.filters);
+  const dataVersion = useStore(s => s.dataVersion);
+  const axis = figure?.layout.yaxis;
+  const test = spec.type === "box" ? spec.test : null;
+  const [lo, hi] = axis?.range ?? [];
+  const lsl = axis?.type === "log" ? 10 ** lo : lo;
+  const usl = axis?.type === "log" ? 10 ** hi : hi;
+  const label = facet?.label;
+  const groupBy = label === undefined ? undefined : spec.groupBy;
+  const request = useMemo(() => test !== null && Number.isFinite(lsl) && Number.isFinite(usl)
+    ? { test, filter, groupBy, lsl, usl } : null, [test, filter, groupBy, lsl, usl, dataVersion]);
+  const [result, setResult] = useState<{ request: api.LimitCountsRequest; label?: string; count?: number }>();
+
+  useEffect(() => {
+    if (!request) return;
+    let active = true;
+    void api.limitCounts(request).then(counts => {
+      const count = label === undefined ? counts.inLimits : counts.groups.find(group => group.label === label)?.inLimits;
+      if (active) setResult({ request, label, count: count ?? undefined });
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [request, label]);
+  return result?.request === request && result.label === label ? result.count : undefined;
 }
 
 function dataMatchesSpec(data: PlotData | null, spec: PlotSpec): boolean {
@@ -250,6 +276,7 @@ function SplitPlotView({
         : null,
     [data, spec, theme, facet]
   );
+  const inLimits = useBoxRangeCount(spec, detail, facet);
 
   useEffect(() => {
     if (selected !== null && selected >= facets.length) setSelected(null);
@@ -288,7 +315,7 @@ function SplitPlotView({
             All plots
           </button>
           <div className="facet-detail-title">{facet.label}</div>
-          <DetailStats stats={statsFor(data, spec, facet)} />
+          <DetailStats stats={statsFor(data, spec, facet, detail?.sampledMarkers, inLimits)} />
           <div className="map-detail-nav">
             <button
               className="btn icon"
@@ -392,13 +419,19 @@ export function ChartPanel() {
     [currentData, spec, theme, splitActive, paretoSplitActive]
   );
   const mapSpec = useMemo(() => ({ ...spec, mapMode: "value" as const }), [spec]);
+  const inLimits = useBoxRangeCount(spec, figure);
 
   useEffect(()=>{
     if(!useStore.getState().requestedPlotSelection||loading||!currentData)return;
     if(!["binmap"].includes(spec.type)&&!(spec.type==="map"&&spec.groupBy!=="none")&&!(spec.type==="pareto"&&spec.groupBy!=="none")&&!facets.length)
       useStore.setState({requestedPlotSelection:null,plotSelection:null});
   },[currentData,loading,spec,facets]);
-  const stats = useMemo(() => currentData && !opened ? statsFor(currentData, spec) : [], [currentData, spec, opened]);
+  const stats = useMemo(() => {
+    if (!currentData || opened) return [];
+    const sampledMarkers = currentData.kind === "box" && spec.showPoints === "all" &&
+      (figure?.sampledMarkers ?? currentData.data.groups.some(g => g.values.length < g.n));
+    return statsFor(currentData, spec, undefined, sampledMarkers, inLimits);
+  }, [currentData, spec, opened, figure, inLimits]);
   if (!info) return <EmptyState />;
   const isMap = spec.type === "map";
   const isBinMap = spec.type === "binmap";
@@ -560,15 +593,6 @@ export function ChartPanel() {
                   <span className={"stat-v" + (s.tone ? ` tone-${s.tone}` : "")}>{s.v}</span>
                 </div>
               ))}
-              {!opened && (currentData?.kind === "box" || currentData?.kind === "scatter") &&
-                currentData.data.truncated && (
-                  <div className="stat" title={currentData.kind === "scatter"
-                    ? `Showing ${fmtInt(currentData.data.series.reduce((n, s) => n + s.points.length, 0))} of ${fmtInt(currentData.data.total)} considered X/Y measurements for responsiveness. Correlation, fit lines and range statistics use all considered measurements. No measurements are removed from the imported data.`
-                    : "Regular markers are sampled for responsiveness. Every outlier is retained, and box statistics use all considered measurements."}>
-                    <span className="stat-k">Rendering</span>
-                    <span className="stat-v tone-warn">{currentData.kind === "scatter" ? "Sampled display" : "Regular points sampled"}</span>
-                  </div>
-                )}
             </div>
             <span className="plot-kind">{PLOT_LABELS[spec.type]}</span>
           </div>

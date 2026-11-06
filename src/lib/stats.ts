@@ -1,4 +1,4 @@
-import type { Summary, ScatterStatistics } from "../types";
+import type { MapDie, PlotSpec, Summary, ScatterStatistics } from "../types";
 
 /** Full considered population; marker sampling must never alter fit or ranges. */
 export function scatterStatistics(points: readonly {x:number;y:number}[]): ScatterStatistics {
@@ -122,7 +122,10 @@ export function cpCpk(
   usl: number | null
 ): { cp: number | null; cpk: number | null } {
   const m = mean(values);
-  const sd = stdDev(values, m);
+  return capability(m, stdDev(values, m), lsl, usl);
+}
+
+export function capability(m: number, sd: number, lsl: number | null, usl: number | null) {
   if (!Number.isFinite(sd) || sd <= 0) return { cp: null, cpk: null };
   const cp = lsl !== null && usl !== null ? (usl - lsl) / (6 * sd) : null;
   let cpk: number | null = null;
@@ -130,6 +133,12 @@ export function cpCpk(
   else if (lsl !== null) cpk = (m - lsl) / (3 * sd);
   else if (usl !== null) cpk = (usl - m) / (3 * sd);
   return { cp, cpk };
+}
+
+export function valueMapSummary(dice: readonly MapDie[]): Summary {
+  const values: number[] = [];
+  for (const die of dice) if (die.v !== null) values.push(die.v);
+  return summarize(values);
 }
 
 export function naturalCompare(a: string, b: string): number {
@@ -141,4 +150,43 @@ export function normalPdf(x: number, mu: number, sigma: number): number {
   if (!(sigma > 0)) return 0;
   const z = (x - mu) / sigma;
   return Math.exp(-0.5 * z * z) / (sigma * Math.sqrt(2 * Math.PI));
+}
+
+export interface AxisStats {
+  mean: number;
+  sd: number;
+  min: number;
+  max: number;
+  q1: number;
+  q3: number;
+}
+
+/** Resolve the inspector range mode into an explicit [lo, hi] pair. */
+export function limitRange(
+  spec: Pick<PlotSpec, "limitMode" | "limitK" | "yMin" | "yMax">,
+  stats: AxisStats,
+  lsl: number | null,
+  usl: number | null,
+  fallbackLo: number,
+  fallbackHi: number
+): [number, number] | null {
+  const finite = (v: number) => Number.isFinite(v);
+  if (spec.limitMode === "manual") {
+    const lo = spec.yMin ?? fallbackLo;
+    const hi = spec.yMax ?? fallbackHi;
+    return finite(lo) && finite(hi) && hi > lo ? [lo, hi] : null;
+  }
+  if (spec.limitMode === "sigma" && finite(stats.mean) && finite(stats.sd) && stats.sd > 0) {
+    return [stats.mean - spec.limitK * stats.sd, stats.mean + spec.limitK * stats.sd];
+  }
+  if (spec.limitMode === "iqr" && finite(stats.q1) && finite(stats.q3)) {
+    const iqr = stats.q3 - stats.q1;
+    if (iqr > 0) return [stats.q1 - spec.limitK * iqr, stats.q3 + spec.limitK * iqr];
+  }
+  if (spec.limitMode === "spec") {
+    const lo = lsl ?? fallbackLo;
+    const hi = usl ?? fallbackHi;
+    if (finite(lo) && finite(hi) && hi > lo) return [lo, hi];
+  }
+  return null;
 }

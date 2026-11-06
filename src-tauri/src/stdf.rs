@@ -438,6 +438,7 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
     };
 
     let mut out = Imported::new();
+    let mut test_times = Vec::new();
     let mut off = 0usize;
     let mut cur_lot: u16 = 0;
     let mut cur_wafer: u16 = 0;
@@ -632,7 +633,13 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 out.sbin[r] = soft;
                 out.x[r] = x;
                 out.y[r] = y;
-                c.take(4); // TEST_T
+                let elapsed_ms = c.u32(); // PRR TEST_T, zero means missing.
+                if elapsed_ms != 0 {
+                    if test_times.len() <= r {
+                        test_times.resize(r + 1, f32::NAN);
+                    }
+                    test_times[r] = (f64::from(elapsed_ms) / 1000.0) as f32;
+                }
                 let part_id=c.cn();let part_text=c.cn();
                 if !part_id.is_empty(){out.write_text("Part ID",r,&part_id);}
                 if !part_text.is_empty(){out.write_text("Part text",r,&part_text);}
@@ -1010,8 +1017,16 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
             || state.hi_spec.conflict;
     }
 
+    if !test_times.is_empty() {
+        let mut test = crate::model::TestInfo::new(TEST_TIME_NAME);
+        test.units = "s".into();
+        out.tests.push(test);
+        out.cols.push(test_times);
+    }
     Ok(out.finish())
 }
+
+pub(crate) const TEST_TIME_NAME: &str = "Test time";
 
 fn wafer_unit_scale(units: u8) -> Option<f32> {
     match units {
@@ -1197,6 +1212,32 @@ mod tests {
         b.extend_from_slice(&x.to_le_bytes());
         b.extend_from_slice(&y.to_le_bytes());
         b
+    }
+
+    #[test]
+    fn prr_test_time_is_in_seconds_and_follows_the_latest_attempt() {
+        let mut bytes = rec(0, 10, &[2, 4]);
+        for (x, elapsed_ms) in [(0, Some(1234u32)), (1, None), (2, Some(2500)), (0, Some(0))] {
+            let mut prr = prr_body(x, 0);
+            if let Some(ms) = elapsed_ms {
+                prr.extend_from_slice(&ms.to_le_bytes());
+            }
+            bytes.extend(rec(5, 20, &prr));
+        }
+        let imported = parse_stdf_bytes(&bytes, &mut |_, _| {}).unwrap();
+        assert_eq!(imported.tests[0].name, TEST_TIME_NAME);
+        assert_eq!(imported.tests[0].units, "s");
+        assert_eq!(imported.cols[0][0], 1.234);
+        assert!(imported.cols[0][1].is_nan());
+        assert_eq!(imported.cols[0][2], 2.5);
+        assert!(imported.cols[0][3].is_nan());
+
+        let mut ds = crate::model::Dataset::new();
+        ds.append_import(imported);
+        ds.resolve_retests();
+        assert_eq!(ds.retest_count, 1);
+        assert_eq!(ds.tests[0].count, 1);
+        assert!(ds.cols[0][2].is_nan());
     }
 
     fn minimal_stdf(ptrs: &[(i16, i16, Vec<u8>)], default_ptr: Option<Vec<u8>>) -> Vec<u8> {

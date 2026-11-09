@@ -1072,9 +1072,7 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
       ? data.series
       : data.series.filter((s) => s.key === opts.facetKey);
   const facet = opts.facetKey !== undefined;
-  // Sampling must not switch a dense plot from WebGL to SVG.
-  const population = facet ? data.groupTotals?.[series[0]?.name] ?? series[0]?.points.length ?? 0 : data.total;
-  const traceType = population > 12000 ? "scattergl" : "scatter";
+  const traceType = preview ? "scatter" : "scattergl";
   const hasGroups = data.series.length > 1 || !!data.groupLabel;
   const showLegend = hasGroups && series.length > 1 && !facet && !preview;
   const symbols = ["circle", "square", "diamond", "triangle-up", "cross", "x", "star", "hexagon"];

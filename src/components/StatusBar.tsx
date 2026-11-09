@@ -24,8 +24,6 @@ export function StatusBar() {
       <div className="status-right">
         {!isTauri && <span className="demo-badge">browser demo</span>}
         <span>v{version}</span>
-        <span className="meta-dot" />
-        <span>offline</span>
       </div>
     </footer>
   );

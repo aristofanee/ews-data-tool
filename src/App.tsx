@@ -3,6 +3,7 @@ import { useStore } from "./store";
 import * as api from "./lib/api";
 import { useExportCsv, useOpenFiles, useSaveTemplate } from "./lib/useData";
 import { TopBar } from "./components/TopBar";
+import { WindowTitleBar } from "./components/WindowTitleBar";
 import { DemoFontControls } from "./components/DemoFontControls";
 import { Sidebar } from "./components/Sidebar";
 import { ChartPanel } from "./components/ChartPanel";
@@ -72,7 +73,8 @@ export default function App() {
   }, [open, saveTemplate, exportCsv]);
 
   return (
-    <div className="app">
+    <div className={api.isTauri ? "app desktop" : "app"}>
+      {api.isTauri && <WindowTitleBar />}
       <TopBar />
       {!api.isTauri && <DemoFontControls />}
       <div className="app-body">

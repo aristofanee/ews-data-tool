@@ -10,15 +10,16 @@ try{
   checks.push(...await page.evaluate(async()=>{
    const api=await import('/src/lib/api.ts'),{emptyFilter}=await import('/src/types.ts'),{WaferMapRenderer}=await import('/src/charts/waferMap.ts');
    const data=await api.waferMap({test:0,wafer:0,mode:'value',filter:emptyFilter()}),results=[];
-   for(const mode of ['value','bin']){
+   for(const mode of ['value','bin'])for(const theme of ['light','dark']){
     const canvas=document.createElement('canvas');canvas.style.cssText='position:fixed;left:0;top:0;width:1103.75px;height:701.25px';document.body.appendChild(canvas);
-    const renderer=new WaferMapRenderer(canvas);renderer.resize();renderer.setData(data,{theme:'light',palette:'brand',mode,binCategory:'hard',lsl:null,usl:null});
+    const renderer=new WaferMapRenderer(canvas);renderer.resize();renderer.setData(data,{theme,palette:'brand',mode,binCategory:'hard',lsl:null,usl:null});
     const legend=renderer.legendCanvas,box=renderer.legendBox,pixels=renderer.dpr*renderer.scale,left=Math.max(0,Math.floor(box.left*pixels)),top=Math.max(0,Math.floor(box.top*pixels)),right=Math.min(canvas.width,Math.ceil(box.right*pixels)),bottom=Math.min(canvas.height,Math.ceil(box.bottom*pixels)),width=right-left,height=bottom-top;
-    const reference=document.createElement('canvas');reference.width=canvas.width;reference.height=canvas.height;const ctx=reference.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,reference.width,reference.height);ctx.drawImage(legend,0,0);
+    const background=theme==='dark'?'#0f1726':'#ffffff';
+    const reference=document.createElement('canvas');reference.width=canvas.width;reference.height=canvas.height;const ctx=reference.getContext('2d');ctx.fillStyle=background;ctx.fillRect(0,0,reference.width,reference.height);ctx.drawImage(legend,0,0);
     const actual=canvas.getContext('2d').getImageData(left,top,width,height).data,expected=ctx.getImageData(left,top,width,height).data;
-    const legacy=document.createElement('canvas');legacy.width=canvas.width;legacy.height=canvas.height;const old=legacy.getContext('2d');old.fillStyle='white';old.fillRect(0,0,legacy.width,legacy.height);old.setTransform(pixels,0,0,pixels,0,0);old.drawImage(legend,0,0,renderer.w,renderer.h);const previous=old.getImageData(left,top,width,height).data;
+    const legacy=document.createElement('canvas');legacy.width=canvas.width;legacy.height=canvas.height;const old=legacy.getContext('2d');old.fillStyle=background;old.fillRect(0,0,legacy.width,legacy.height);old.setTransform(pixels,0,0,pixels,0,0);old.drawImage(legend,0,0,renderer.w,renderer.h);const previous=old.getImageData(left,top,width,height).data;
     let changed=0,legacyChanged=0;for(let i=0;i<actual.length;i++){if(actual[i]!==expected[i])changed++;if(previous[i]!==expected[i])legacyChanged++;}
-    results.push({scale:devicePixelRatio,mode,changedChannels:changed,legacyResampledChannels:legacyChanged});renderer.dispose();canvas.remove();
+    results.push({scale:devicePixelRatio,mode,theme,changedChannels:changed,legacyResampledChannels:legacyChanged});renderer.dispose();canvas.remove();
    }return results;
   }));
   await page.evaluate(async()=>{const {getDatasetInfo}=await import('/src/lib/mock.ts'),{useStore}=await import('/src/store.ts');useStore.getState().setInfo(getDatasetInfo(),{reset:true});useStore.getState().setPlotType('map');useStore.getState().patchSpec({groupBy:'wafer'});});

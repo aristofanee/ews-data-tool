@@ -34,6 +34,14 @@ function defaultSpecs(): Record<PlotType, PlotSpec> {
   ) as Record<PlotType, PlotSpec>;
 }
 
+const testLimitDefaults = { lsl: null, usl: null };
+
+function clearTestLimits(specs: Record<PlotType, PlotSpec>): Record<PlotType, PlotSpec> {
+  const next = { ...specs };
+  for (const type of PLOT_TYPES) next[type] = { ...specs[type], ...testLimitDefaults };
+  return next;
+}
+
 function hasCategory(info: DatasetInfo | null, value: string): boolean {
   if (!info || !value) return false;
   return BUILTIN_CATEGORIES.includes(value) || info.customColumns.some((c) => c.name === value) || !!info.dataCategories?.some(c=>c.id===value);
@@ -299,6 +307,7 @@ export const useStore = create<AppState>((set, get) => ({
     const tests = s.info?.tests ?? [];
     const specs = { ...s.specs, [s.spec.type]: s.spec };
     let next = specs[type] ?? defaultSpec(type, s.spec.test, PLOT_LABELS[type]);
+    if (next.test !== s.spec.test) next = { ...next, ...testLimitDefaults };
     next = { ...next, type, presentation: s.presentation };
     if (type === "scatter") {
       next = normalizeScatter({ ...next, test: s.spec.test }, tests);
@@ -315,12 +324,15 @@ export const useStore = create<AppState>((set, get) => ({
   patchSpec: (p) => {
     if (p.presentation !== undefined && p.presentation !== get().presentation) get().setPresentation(p.presentation);
     const s = get();
-    const next: PlotSpec = { ...s.spec, ...p };
+    const testChanged = p.test !== undefined && p.test !== s.spec.test;
+    const yChanged = p.scatterY !== undefined && p.scatterY !== s.spec.scatterY;
+    const next: PlotSpec = { ...s.spec, ...(testChanged || yChanged ? testLimitDefaults : {}), ...p };
     let title = p.title ?? s.spec.title;
     if (p.title === undefined) {
       if (next.type === "scatter") {
         next.scatterX = next.test;
         if (
+          testChanged ||
           p.scatterX !== undefined ||
           p.scatterY !== undefined ||
           p.type !== undefined
@@ -339,7 +351,7 @@ export const useStore = create<AppState>((set, get) => ({
       (["limitK", "yMin", "yMax", "lsl", "usl", "logY"] as const).some(key => spec[key] !== s.spec[key]);
     set({
       spec,
-      specs: { ...s.specs, [spec.type]: spec },
+      specs: { ...(testChanged ? clearTestLimits(s.specs) : s.specs), [spec.type]: spec },
       rangeRevisions: rangeChanged
         ? { ...s.rangeRevisions, [spec.type]: (s.rangeRevisions[spec.type] ?? 0) + 1 }
         : s.rangeRevisions,
@@ -347,16 +359,18 @@ export const useStore = create<AppState>((set, get) => ({
   },
   selectTest: (index) => {
     const s = get();
+    if (s.spec.test === index) return;
     const test = s.info?.tests[index] ?? null;
+    const specs = clearTestLimits(s.specs);
     if (s.spec.type === "scatter") {
       const tests = s.info?.tests ?? [];
-      const spec: PlotSpec = { ...s.spec, test: index, scatterX: index };
+      const spec: PlotSpec = { ...s.spec, ...testLimitDefaults, test: index, scatterX: index };
       spec.title = scatterSpecTitle(spec, tests);
-      set({ spec, specs: { ...s.specs, scatter: spec } });
+      set({ spec, specs: { ...specs, scatter: spec } });
       return;
     }
-    const spec: PlotSpec = { ...s.spec, test: index, title: autoTitle(test, s.spec.type) };
-    set({ spec, specs: { ...s.specs, [spec.type]: spec } });
+    const spec: PlotSpec = { ...s.spec, ...testLimitDefaults, test: index, title: autoTitle(test, s.spec.type) };
+    set({ spec, specs: { ...specs, [spec.type]: spec } });
   },
 
   patchFilters: (p) => set({ filters: { ...get().filters, ...p } }),
@@ -423,7 +437,8 @@ export const useStore = create<AppState>((set, get) => ({
     const s=get(),source=s.report.find(r=>r.id===id);if(!source)return;
     const {item,issues}=bindReportItem(source,s.info);
     if(issues.length){s.notify("Resolve this report item before opening it.");return;}
-    set({editingReportId:id,spec:structuredClone(item.spec),specs:{...s.specs,[item.spec.type]:structuredClone(item.spec)},filters:structuredClone(item.filters),plotSelection:null,requestedPlotSelection:{label:item.selection?.label??null,token:Date.now()},reportOpen:false});
+    const specs = item.spec.test === s.spec.test ? s.specs : clearTestLimits(s.specs);
+    set({editingReportId:id,spec:structuredClone(item.spec),specs:{...specs,[item.spec.type]:structuredClone(item.spec)},filters:structuredClone(item.filters),plotSelection:null,requestedPlotSelection:{label:item.selection?.label??null,token:Date.now()},reportOpen:false});
   },
   resolveReportReference: (key,target) => {
     const s=get();if(!s.info)return;

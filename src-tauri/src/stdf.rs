@@ -439,6 +439,7 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
 
     let mut out = Imported::new();
     let mut test_times = Vec::new();
+    let mut numeric_part_ids = Vec::new();
     let mut off = 0usize;
     let mut cur_lot: u16 = 0;
     let mut cur_wafer: u16 = 0;
@@ -641,7 +642,19 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                     test_times[r] = (f64::from(elapsed_ms) / 1000.0) as f32;
                 }
                 let part_id=c.cn();let part_text=c.cn();
-                if !part_id.is_empty(){out.write_text("Part ID",r,&part_id);}
+                if !part_id.is_empty() {
+                    out.write_text("Part ID", r, &part_id);
+                    if let Ok(id) = part_id.parse::<u64>() {
+                        let value = id as f32;
+                        // Avoid plotting a rounded identifier as a different die ID.
+                        if value as u128 == u128::from(id) {
+                            if numeric_part_ids.len() <= r {
+                                numeric_part_ids.resize(r + 1, f32::NAN);
+                            }
+                            numeric_part_ids[r] = value;
+                        }
+                    }
+                }
                 if !part_text.is_empty(){out.write_text("Part text",r,&part_text);}
             }
             // PTR - parametric test record
@@ -1023,10 +1036,28 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
         out.tests.push(test);
         out.cols.push(test_times);
     }
+    if !numeric_part_ids.is_empty() {
+        out.tests.push(crate::model::TestInfo::new(PART_ID_TEST_NAME));
+        out.cols.push(numeric_part_ids);
+    }
     Ok(out.finish())
 }
 
 pub(crate) const TEST_TIME_NAME: &str = "Test time";
+pub(crate) const PART_ID_TEST_NAME: &str = "Part ID (numeric)";
+
+pub(crate) fn prioritize_derived_tests(ds: &mut crate::model::Dataset) {
+    let mut start = 0;
+    for (name, units) in [(TEST_TIME_NAME, "s"), (PART_ID_TEST_NAME, "")] {
+        if let Some(index) = ds.tests[start..].iter().position(|t| {
+            t.number.is_none() && t.name == name && t.units == units && t.count > 0
+        }).map(|i| start + i) {
+            ds.tests[start..=index].rotate_right(1);
+            ds.cols[start..=index].rotate_right(1);
+            start += 1;
+        }
+    }
+}
 
 fn wafer_unit_scale(units: u8) -> Option<f32> {
     match units {
@@ -1212,6 +1243,31 @@ mod tests {
         b.extend_from_slice(&x.to_le_bytes());
         b.extend_from_slice(&y.to_le_bytes());
         b
+    }
+
+    #[test]
+    fn numeric_part_id_follows_test_time_without_losing_raw_ids() {
+        let mut bytes = rec(0, 10, &[2, 4]);
+        for (x, id) in ["00042", "ABC", "16777217", ""].into_iter().enumerate() {
+            bytes.extend(rec(5, 10, &[1, 0]));
+            bytes.extend(rec(15, 10, &ptr_body(1001, 3.0, 0, Some(0), None, None, Some("V"), Some(""))));
+            let mut prr = prr_body(x as i16, 0);
+            prr.extend_from_slice(&1000u32.to_le_bytes());
+            prr.extend(cn(id));
+            bytes.extend(rec(5, 20, &prr));
+        }
+        let mut ds = crate::model::Dataset::new();
+        ds.append_import(parse_stdf_bytes(&bytes, &mut |_, _| {}).unwrap());
+        ds.resolve_retests();
+        prioritize_derived_tests(&mut ds);
+        assert_eq!(ds.tests[0].name, TEST_TIME_NAME);
+        assert_eq!(ds.tests[1].name, PART_ID_TEST_NAME);
+        assert_eq!(ds.cols[1][0], 42.0);
+        assert!(ds.cols[1][1..].iter().all(|v| v.is_nan()));
+        assert_eq!(ds.cols[2], vec![3.0; 4]);
+        let raw = &ds.text_cols[0];
+        assert_eq!(raw.codes.iter().map(|&c| raw.values[c as usize].as_str()).collect::<Vec<_>>(),
+            ["00042", "ABC", "16777217", ""]);
     }
 
     #[test]

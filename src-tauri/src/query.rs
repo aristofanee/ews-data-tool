@@ -652,24 +652,26 @@ fn wafer_map_prepared(ds: &Dataset, req: &MapRequest, keep_ref: Option<&[bool]>,
     } else {
         // Reuse the first selected wafer's physical geometry (die size,
         // diameter, notch) for the synthetic mean-map wafer.
-        let first = ds
+        let mut selected = ds
             .wafers
             .iter()
             .enumerate()
-            .find(|(i, w)| {
+            .filter(|(i, w)| {
                 (req.filter.wafers.is_empty() || req.filter.wafers.contains(&(*i as u16)))
                     && (req.filter.lots.is_empty() || req.filter.lots.contains(&w.lot))
             })
-            .map(|(_, w)| w.clone());
-        let mut wf = first;
+            .map(|(_, w)| w);
+        let mut wf = selected.next().cloned();
         if let Some(w) = wf.as_mut() {
             w.name = "All wafers (mean)".to_string();
             w.dice = dice.len();
-            if !dice.is_empty() {
-                w.x_min = dice.iter().map(|d| d.x).min().unwrap_or(w.x_min);
-                w.x_max = dice.iter().map(|d| d.x).max().unwrap_or(w.x_max);
-                w.y_min = dice.iter().map(|d| d.y).min().unwrap_or(w.y_min);
-                w.y_max = dice.iter().map(|d| d.y).max().unwrap_or(w.y_max);
+            // Use whole-wafer bounds, independent of which dies have a value
+            // or pass the bin, site, or statistical filters.
+            for other in selected {
+                w.x_min = w.x_min.min(other.x_min);
+                w.x_max = w.x_max.max(other.x_max);
+                w.y_min = w.y_min.min(other.y_min);
+                w.y_max = w.y_max.max(other.y_max);
             }
         }
         (
@@ -1832,6 +1834,11 @@ mod tests {
         assert_eq!(result.dice.iter().map(|d|(d.x,d.v)).collect::<Vec<_>>(),vec![(0,10.0),(1,150.0),(2,30.0),(3,300.0)]);
         let mut filtered=req;filtered.filter.hbins=vec![1];let result=wafer_map(&ds,&filtered);
         assert_eq!(result.test_total,5);assert_eq!(result.dice.iter().map(|d|(d.x,d.v)).collect::<Vec<_>>(),vec![(0,5.0),(1,100.0),(2,20.0),(3,300.0)]);
+        filtered.filter.hbins=vec![2];let result=wafer_map(&ds,&filtered);
+        assert!(result.dice.iter().all(|d| d.x <= 2));
+        let geometry = result.wafer.unwrap();
+        assert_eq!((geometry.x_min, geometry.x_max), (0, 3));
+        filtered.filter.hbins=vec![1];
         filtered.filter.wafers=vec![0];let result=wafer_map(&ds,&filtered);assert_eq!(result.dice.iter().map(|d|(d.x,d.v)).collect::<Vec<_>>(),vec![(0,0.0),(2,20.0)]);
     }
     #[test]

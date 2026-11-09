@@ -205,12 +205,7 @@ pub async fn open_paths(
         if ds.rows == 0 {
             return Err("No data rows were found in the selected file(s)".into());
         }
-        if let Some(index) = ds.tests.iter().position(|t| {
-            t.number.is_none() && t.name == stdf::TEST_TIME_NAME && t.units == "s" && t.count > 0
-        }) {
-            ds.tests[..=index].rotate_right(1);
-            ds.cols[..=index].rotate_right(1);
-        }
+        stdf::prioritize_derived_tests(&mut ds);
         let _ = app.emit("import-progress", Progress {pct:99.0,msg:"Detecting numeric grouping labels…".into()});
         ds.detect_numeric_labels();
         ds.detect_data_categories();

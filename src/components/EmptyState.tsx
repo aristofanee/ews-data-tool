@@ -67,9 +67,6 @@ export function EmptyState() {
     <div className="empty">
       <div className="empty-inner">
         <div className="empty-copy">
-          <div className="eyebrow">
-            <span className="eyebrow-dot" /> Wafer-sort analytics · offline
-          </div>
           <h1>EWS Data Tool</h1>
           <div className="empty-actions">
             <button className="btn primary lg" onClick={() => open()}>
@@ -97,9 +94,6 @@ export function EmptyState() {
           </div>
         </div>
         <WaferArt />
-      </div>
-      <div className="empty-foot">
-        Everything runs locally. No data leaves this computer.
       </div>
     </div>
   );

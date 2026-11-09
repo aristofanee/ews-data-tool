@@ -1,9 +1,10 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Plotly from "plotly.js-dist-min";
 import type { Figure } from "../charts/figures";
 import { PLOTLY_CONFIG } from "../charts/plotlyTheme";
 import { rasterScatterPreview } from "../charts/scatterPreview";
 import { restoreBoundaryLimitLines } from "../charts/limitLineClipping";
+import { renderWithSvgFallback } from "../charts/plotlyFallback";
 
 interface Props {
   figure: Figure | null;
@@ -18,6 +19,8 @@ const views = new Map<string, { axes: Record<string, { range: number[]; autorang
 export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cacheKey }: Props) {
   const ownRef = useRef<HTMLDivElement | null>(null);
   const targetRef = hostRef ?? ownRef;
+  const [contextLost, setContextLost] = useState(false);
+  const svgFallback = useRef(false);
   const config = useMemo(
     () =>
       isStatic
@@ -118,8 +121,13 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
       defaults[key + ".autorange"] = axis.autorange;
       if (!axis.autorange) defaults[key + ".range"] = [...axis.range];
     }
-    void Plotly.react(el, rendered.data, layout, config).then(async () => {
+    const onContextLost = () => setContextLost(true);
+    void renderWithSvgFallback(el, rendered.data, layout,
+      (data, nextLayout) => Plotly.react(el, data, nextLayout, config),
+      contextLost || svgFallback.current, () => alive).then(async (usedFallback) => {
       if (!alive) return;
+      svgFallback.current ||= usedFallback;
+      if (!isStatic && !usedFallback) el.addEventListener("webglcontextlost", onContextLost, true);
       restoreLimitLines();
       graph.on?.("plotly_afterplot", restoreLimitLines);
       if (!isStatic) {
@@ -144,6 +152,7 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     }).catch((error: unknown) => { if (alive) console.error("Unable to render plot", error); });
     return () => {
       alive = false;
+      el.removeEventListener("webglcontextlost", onContextLost, true);
       cancelAnimationFrame(resetFrame);
       el.removeEventListener('mousedown',resetFromPointer,true);
       window.removeEventListener("mouseup", finishClick, true);
@@ -152,7 +161,7 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
       graph.removeListener?.("plotly_relayout", capture);
       graph.removeListener?.("plotly_restyle", capture);
     };
-  }, [figure, targetRef, config, cacheKey, isStatic]);
+  }, [figure, targetRef, config, cacheKey, isStatic, contextLost]);
 
   useEffect(() => {
     const el = targetRef.current;

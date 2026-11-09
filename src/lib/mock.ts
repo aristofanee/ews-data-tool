@@ -756,21 +756,11 @@ export async function waferMap(req: {
   let fail = 0;
   let vmin = Infinity;
   let vmax = -Infinity;
-  let xMin = Infinity;
-  let xMax = -Infinity;
-  let yMin = Infinity;
-  let yMax = -Infinity;
   for (const d of dice) {
     if (req.mode === "value") {
       vmin = Math.min(vmin, d.v);
       vmax = Math.max(vmax, d.v);
     }
-    xMin = Math.min(xMin, d.x);
-    xMax = Math.max(xMax, d.x);
-    yMin = Math.min(yMin, d.y);
-    yMax = Math.max(yMax, d.y);
-    if (d.hbin === 1) pass++;
-    else fail++;
   }
 
   // Wafer yield uses every tested die, independently of plot filters and
@@ -802,15 +792,16 @@ export async function waferMap(req: {
   }
   const first = selected[0];
   const baseWafer = ds.info.wafers[first.index];
+  const waferScope = selected.map(w => ds.info.wafers[w.index]);
   const wafer = isMean
     ? {
         ...baseWafer,
         name: "All wafers (mean)",
         dice: dice.length,
-        xMin: dice.length ? xMin : baseWafer.xMin,
-        xMax: dice.length ? xMax : baseWafer.xMax,
-        yMin: dice.length ? yMin : baseWafer.yMin,
-        yMax: dice.length ? yMax : baseWafer.yMax,
+        xMin: Math.min(...waferScope.map(w => w.xMin)),
+        xMax: Math.max(...waferScope.map(w => w.xMax)),
+        yMin: Math.min(...waferScope.map(w => w.yMin)),
+        yMax: Math.max(...waferScope.map(w => w.yMax)),
       }
     : baseWafer;
 

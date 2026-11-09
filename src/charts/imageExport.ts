@@ -7,6 +7,7 @@ import { emptyFilter } from "../types";
 import { fmt, testLabelWithUnits } from "../lib/format";
 import { graphFontOffset } from "../lib/demoFonts";
 import { drawExportBoundaryLimits } from "./limitLineClipping";
+import { renderWithSvgFallback } from "./plotlyFallback";
 
 export type ImageFormat = "png" | "jpeg";
 export const IMAGE_WIDTH = 2400, IMAGE_HEIGHT = 1500;
@@ -157,7 +158,7 @@ export async function renderExportFigure(fig: Figure, format: ImageFormat = "jpe
   document.body.appendChild(host);
   try {
     const declaredRange=Array.isArray(layout[style?.spec.type==="hist"?"xaxis":"yaxis"]?.range);
-    await Plotly.newPlot(host, data, layout, EXPORT_CONFIG);
+    await renderWithSvgFallback(host, data, layout, (traces, plotLayout) => Plotly.newPlot(host, traces, plotLayout, EXPORT_CONFIG));
     if (style && ["box","hist","trend","scatter"].includes(style.spec.type)) {
       const key=style.spec.type==="hist"?"xaxis":"yaxis";
       const axis=(host as any)._fullLayout[key];

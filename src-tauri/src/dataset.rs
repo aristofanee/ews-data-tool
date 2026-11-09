@@ -467,6 +467,7 @@ impl Dataset {
         for r in 0..self.rows {
             let w = &mut self.wafers[self.wafer_of_row[r] as usize];
             w.dice += 1;
+            if self.x[r] == i16::MIN || self.y[r] == i16::MIN { continue; }
             w.x_min = w.x_min.min(self.x[r]);
             w.x_max = w.x_max.max(self.x[r]);
             w.y_min = w.y_min.min(self.y[r]);

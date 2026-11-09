@@ -113,9 +113,14 @@ code {
 /* ------------------------------------------------------------------ */
 
 .app {
+  --window-titlebar-height: 0px;
   height: 100vh;
   display: flex;
   flex-direction: column;
+}
+
+.app.desktop {
+  --window-titlebar-height: 32px;
 }
 
 .app-body {
@@ -138,6 +143,50 @@ code {
 /* ------------------------------------------------------------------ */
 /* Top bar                                                             */
 /* ------------------------------------------------------------------ */
+
+.window-titlebar {
+  position: relative;
+  z-index: 1001;
+  display: flex;
+  flex: 0 0 var(--window-titlebar-height);
+  background: var(--panel);
+  color: var(--text);
+  user-select: none;
+}
+
+.window-drag-region {
+  flex: 1;
+}
+
+.window-titlebar button {
+  width: 46px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.window-titlebar button:hover {
+  background: var(--border);
+}
+
+.window-titlebar button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+
+.window-titlebar .window-close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+
+.window-titlebar svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+}
 
 .topbar {
   flex: 0 0 58px;
@@ -1511,7 +1560,7 @@ select.input {
 
 .drawer {
   position: fixed;
-  top: 0;
+  top: var(--window-titlebar-height);
   right: 0;
   bottom: 0;
   width: 452px;
@@ -1919,25 +1968,6 @@ select.input {
   max-width: 540px;
 }
 
-.eyebrow {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--blue);
-  margin-bottom: 14px;
-}
-
-.eyebrow-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--yellow);
-}
-
 .empty h1 {
   font-size: 42px;
   line-height: 1.08;
@@ -1973,13 +2003,6 @@ select.input {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-
-.empty-foot {
-  text-align: center;
-  padding: 0 20px 26px;
-  font-size: 10.5px;
-  color: var(--muted);
 }
 
 .wafer-art {

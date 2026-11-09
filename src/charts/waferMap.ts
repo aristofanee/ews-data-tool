@@ -2,7 +2,7 @@ import type { BinOverviewWafer, MapDie, MapResponse, PlotSpec, Filter } from "..
 import { fmtMap } from "../lib/format";
 import { quantileSorted, valueMapSummary } from "../lib/stats";
 import type { Theme } from "../lib/theme";
-import { binColor, binLabel, paletteColor, binYieldText } from "../lib/theme";
+import { binColor, binLabel, paletteColor, binYieldText, hexToRgb } from "../lib/theme";
 import * as api from "../lib/api";
 import { graphFontOffset } from "../lib/demoFonts";
 import { imageFrame, encodeImage, wrapImageText, exportPlotTitle, limitFooter, statisticsFooter } from "./imageExport";
@@ -88,6 +88,7 @@ interface MapColors {
   empty: string;
   text: string;
   muted: string;
+  limit: string;
 }
 
 const FONT = '"Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif';
@@ -115,6 +116,7 @@ function mapColors(theme: Theme): MapColors {
         empty: "#1b2940",
         text: "#dbe4f3",
         muted: "#8fa1bd",
+        limit: "#fb7185",
       }
     : {
         bg: "#ffffff",
@@ -123,6 +125,7 @@ function mapColors(theme: Theme): MapColors {
         empty: "#dbe3ee",
         text: "#0f172a",
         muted: "#64748b",
+        limit: "#e11d48",
       };
 }
 
@@ -173,8 +176,9 @@ export class WaferMapRenderer {
   private baseCtx: CanvasRenderingContext2D | null = null;
   private baseDirty = true;
   private paths: Map<string,Path2D> | null = null;
+  private dieRaster: { canvas: HTMLCanvasElement; left: number; top: number; grid: Path2D } | null | undefined;
   private legendDirty = true;
-  private legendBox: {left:number;top:number;right:number;bottom:number} | null = null;
+  private legendBox: {left:number;top:number;right:number;bottom:number;background:string} | null = null;
   private bounds: [number,number,number,number] | null = null;
   private frame: number | null = null;
   private interactive = false;
@@ -183,7 +187,7 @@ export class WaferMapRenderer {
   private cachePanY = 0;
   private cachePadPixels = 0;
 
-  private invalidateDrawing():void {this.baseDirty=true;this.paths=null;this.legendDirty=true;}
+  private invalidateDrawing():void {this.baseDirty=true;this.paths=null;this.dieRaster=undefined;this.legendDirty=true;}
   private scheduleDraw():void {
     if(this.frame!==null)return;
     this.frame=requestAnimationFrame(()=>{this.frame=null;this.draw();});
@@ -236,7 +240,7 @@ export class WaferMapRenderer {
     for (const d of data.dice) this.byKey.set(`${d.x},${d.y}`, d);
     this.invalidateDrawing();
     if (prev !== next) this.resetView();
-    this.draw();
+    else this.draw();
   }
 
   setOptions(opts: MapOptions): void {
@@ -338,6 +342,61 @@ export class WaferMapRenderer {
     return c;
   }
 
+  private dieColor(die: MapDie, empty: string, lo: number, span: number): string {
+    if (this.opts?.mode === "bin") {
+      const code = this.opts.binCategory === "soft" ? die.sbin : die.hbin;
+      return binColor(code, this.opts.binPass?.includes(code) ?? code === 1);
+    }
+    return Number.isFinite(die.v) ? this.colorFor((die.v - lo) / span) : empty;
+  }
+
+  /** One source pixel per die. The separate grid keeps the gaps crisp at any zoom. */
+  private buildDieRaster(empty: string, lo: number, span: number, dw: number, dh: number) {
+    if (!this.data || dw > this.cellW || dh > this.cellH) return null;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const die of this.data.dice) {
+      if (die.x <= -32768 || die.y <= -32768) continue;
+      minX = Math.min(minX, die.x); maxX = Math.max(maxX, die.x);
+      minY = Math.min(minY, die.y); maxY = Math.max(maxY, die.y);
+    }
+    const cols = maxX - minX + 1, rows = maxY - minY + 1;
+    // Avoid a large bitmap for pathological sparse coordinate spans.
+    if (cols < 1 || rows < 1 || cols > 4096 || rows > 4096 || cols * rows > 1_000_000) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = cols; canvas.height = rows;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    const pixels = ctx.createImageData(cols, rows);
+    const colors = new Map<string, [number, number, number]>();
+    for (const die of this.data.dice) {
+      if (die.x <= -32768 || die.y <= -32768) continue;
+      const color = this.dieColor(die, empty, lo, span);
+      let rgb = colors.get(color);
+      if (!rgb) { rgb = hexToRgb(color); colors.set(color, rgb); }
+      const col = this.signX === 1 ? die.x - minX : maxX - die.x;
+      const row = this.signY === 1 ? maxY - die.y : die.y - minY;
+      const i = (row * cols + col) * 4;
+      pixels.data[i] = rgb[0]; pixels.data[i + 1] = rgb[1]; pixels.data[i + 2] = rgb[2]; pixels.data[i + 3] = 255;
+    }
+    ctx.putImageData(pixels, 0, 0);
+    const { cellW, cellH, dieCx, dieCy } = this;
+    const left = (this.signX === 1 ? minX - dieCx : dieCx - maxX) * cellW - cellW / 2;
+    const top = (this.signY === 1 ? dieCy - maxY : minY - dieCy) * cellH - cellH / 2;
+    const grid = new Path2D();
+    const gapX = cellW - dw, gapY = cellH - dh;
+    for (let col = 0; col <= cols; col++) {
+      const x = col * cellW;
+      const start = Math.max(0, x - gapX / 2);
+      grid.rect(left + start, top, Math.min(cols * cellW, x + gapX / 2) - start, rows * cellH);
+    }
+    for (let row = 0; row <= rows; row++) {
+      const y = row * cellH;
+      const start = Math.max(0, y - gapY / 2);
+      grid.rect(left, top + start, cols * cellW, Math.min(rows * cellH, y + gapY / 2) - start);
+    }
+    return { canvas, left, top, grid };
+  }
+
   draw(): void {
     if (!this.data || !this.opts) return;
     const w = this.w / this.scale;
@@ -385,57 +444,47 @@ export class WaferMapRenderer {
     ctx.fillStyle = t.bg;
     ctx.fillRect(-this.cachePad, -this.cachePad, w+this.cachePad*2, h+this.cachePad*2);
 
-    // Die coordinates are not necessarily centred on (0, 0): older STDF
-    // writers often use positive-only grid coordinates. Centre the map on the
-    // die bounding box, not on the coordinate origin.
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minY = Infinity;
-    let maxY = -Infinity;
-    if(!this.bounds)for (const d of data.dice) {
-      if (d.x < minX) minX = d.x;
-      if (d.x > maxX) maxX = d.x;
-      if (d.y < minY) minY = d.y;
-      if (d.y > maxY) maxY = d.y;
-    }
-    if (!Number.isFinite(minX)) {
-      minX = -1;
-      maxX = 1;
-      minY = -1;
-      maxY = 1;
-    }
-    if(this.bounds)[minX,maxX,minY,maxY]=this.bounds;else this.bounds=[minX,maxX,minY,maxY];
+    // Filters choose which dies to draw. Use the complete wafer grid to
+    // position them, even when a filter leaves only one die.
     const wf = data.wafer;
+    if (!this.bounds) {
+      if (wf && wf.xMin > -32768 && wf.yMin > -32768 && wf.xMin <= wf.xMax && wf.yMin <= wf.yMax) {
+        this.bounds = [wf.xMin, wf.xMax, wf.yMin, wf.yMax];
+      } else {
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const die of data.dice) {
+          if (die.x <= -32768 || die.y <= -32768) continue;
+          minX = Math.min(minX, die.x);
+          maxX = Math.max(maxX, die.x);
+          minY = Math.min(minY, die.y);
+          maxY = Math.max(maxY, die.y);
+        }
+        this.bounds = Number.isFinite(minX) ? [minX, maxX, minY, maxY] : [-1, 1, -1, 1];
+      }
+    }
+    const [minX, maxX, minY, maxY] = this.bounds;
     this.signX=wf?.posX==="L"?-1:1;
     this.signY=wf?.posY==="D"?-1:1;
     const dieWmm = wf?.dieWMm && wf.dieWMm > 0 ? wf.dieWMm : null;
     const dieHmm = wf?.dieHMm && wf.dieHMm > 0 ? wf.dieHMm : null;
     const hasDieDims = dieWmm !== null && dieHmm !== null;
-    // WCR CENTER_X/CENTER_Y are die-grid coordinates. Some writers put a
-    // placeholder such as 128/128 in a file whose dice only span 4..45; using
-    // it would draw the whole map off-canvas. Trust the WCR centre only when
-    // it is at least near the dice we actually have. Without physical die
-    // dimensions the renderer fits a legacy coordinate grid around the dice,
-    // so the bounding-box centre is always the right anchor there.
-    const bboxCx = (minX + maxX) / 2;
-    const bboxCy = (minY + maxY) / 2;
-    const spanX = Math.max(1, maxX - minX + 1);
-    const spanY = Math.max(1, maxY - minY + 1);
-    let centerX = bboxCx;
-    let centerY = bboxCy;
-    const wcrCx = wf?.centerX;
-    const wcrCy = wf?.centerY;
-    if (
-      hasDieDims &&
-      wcrCx != null &&
-      wcrCy != null &&
-      wcrCx >= minX - spanX &&
-      wcrCx <= maxX + spanX &&
-      wcrCy >= minY - spanY &&
-      wcrCy <= maxY + spanY
-    ) {
-      centerX = wcrCx;
-      centerY = wcrCy;
+    const diameter = wf?.diameterMm && wf.diameterMm > 0 ? wf.diameterMm : null;
+    let centerX = (minX + maxX) / 2;
+    let centerY = (minY + maxY) / 2;
+    const wcrCx = wf?.centerX, wcrCy = wf?.centerY;
+    if (hasDieDims && wcrCx != null && wcrCy != null) {
+      // A reported centre may be outside a sparse wafer's tested grid.
+      // Accept it if the grid can reach the physical circle, rejecting
+      // placeholders that would put the entire wafer off-canvas.
+      const dx = Math.max(0, minX - wcrCx, wcrCx - maxX);
+      const dy = Math.max(0, minY - wcrCy, wcrCy - maxY);
+      const plausible = diameter !== null
+        ? Math.hypot(Math.max(0, dx - 0.5) * dieWmm, Math.max(0, dy - 0.5) * dieHmm) <= diameter / 2
+        : dx <= maxX - minX + 1 && dy <= maxY - minY + 1;
+      if (plausible) {
+        centerX = wcrCx;
+        centerY = wcrCy;
+      }
     }
     this.dieCx = centerX;
     this.dieCy = centerY;
@@ -463,7 +512,6 @@ export class WaferMapRenderer {
       // outside it must not shrink the visible wafer and create blank space.
       const halfGridW = Math.max(Math.abs(minX - centerX), Math.abs(maxX - centerX) + 1) * dieWmm;
       const halfGridH = Math.max(Math.abs(minY - centerY), Math.abs(maxY - centerY) + 1) * dieHmm;
-      const diameter = wf?.diameterMm && wf.diameterMm > 0 ? wf.diameterMm : null;
       const radiusMm = diameter
         ? diameter / 2
         : Math.max(halfGridW, halfGridH) + Math.max(dieWmm, dieHmm) * 0.5;
@@ -517,42 +565,38 @@ export class WaferMapRenderer {
     const lo = Number.isFinite(this.opts?.vmin) ? (this.opts!.vmin as number) : Number.isFinite(data.vmin) ? data.vmin : 0;
     const hi = Number.isFinite(this.opts?.vmax) ? (this.opts!.vmax as number) : Number.isFinite(data.vmax) ? data.vmax : 1;
     const vspan = hi > lo ? hi - lo : 1;
-    // Group dice by colour and fill one path per colour. Setting fillStyle and
-    // calling fillRect 50k times is dramatically slower in WebView2 than
-    // filling a handful of batched paths, and a 256-colour palette means at
-    // most 256 fills per redraw.
-    if(!this.paths){
-    const paths = new Map<string, Path2D>();
-    for (const d of data.dice) {
-      let color: string;
-      if (mode === "bin") {
-        const category = this.opts?.binCategory === "soft" ? d.sbin : d.hbin;
-        const pass = this.opts?.binPass
-          ? this.opts.binPass.includes(category)
-          : category === 1;
-        color = binColor(category, pass);
-      } else if (!Number.isFinite(d.v)) {
-        color = t.empty;
-      } else {
-        color = this.colorFor((d.v - lo) / vspan);
-      }
-      let path = paths.get(color);
-      if (!path) {
-        path = new Path2D();
-        paths.set(color, path);
-      }
-      path.rect(
-        (d.x - centerX) * cellW * this.signX - dw / 2,
-        -(d.y - centerY) * cellH * this.signY - dh / 2,
-        dw,
-        dh
-      );
+    if (this.interactive && this.dieRaster === undefined) {
+      this.dieRaster = this.buildDieRaster(t.empty, lo, vspan, dw, dh);
     }
-    this.paths=paths;
-    }
-    for (const [color, path] of this.paths) {
-      ctx.fillStyle = color;
-      ctx.fill(path);
+    if (this.dieRaster) {
+      const { canvas, left, top, grid } = this.dieRaster;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(canvas, left, top, canvas.width * cellW, canvas.height * cellH);
+      ctx.fillStyle = t.wafer;
+      ctx.fill(grid);
+    } else {
+      // Keep vector rendering for exports and grids too sparse for a bitmap.
+      if (!this.paths) {
+        this.paths = new Map();
+        for (const die of data.dice) {
+          const color = this.dieColor(die, t.empty, lo, vspan);
+          let path = this.paths.get(color);
+          if (!path) {
+            path = new Path2D();
+            this.paths.set(color, path);
+          }
+          path.rect(
+            (die.x - centerX) * cellW * this.signX - dw / 2,
+            -(die.y - centerY) * cellH * this.signY - dh / 2,
+            dw,
+            dh
+          );
+        }
+      }
+      for (const [color, path] of this.paths) {
+        ctx.fillStyle = color;
+        ctx.fill(path);
+      }
     }
     ctx.restore();
 
@@ -576,7 +620,7 @@ export class WaferMapRenderer {
     if(this.legendDirty){
     this.legendBox=null;
     const barX = w - cbarW + (pres ? 14 : 10);
-    const legendColors = this.opts.exportInk ? {...mapColors("light"),text:"#000000",muted:"#000000",outline:"#000000"} : mapColors("light");
+    const legendColors = this.opts.exportInk ? {...mapColors("light"),text:"#000000",muted:"#000000",outline:"#000000"} : t;
     const bounds = new LegendBounds();
     let legendCtx: CanvasRenderingContext2D | null = null;
     if (showLegend) {
@@ -610,7 +654,7 @@ export class WaferMapRenderer {
     if (legendCtx && this.legendCanvas && Number.isFinite(bounds.left)) {
       const padding = 16;
       this.legendLeft = bounds.left - padding;
-      this.legendBox={left:Math.max(0,bounds.left-padding),top:Math.max(0,bounds.top-padding),right:Math.min(w,bounds.right+padding),bottom:Math.min(h,bounds.bottom+padding)};
+      this.legendBox={left:Math.max(0,bounds.left-padding),top:Math.max(0,bounds.top-padding),right:Math.min(w,bounds.right+padding),bottom:Math.min(h,bounds.bottom+padding),background:legendColors.bg};
     }
     this.legendDirty=false;
     }
@@ -629,7 +673,7 @@ export class WaferMapRenderer {
       const width=right-left,height=bottom-top;
       if(width<=0||height<=0)return;
       ctx.setTransform(1,0,0,1,0,0);
-      ctx.fillStyle='#ffffff';ctx.fillRect(left,top,width,height);
+      ctx.fillStyle=box.background;ctx.fillRect(left,top,width,height);
       ctx.drawImage(this.legendCanvas,left,top,width,height,left,top,width,height);
     }
   }
@@ -797,14 +841,14 @@ export class WaferMapRenderer {
       const f = (v - lo) / (hi - lo);
       if (f < 0 || f > 1) return;
       const yy = barY + barH * (1 - f);
-      ctx.strokeStyle = "#e11d48";
+      ctx.strokeStyle = t.limit;
       ctx.lineWidth = 2 * k;
       ctx.beginPath();
       ctx.moveTo(x - 2 * k, yy);
       ctx.lineTo(x + width + 2 * k, yy);
       ctx.stroke();
       ctx.font = `${this.opts?.exportInk ? "400" : "700"} ${Math.round(9 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
-      ctx.fillStyle = "#e11d48";
+      ctx.fillStyle = t.limit;
       ctx.textAlign = "right";
       bounds.include(x - 2 * k, yy - k, width + 4 * k, 2 * k);
       bounds.text(ctx, label, x - 5 * k, yy);

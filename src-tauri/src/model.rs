@@ -227,6 +227,7 @@ impl Default for StatFilter {
 }
 
 pub struct Dataset {
+    pub csv_warnings: Vec<crate::dataset::CsvImportWarning>,
     pub text_cols: Vec<TextColumn>,
     pub data_categories: Vec<DataCategory>,
     pub text_label_sources: HashMap<String, String>,
@@ -257,6 +258,7 @@ pub struct Dataset {
 impl Dataset {
     pub fn new() -> Self {
         Self {
+            csv_warnings: Vec::new(),
             text_cols: Vec::new(),
             data_categories: Vec::new(),
             text_label_sources: HashMap::new(),

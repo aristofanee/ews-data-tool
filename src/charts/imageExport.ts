@@ -112,6 +112,7 @@ export async function renderExportFigure(fig: Figure, format: ImageFormat = "jpe
   height ??= style ? imageHeight(style.spec.type) : IMAGE_HEIGHT;
   const title = style ? exportPlotTitle(style.spec, style.test, style.xLabel, style.facetLabel)
     : String(layout.title?.text ?? "").replace(/<br\s*\/?>/gi, "\n");
+  let blockGroupTitle = "";
   let notes: string[] = [];
   if (style) {
     notes = [limitFooter(style.total,null)];
@@ -122,6 +123,8 @@ export async function renderExportFigure(fig: Figure, format: ImageFormat = "jpe
         if (layout.showlegend && layout.legend) {
           layout.legend.title = { text, side: "top", font: { size, color: "#000000", weight: 400 } };
         }
+      } else if (style.spec.type === "box" || style.spec.type === "trend") {
+        blockGroupTitle = text;
       } else {
         layout.annotations = [...(layout.annotations ?? []), {xref:"paper",yref:"paper",x:0.5,y:1,
           yshift:size * 2.8,text,showarrow:false,
@@ -153,6 +156,31 @@ export async function renderExportFigure(fig: Figure, format: ImageFormat = "jpe
   layout.title = undefined;
   layout.width = 1200; layout.height = frame.contentHeight; layout.autosize = false;
   layout.margin = { ...layout.margin, t: Math.max(24, (layout.margin?.t ?? 54) - 25) };
+  if (blockGroupTitle) {
+    const groupLabels = (layout.annotations ?? []).filter((a: any) => a.xref === "x" && a.yref === "paper" && a.y === 1.02);
+    if (groupLabels.length) {
+      const size = layout.font?.size ?? 18;
+      const labelGap = 10;
+      frame.ctx.save();
+      const labelHeight = Math.max(...groupLabels.map((label: any) => {
+        const fontSize = label.font?.size ?? size;
+        frame.ctx.font = `400 ${fontSize}px ${label.font?.family ?? CHART_FONT}`;
+        const lines = String(label.text ?? "").split(/<br\s*\/?>/gi);
+        const width = Math.max(...lines.map((line) => frame.ctx.measureText(line).width)) + 6;
+        const height = lines.length * fontSize * 1.3 + 6;
+        const radians = Math.abs(label.textangle ?? 0) * Math.PI / 180;
+        label.y = 1;
+        label.yshift = labelGap;
+        return width * Math.sin(radians) + height * Math.cos(radians);
+      }));
+      frame.ctx.restore();
+      const titleOffset = Math.ceil(labelGap + labelHeight + 8);
+      layout.annotations.push({ xref: "paper", yref: "paper", x: 0.5, y: 1,
+        yshift: titleOffset, text: blockGroupTitle, showarrow: false,
+        xanchor: "center", yanchor: "bottom", font: { size, color: "#000000", weight: 400 } });
+      layout.margin.t = Math.ceil(titleOffset + size * 1.3 + 12);
+    }
+  }
   const host = document.createElement("div");
   host.style.cssText = `position:fixed;left:-30000px;top:0;width:1200px;height:${frame.contentHeight}px;`;
   document.body.appendChild(host);

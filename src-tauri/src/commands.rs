@@ -184,7 +184,7 @@ pub async fn open_paths(
                 })?;
                 continue;
             }
-            let imp = match ext.as_str() {
+            let mut imp = match ext.as_str() {
                 "csv" | "txt" | "tsv" | "dat" => {
                     csv_io::import_csv_with_mapping(&path, &mut cb, mapping.as_ref())?
                 }
@@ -197,12 +197,22 @@ pub async fn open_paths(
                     msg: format!("Merging {}", path.file_name().and_then(|f| f.to_str()).unwrap_or("")),
                 },
             );
+            if !imp.csv_skipped_lines.is_empty() {
+                ds.csv_warnings.push(crate::dataset::CsvImportWarning {
+                    file: p.clone(),
+                    lines: std::mem::take(&mut imp.csv_skipped_lines),
+                });
+            }
             ds.append_import(imp);
             ds.files.push(p.clone());
         }
         let _ = app.emit("import-progress", Progress {pct:92.0,msg:"Resolving retests…".into()});
         ds.resolve_retests();
         if ds.rows == 0 {
+            if !ds.csv_warnings.is_empty() {
+                let skipped: usize = ds.csv_warnings.iter().map(|warning| warning.lines.len()).sum();
+                return Err(format!("No valid data rows found. Skipped {skipped} CSV rows with missing or invalid X/Y coordinates."));
+            }
             return Err("No data rows were found in the selected file(s)".into());
         }
         stdf::prioritize_derived_tests(&mut ds);

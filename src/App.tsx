@@ -3,14 +3,13 @@ import { useStore } from "./store";
 import * as api from "./lib/api";
 import { useExportCsv, useOpenFiles, useSaveTemplate } from "./lib/useData";
 import { TopBar } from "./components/TopBar";
-import { WindowTitleBar } from "./components/WindowTitleBar";
 import { DemoFontControls } from "./components/DemoFontControls";
 import { Sidebar } from "./components/Sidebar";
 import { ChartPanel } from "./components/ChartPanel";
 import { Inspector } from "./components/Inspector";
 import { ReportDrawer } from "./components/ReportDrawer";
 import { CsvMappingDialog } from "./components/CsvMappingDialog";
-import { StatusBar, ErrorBanner, ProgressOverlay, Toast } from "./components/StatusBar";
+import { StatusBar, CsvImportWarning, ErrorBanner, ProgressOverlay, Toast } from "./components/StatusBar";
 import type { PlotType } from "./types";
 
 const PLOT_KEYS: PlotType[] = ["box", "map", "hist", "scatter", "trend", "binmap", "pareto"];
@@ -74,7 +73,6 @@ export default function App() {
 
   return (
     <div className={api.isTauri ? "app desktop" : "app"}>
-      {api.isTauri && <WindowTitleBar />}
       <TopBar />
       {!api.isTauri && <DemoFontControls />}
       <div className="app-body">
@@ -89,6 +87,7 @@ export default function App() {
       <CsvMappingDialog />
       <ProgressOverlay />
       <ErrorBanner />
+      <CsvImportWarning />
       <Toast />
     </div>
   );

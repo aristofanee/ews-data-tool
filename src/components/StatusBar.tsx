@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { useStore } from "../store";
-import { isTauri } from "../lib/api";
+import { fileName, isTauri } from "../lib/api";
 import { fmtInt } from "../lib/format";
 import { IconAlert, IconX } from "./Icons";
 import { version } from "../../package.json";
@@ -67,6 +68,26 @@ export function ErrorBanner() {
       <button onClick={() => setError(null)} title="Dismiss">
         <IconX size={14} />
       </button>
+    </div>
+  );
+}
+
+export function CsvImportWarning() {
+  const warnings = useStore(s => s.info?.csvWarnings);
+  const busy = useStore(s => s.busy);
+  const error = useStore(s => s.error);
+  const [dismissed, setDismissed] = useState<typeof warnings>();
+  if (!warnings?.length || warnings === dismissed || busy || error) return null;
+  return (
+    <div className="error-banner csv-warning" role="status">
+      <IconAlert size={16} />
+      <div className="csv-warning-details">
+        <strong>Skipped CSV rows with missing or invalid X/Y coordinates</strong>
+        {warnings.map(({ file, lines }, index) => (
+          <div key={index} title={file}>{fileName(file)} · {lines.length === 1 ? "line" : "lines"} {lines.join(", ")}</div>
+        ))}
+      </div>
+      <button onClick={() => setDismissed(warnings)} title="Dismiss CSV warning"><IconX size={14} /></button>
     </div>
   );
 }

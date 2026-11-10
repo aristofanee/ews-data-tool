@@ -113,14 +113,14 @@ code {
 /* ------------------------------------------------------------------ */
 
 .app {
-  --window-titlebar-height: 0px;
+  --topbar-height: 58px;
   height: 100vh;
   display: flex;
   flex-direction: column;
 }
 
 .app.desktop {
-  --window-titlebar-height: 32px;
+  --topbar-height: 44px;
 }
 
 .app-body {
@@ -144,21 +144,23 @@ code {
 /* Top bar                                                             */
 /* ------------------------------------------------------------------ */
 
-.window-titlebar {
+.window-controls {
   position: relative;
   z-index: 1001;
   display: flex;
-  flex: 0 0 var(--window-titlebar-height);
+  flex: 0 0 auto;
+  align-self: stretch;
   background: var(--panel);
   color: var(--text);
   user-select: none;
 }
 
 .window-drag-region {
-  flex: 1;
+  flex: 1 0 32px;
+  align-self: stretch;
 }
 
-.window-titlebar button {
+.window-controls button {
   width: 46px;
   display: grid;
   place-items: center;
@@ -167,21 +169,21 @@ code {
   color: inherit;
 }
 
-.window-titlebar button:hover {
+.window-controls button:hover {
   background: var(--border);
 }
 
-.window-titlebar button:focus-visible {
+.window-controls button:focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: -2px;
 }
 
-.window-titlebar .window-close:hover {
+.window-controls .window-close:hover {
   background: #c42b1c;
   color: #fff;
 }
 
-.window-titlebar svg {
+.window-controls svg {
   width: 11px;
   height: 11px;
   fill: none;
@@ -189,8 +191,8 @@ code {
 }
 
 .topbar {
-  flex: 0 0 58px;
-  height: 58px;
+  flex: 0 0 var(--topbar-height);
+  height: var(--topbar-height);
   display: flex;
   align-items: center;
   gap: 20px;
@@ -198,6 +200,12 @@ code {
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   z-index: 12;
+}
+
+.desktop .topbar {
+  gap: 12px;
+  padding: 0 0 0 12px;
+  z-index: auto;
 }
 
 .brand {
@@ -1560,7 +1568,7 @@ select.input {
 
 .drawer {
   position: fixed;
-  top: var(--window-titlebar-height);
+  top: 0;
   right: 0;
   bottom: 0;
   width: 452px;
@@ -1571,6 +1579,10 @@ select.input {
   display: flex;
   flex-direction: column;
   animation: drawerIn 0.18s ease-out;
+}
+
+.desktop .drawer {
+  top: var(--topbar-height);
 }
 
 @keyframes drawerIn {
@@ -1904,7 +1916,7 @@ select.input {
 
 .error-banner {
   position: fixed;
-  top: 68px;
+  top: calc(var(--topbar-height) + 10px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 65;
@@ -1938,6 +1950,19 @@ select.input {
   background: none;
   color: inherit;
   padding: 0;
+}
+
+.error-banner.csv-warning {
+  background: var(--yellow-soft);
+  border-color: var(--yellow);
+  color: var(--text);
+}
+
+.csv-warning-details {
+  max-height: 180px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2077,7 +2102,7 @@ select.input {
   .empty-inner {
     padding: 30px;
   }
-  .dataset-meta {
+  .app:not(.desktop) .dataset-meta {
     display: none;
   }
 }
@@ -2086,7 +2111,7 @@ select.input {
   .inspector {
     display: none;
   }
-  .topbar-actions .btn:not(.primary):not(.icon) {
+  .app:not(.desktop) .topbar-actions .btn:not(.primary):not(.icon) {
     display: none;
   }
 }

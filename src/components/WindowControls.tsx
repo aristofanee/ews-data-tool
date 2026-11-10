@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "../store";
 
-export function WindowTitleBar() {
+export function WindowControls() {
   const [window] = useState(getCurrentWindow);
   const [maximized, setMaximized] = useState(false);
   const setError = useStore(s => s.setError);
@@ -26,8 +26,7 @@ export function WindowTitleBar() {
   };
   const maximizeLabel = maximized ? "Restore down" : "Maximize";
   return (
-    <header className="window-titlebar" aria-label="Window controls">
-      <div className="window-drag-region" data-tauri-drag-region />
+    <div className="window-controls" role="group" aria-label="Window controls">
       <button type="button" aria-label="Minimize" title="Minimize" onClick={() => run(window.minimize())}>
         <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6h10" /></svg>
       </button>
@@ -39,6 +38,6 @@ export function WindowTitleBar() {
       <button type="button" className="window-close" aria-label="Close window" title="Close" onClick={() => run(window.close())}>
         <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m1 1 10 10m0-10L1 11" /></svg>
       </button>
-    </header>
+    </div>
   );
 }

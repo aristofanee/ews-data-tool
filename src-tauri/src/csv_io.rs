@@ -356,18 +356,34 @@ fn layout_from_headers(headers: &[String]) -> Layout {
 }
 
 fn has_die_identity(rec: &csv::StringRecord, lay: &Layout) -> bool {
-    let text_key = |index: Option<usize>| index.map_or(true, |i| rec.get(i).is_some_and(|v| !v.trim().is_empty()));
-    let coordinate = |index: Option<usize>| index.map_or(true, |i| {
-        rec.get(i).and_then(|v| v.trim().parse::<f64>().ok())
-            .is_some_and(|v| v.is_finite() && v.fract() == 0.0 && v >= i16::MIN as f64 && v <= i16::MAX as f64)
-    });
-    text_key(lay.lot) && text_key(lay.wafer) && coordinate(lay.x) && coordinate(lay.y)
+    [lay.lot, lay.wafer].into_iter().flatten()
+        .all(|i| rec.get(i).is_some_and(|v| !v.trim().is_empty()))
 }
 
-fn validate_die_record(rec: &csv::StringRecord, lay: &Layout) -> Result<(), String> {
-    if has_die_identity(rec, lay) { return Ok(()); }
-    let line = rec.position().map(|p| p.line()).unwrap_or(0);
-    Err(format!("CSV data row at line {line} has missing lot/wafer identity or invalid die coordinates"))
+fn valid_coordinate(rec: &csv::StringRecord, i: usize) -> bool {
+    rec.get(i).and_then(|v| v.trim().parse::<f64>().ok())
+        .is_some_and(|v| v.fract() == 0.0 && v > i16::MIN as f64 && v <= i16::MAX as f64)
+}
+
+fn record_line(rec: &csv::StringRecord, text: &str) -> u64 {
+    rec.position().map_or(0, |p| {
+        // The CSV reader can leave the record position before skipped blank lines.
+        let leading_breaks = text.as_bytes()[p.byte() as usize..].iter()
+            .take_while(|&&byte| byte == b'\r' || byte == b'\n')
+            .filter(|&&byte| byte == b'\n').count();
+        p.line() + leading_breaks as u64
+    })
+}
+
+fn accept_die_record(rec: &csv::StringRecord, lay: &Layout, text: &str, skipped: &mut Vec<u64>) -> Result<bool, String> {
+    if !has_die_identity(rec, lay) {
+        return Err(format!("CSV data row at line {} has missing lot/wafer identity", record_line(rec, text)));
+    }
+    if [lay.x, lay.y].into_iter().flatten().all(|i| valid_coordinate(rec, i)) {
+        return Ok(true);
+    }
+    skipped.push(record_line(rec, text));
+    Ok(false)
 }
 
 fn apply_mapping(mut lay: Layout, mapping: Option<&CsvMapping>, n: usize) -> Result<Layout, String> {
@@ -640,6 +656,8 @@ fn find_header(
 fn read_metadata_and_probe(
     rdr: &mut csv::Reader<&[u8]>,
     lay: &Layout,
+    text: &str,
+    skipped: &mut Vec<u64>,
 ) -> Result<(Vec<csv::StringRecord>, Vec<csv::StringRecord>), String> {
     let mut metadata = Vec::new();
     let mut probe = Vec::new();
@@ -658,15 +676,14 @@ fn read_metadata_and_probe(
                 continue;
             }
             if rec.iter().find(|v| !v.trim().is_empty()).is_some_and(|v| norm(v) == "pattern") { continue; }
-            if has_die_identity(&rec, lay) {
-                data_started = true;
-            } else {
-                // Unneeded descriptive rows do not terminate metadata.
-                // Only a valid die identity starts the data section.
+            let has_coordinate = [lay.x, lay.y].into_iter().flatten().any(|i| valid_coordinate(&rec, i));
+            if !has_die_identity(&rec, lay) || (!has_coordinate && lay.wafer.is_none()) {
+                // Ignore descriptive rows before the die table starts.
                 continue;
             }
         }
-        validate_die_record(&rec, lay)?;
+        if !accept_die_record(&rec, lay, text, skipped)? { continue; }
+        data_started = true;
         probe.push(rec.clone());
     }
     Ok((metadata, probe))
@@ -701,6 +718,7 @@ pub fn import_csv_with_mapping(
     mapping: Option<&CsvMapping>,
 ) -> Result<Imported, String> {
     let mapped = mapped_text(path)?;
+    progress(1.0, "Reading CSV headers…");
     let text = decode(&mapped)?;
     let delim = detect_delimiter(&text);
     let (headers, _header_line, header_idx) = find_header(&text, delim)?;
@@ -717,11 +735,21 @@ pub fn import_csv_with_mapping(
         }
         if index < header_idx { preamble.read(&header_rec)?; }
     }
-    let (metadata_rows, probe) = read_metadata_and_probe(&mut rdr, &lay)?;
+    let mut skipped = Vec::new();
+    let (metadata_rows, probe) = read_metadata_and_probe(&mut rdr, &lay, &text, &mut skipped)?;
     let col_meta = collect_metadata(&metadata_rows, &headers);
 
     let long_format = lay.test.is_some() && lay.value.is_some();
     let mut imp = Imported::new();
+    let mut last_percent = 1;
+    // The reader reports offsets in the decoded text, including for UTF-16 files.
+    let mut report_position = |bytes: u64| {
+        let percent = 2 + (93.0 * bytes as f64 / text.len() as f64) as u32;
+        if percent > last_percent {
+            last_percent = percent;
+            progress(percent as f32, "Reading CSV rows…");
+        }
+    };
 
     if long_format {
         let ti = lay.test.unwrap();
@@ -807,20 +835,20 @@ pub fn import_csv_with_mapping(
             }
             imp.site[row] = lay.site.and_then(|i| rec.get(i)).and_then(parse_u32).and_then(|v| u8::try_from(v).ok());
             imp.records += 1;
-            if imp.records % 200_000 == 0 {
-                progress(0.0, "Reading CSV...");
-            }
         };
 
         for rec in probe.iter() {
             push(rec, &mut imp);
         }
+        report_position(rdr.position().byte());
         let mut rec = csv::StringRecord::new();
         while rdr.read_record(&mut rec).map_err(|e| format!("Invalid CSV record: {e}"))? {
+            report_position(rdr.position().byte());
             if rec.iter().all(|v| v.trim().is_empty()) { continue; }
-            validate_die_record(&rec, &lay)?;
+            if !accept_die_record(&rec, &lay, &text, &mut skipped)? { continue; }
             push(&rec, &mut imp);
         }
+        progress(96.0, "Finalizing CSV…");
         // Give tests a stable order matching their ids.
         let mut order: Vec<(u32, usize)> = test_ids
             .iter()
@@ -838,6 +866,7 @@ pub fn import_csv_with_mapping(
         imp.col_index.clear();
         push_meta_columns(&mut imp, meta);
         preamble.apply(&mut imp);
+        imp.csv_skipped_lines = skipped;
         return Ok(imp.finish());
     }
 
@@ -960,23 +989,45 @@ pub fn import_csv_with_mapping(
     for r in probe.iter() {
         push_row(&mut imp, r, &mut meta);
     }
+    report_position(rdr.position().byte());
     let mut rec = csv::StringRecord::new();
     while rdr.read_record(&mut rec).map_err(|e| format!("Invalid CSV record: {e}"))? {
+        report_position(rdr.position().byte());
         if rec.iter().all(|v| v.trim().is_empty()) { continue; }
-        validate_die_record(&rec, &lay)?;
+        if !accept_die_record(&rec, &lay, &text, &mut skipped)? { continue; }
         push_row(&mut imp, &rec, &mut meta);
-        if imp.records % 200_000 == 0 {
-            progress(0.0, "Reading CSV...");
-        }
     }
 
+    progress(96.0, "Finalizing CSV…");
     push_meta_columns(&mut imp, meta);
     preamble.apply(&mut imp);
+    imp.csv_skipped_lines = skipped;
     Ok(imp.finish())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn single_csv_reports_incremental_progress_in_both_formats() {
+        for (name, header, suffix) in [
+            ("wide", "Lot,Wafer,X,Y,Voltage [V]\n", ",1.25\n"),
+            ("long", "Lot,Wafer,X,Y,Test,Value\n", ",Voltage,1.25\n"),
+        ] {
+            let mut csv = header.to_string();
+            for x in 0..5000 {
+                csv.push_str(&format!("L,W,{x},0{suffix}"));
+            }
+            let path = write_temp(&format!("progress-{name}"), &csv);
+            let mut steps = Vec::new();
+            let result = import_csv(&path, &mut |percent, _| steps.push(percent));
+            std::fs::remove_file(path).unwrap();
+            assert_eq!(result.unwrap().row_lot.len(), 5000);
+            assert!(steps.iter().filter(|&&p| p > 5.0 && p < 95.0).count() >= 10);
+            assert!(steps.windows(2).all(|w| w[0] < w[1]));
+            assert_eq!(steps.last(), Some(&96.0));
+        }
+    }
+
     #[test]
     fn rejects_corrupt_text_instead_of_replacing_labels_and_units(){
         for bytes in [&b"Lot,Wafer,X,Y,V\nL,W,0,0,\xff"[..],&b"\xef\xbb\xbf\xff"[..],&b"\xff\xfeL\0x"[..]]{assert!(super::decode(bytes).unwrap_err().contains("encoding"));}
@@ -1012,14 +1063,16 @@ mod tests {
     }
 
     #[test]
-    fn ocr_priority_is_independent_of_column_order_and_invalid_dice_are_rejected() {
+    fn ocr_priority_is_independent_of_column_order_and_invalid_dice_are_skipped() {
         for headers in [vec!["Wafer", "WAFER_ID", "OCR"], vec!["OCR", "Wafer", "WAFER_ID"]] {
             let values: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
             let lay = layout_from_headers(&values);
             assert_eq!(values[lay.wafer.unwrap()], "OCR"); assert_eq!(values[lay.wafer_number.unwrap()], "Wafer");
         }
-        let p = write_temp("invalid-after-data", "Lot,Wafer,X,Y,V\nL,W,1,2,4\nL,W,invalid,2,5\n");
-        assert!(import_csv(&p, &mut |_, _| {}).err().unwrap().contains("invalid die coordinates"));
+        let p = write_temp("invalid-after-data", "Lot,Wafer,X,Y,V\nL,W,,,3\nL,W,1,2,4\n\nL,W,invalid,2,5\n");
+        let imported = import_csv(&p, &mut |_, _| {}).unwrap();
+        assert_eq!(imported.x, vec![1]);
+        assert_eq!(imported.csv_skipped_lines, vec![2, 5]);
         let _ = std::fs::remove_file(p);
     }
 

@@ -2,6 +2,7 @@ import { useStore } from "../store";
 import { useExportCsv, useLoadTemplate, useOpenFiles, useSaveTemplate } from "../lib/useData";
 import { fmtInt } from "../lib/format";
 import * as api from "../lib/api";
+import { WindowControls } from "./WindowControls";
 import {
   IconDownload,
   IconFolder,
@@ -86,8 +87,9 @@ export function TopBar() {
         <div className="dataset-meta muted">No dataset loaded</div>
       )}
 
-      <div className="topbar-actions">
+      {api.isTauri && <div className="window-drag-region" data-tauri-drag-region />}
 
+      <div className="topbar-actions">
         <button className="btn icon" onClick={toggleTheme} title={theme === "dark" ? "Light mode" : "Dark mode"}>
           {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
         </button>
@@ -117,6 +119,7 @@ export function TopBar() {
           {reportCount > 0 && <span className="badge">{reportCount}</span>}
         </button>
       </div>
+      {api.isTauri && <WindowControls />}
     </header>
   );
 }

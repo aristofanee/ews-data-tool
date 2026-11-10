@@ -267,17 +267,35 @@ function buildDataset(): MockDataset {
 function dataset(): MockDataset {
   if (!cached) {
     cached = buildDataset();
-    buildMockCategory(cached);
+    addMockCategory(cached, "Probe mode", ["A", "B", "C"], (_wafer, die) => die % 3);
+    // Twelve long group headings exercise the rotated labels in box plots and trends.
+    const runs = Array.from({ length: 12 }, (_, i) => `Run ${String(i + 1).padStart(2, "0")}`);
+    addMockCategory(cached, "Probe run", runs, (wafer) => wafer.index % runs.length);
   }
   return cached;
 }
 
-function buildMockCategory(ds:MockDataset){
-  const id="data:text:Probe mode",values=["","A","B","C"],data=new Map<number,Uint16Array>(),counts=[0,0,0,0];
-  for(const w of ds.wafers){const codes=new Uint16Array(w.x.length);for(let i=0;i<codes.length;i++){
-    const code=i%3+1;codes[i]=code;counts[code]++;
-  }data.set(w.index,codes);}
-  ds.categoryData.set(id,data);ds.info={...ds.info,dataCategories:[{id,name:"Probe mode",values,labels:values.map((v,i)=>i?v:"Unassigned"),counts,automatic:true}]};
+function addMockCategory(ds: MockDataset, name: string, categories: string[],
+  categoryIndex: (wafer: MockWafer, die: number) => number) {
+  const id = `data:text:${name}`;
+  const values = ["", ...categories];
+  const counts = values.map(() => 0);
+  const data = new Map<number, Uint16Array>();
+  for (const wafer of ds.wafers) {
+    const codes = new Uint16Array(wafer.x.length);
+    for (let die = 0; die < codes.length; die++) {
+      const code = categoryIndex(wafer, die) + 1;
+      codes[die] = code;
+      counts[code]++;
+    }
+    data.set(wafer.index, codes);
+  }
+  ds.categoryData.set(id, data);
+  ds.info = {
+    ...ds.info,
+    dataCategories: [...(ds.info.dataCategories ?? []),
+      { id, name, values, labels: ["Unassigned", ...categories], counts, automatic: true }],
+  };
 }
 function categoryAllowed(w:MockWafer,i:number,f:Filter):boolean{
   const ds=dataset();return Object.entries(f.categories??{}).every(([id,values])=>{if(!values.length)return true;const c=ds.info.dataCategories?.find(c=>c.id===id),code=ds.categoryData.get(id)?.get(w.index)?.[i];return !!c&&code!==undefined&&values.includes(c.values[code]);});
@@ -458,6 +476,7 @@ export async function boxPlot(req: {
       values: number[];
       xs: number[];
       ys: number[];
+      waferIndices: number[];
     }
   >();
   const xAxis = req.xAxis || "wafer";
@@ -484,12 +503,14 @@ export async function boxPlot(req: {
           values: [],
           xs: [],
           ys: [],
+          waferIndices: [],
         };
         buckets.set(key, bucket);
       }
       bucket.values.push(v);
       bucket.xs.push(w.x[i]);
       bucket.ys.push(w.y[i]);
+      bucket.waferIndices.push(w.index);
     }
   }
 
@@ -507,17 +528,20 @@ export async function boxPlot(req: {
       const nv: number[] = [];
       const nx: number[] = [];
       const ny: number[] = [];
+      const nw: number[] = [];
       for (let i = 0; i < g.values.length; i++) {
         if (keep[idx]) {
           nv.push(g.values[i]);
           nx.push(g.xs[i]);
           ny.push(g.ys[i]);
+          nw.push(g.waferIndices[i]);
         }
         idx++;
       }
       g.values = nv;
       g.xs = nx;
       g.ys = ny;
+      g.waferIndices = nw;
       for (const v of nv) all.push(v);
     }
     excluded = flat.length - all.length;
@@ -545,14 +569,15 @@ export async function boxPlot(req: {
     summary: summarize(values), testYieldPct: testYield(values, test, req.population),
   }]));
   return Promise.resolve({
+    waferLabels: ds.wafers.map(w => `${ds.lots[w.lot]} / ${w.name}`),
     groupStats,
     testYieldPct: testYield(all, test, req.population),
     groups: ordered.map((g) => {
       const summary = summarize(g.values);
       const positiveSummary = g.values.every(v => v > 0) ? summary : summarize(g.values.filter(v => v > 0));
-      let { values, xs, ys } = g;
+      let { values, xs, ys, waferIndices } = g;
       if (stride > 1) {
-        values = []; xs = []; ys = [];
+        values = []; xs = []; ys = []; waferIndices = [];
         const fences = [summary, positiveSummary].map(s => {
           const pad = 1.5 * (s.q3 - s.q1);
           return [s.q1 - pad, s.q3 + pad];
@@ -563,6 +588,7 @@ export async function boxPlot(req: {
             values.push(v);
             xs.push(g.xs[i]);
             ys.push(g.ys[i]);
+            waferIndices.push(g.waferIndices[i]);
           }
         }
       }
@@ -576,6 +602,7 @@ export async function boxPlot(req: {
         values,
         xs,
         ys,
+        waferIndices,
         n: g.values.length,
       };
     }),

@@ -196,12 +196,14 @@ pub struct BoxGroup {
     pub values: Vec<f32>,
     pub xs: Vec<i16>,
     pub ys: Vec<i16>,
+    pub wafer_indices: Vec<u16>,
     pub n: usize,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxResponse {
+    pub wafer_labels: Vec<String>,
     pub test_yield_pct: Option<f64>,
     pub group_stats: HashMap<String, PopulationStats>,
     pub groups: Vec<BoxGroup>,
@@ -223,6 +225,7 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
         .unwrap_or_else(|| TestInfo::new("?"));
     if req.test >= ds.cols.len() || ds.cols[req.test].is_empty() {
         return BoxResponse {
+            wafer_labels: Vec::new(),
             test_yield_pct: None,
             group_stats: HashMap::new(),
             groups: Vec::new(),
@@ -247,7 +250,7 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
         .as_deref()
         .filter(|s| !s.is_empty() && *s != "none");
 
-    let mut buckets: HashMap<(u16, u16), Vec<(f32, i16, i16)>> = HashMap::new();
+    let mut buckets: HashMap<(u16, u16), Vec<usize>> = HashMap::new();
     let mut x_labels: HashMap<u16, String> = HashMap::new();
     let mut group_labels: HashMap<u16, String> = HashMap::new();
     for r in 0..ds.rows {
@@ -268,7 +271,7 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
         buckets
             .entry((x_key, group_key))
             .or_default()
-            .push((v, ds.x[r], ds.y[r]));
+            .push(r);
     }
 
     let mut x_keys: Vec<u16> = x_labels.keys().copied().collect();
@@ -294,7 +297,7 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
                 continue;
             };
             let n = vals.len();
-            let full_values: Vec<f32> = vals.iter().map(|(v, _, _)| *v).collect();
+            let full_values: Vec<f32> = vals.iter().map(|&r| col[r]).collect();
             let group_summary = summarize(&full_values);
             if split {
                 group_values.entry(*group_key).or_default().extend_from_slice(&full_values);
@@ -303,13 +306,15 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
             let mut values = Vec::with_capacity(n / stride + 1);
             let mut xs = Vec::with_capacity(n / stride + 1);
             let mut ys = Vec::with_capacity(n / stride + 1);
-            for (i, (v, x, y)) in vals.iter().enumerate() {
-                all.push(*v);
-                let outlier = |s: &Summary| *v < s.q1 - 1.5 * (s.q3 - s.q1) || *v > s.q3 + 1.5 * (s.q3 - s.q1);
-                if i % stride == 0 || outlier(&group_summary) || (*v > 0.0 && outlier(&positive_summary)) {
-                    values.push(*v);
-                    xs.push(*x);
-                    ys.push(*y);
+            let mut wafer_indices = Vec::with_capacity(n / stride + 1);
+            for (i, (&r, &v)) in vals.iter().zip(&full_values).enumerate() {
+                all.push(v);
+                let outlier = |s: &Summary| v < s.q1 - 1.5 * (s.q3 - s.q1) || v > s.q3 + 1.5 * (s.q3 - s.q1);
+                if i % stride == 0 || outlier(&group_summary) || (v > 0.0 && outlier(&positive_summary)) {
+                    values.push(v);
+                    xs.push(ds.x[r]);
+                    ys.push(ds.y[r]);
+                    wafer_indices.push(ds.wafer_of_row[r]);
                 }
             }
             groups.push(BoxGroup {
@@ -323,6 +328,7 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
                 values,
                 xs,
                 ys,
+                wafer_indices,
             });
         }
     }
@@ -336,6 +342,7 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
         })
     }).collect();
     BoxResponse {
+        wafer_labels: (0..ds.wafers.len()).map(|i| wafer_label(ds, i as u16, true)).collect(),
         test_yield_pct: test_yield(&all, &test, req.population.as_ref()),
         group_stats,
         groups,

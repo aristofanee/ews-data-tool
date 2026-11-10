@@ -13,6 +13,7 @@ fn limits_differ(a: Option<f32>, b: Option<f32>) -> bool {
 
 /// Data parsed from one file, keyed by local indices. Merged into `Dataset` afterwards.
 pub struct Imported {
+    pub csv_skipped_lines: Vec<u64>,
     pub text_cols: Vec<TextColumn>,
     lot_lookup: HashMap<String, u16>,
     wafer_lookup: HashMap<u16, HashMap<String, u16>>,
@@ -40,6 +41,7 @@ pub struct Imported {
 impl Imported {
     pub fn new() -> Self {
         Self {
+            csv_skipped_lines: Vec::new(),
             text_cols:Vec::new(),
             lot_lookup: HashMap::new(),
             wafer_lookup: HashMap::new(),
@@ -499,6 +501,7 @@ impl Dataset {
         let sbins = bins(&self.sbin, &self.sbin_names, &self.pass_sbin);
 
         DatasetInfo {
+            csv_warnings: self.csv_warnings.clone(),
             data_categories:self.data_categories.iter().map(|c|DataCategoryInfo{id:c.id.clone(),name:c.name.clone(),values:c.values.clone(),labels:(0..c.values.len()).map(|i|c.label(i as u16)).collect(),counts:c.counts.clone(),automatic:c.automatic}).collect(),
             files: self.files.clone(),
             lots: self.lots.clone(),
@@ -524,6 +527,8 @@ impl Dataset {
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatasetInfo {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub csv_warnings: Vec<CsvImportWarning>,
     pub data_categories:Vec<DataCategoryInfo>,
     pub sites: Vec<u16>,
     pub files: Vec<String>,
@@ -536,6 +541,12 @@ pub struct DatasetInfo {
     pub sbins: Vec<BinInfo>,
     pub custom_columns: Vec<CustomColumn>,
     pub memory_mb: f64,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CsvImportWarning {
+    pub file: String,
+    pub lines: Vec<u64>,
 }
 
 #[cfg(test)]

@@ -44,6 +44,7 @@ export interface CustomColumn {
 }
 
 export interface DatasetInfo {
+  csvWarnings?: { file: string; lines: number[] }[];
   dataCategories?:DataCategoryInfo[];
   sites?: number[];
   /** Earlier die attempts replaced by the latest imported attempt. */
@@ -120,10 +121,12 @@ export interface BoxGroup {
   values: number[];
   xs: number[];
   ys: number[];
+  waferIndices: number[];
   n: number;
 }
 
 export interface BoxResponse extends PopulationStats {
+  waferLabels: string[];
   groupStats: Record<string, PopulationStats>;
   groups: BoxGroup[];
   test: TestInfo;

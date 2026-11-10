@@ -74,6 +74,36 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     let alive = true;
     const graph = el as any;
     const restoreLimitLines = () => restoreBoundaryLimitLines(el);
+    const labels = isStatic ? undefined : figure.indexedXLabels;
+    const tickFont = figure.layout.xaxis?.tickfont;
+    const tickAngle = Math.abs(figure.layout.xaxis?.tickangle ?? 0) * Math.PI / 180;
+    const measure = labels?.length ? document.createElement("canvas").getContext("2d") : null;
+    if (measure) measure.font = `${tickFont.size}px ${tickFont.family}`;
+    const labelWidths = measure && labels?.map(label =>
+      Math.cos(tickAngle) * measure.measureText(label).width + Math.sin(tickAngle) * tickFont.size + 8);
+    let tickFrame = 0;
+    // Category positions stay fixed while the label stride follows the visible range.
+    const updateTicks = () => {
+      if (!labels || !labelWidths) return;
+      cancelAnimationFrame(tickFrame);
+      tickFrame = requestAnimationFrame(() => {
+        const axis = graph._fullLayout?.xaxis;
+        if (!alive || !axis?._length || !axis.range) return;
+        const [low, high] = axis.range;
+        const start = Math.max(0, Math.ceil(low));
+        const end = Math.min(labels.length - 1, Math.floor(high));
+        let widest = 0;
+        for (let i = start; i <= end; i++) widest = Math.max(widest, labelWidths[i]);
+        const stride = Math.max(1, Math.ceil((high - low) * widest / axis._length));
+        const ticks: number[] = [];
+        for (let i = start; i <= end; i += stride) ticks.push(i);
+        if (ticks.length === axis.tickvals?.length && ticks.every((tick, i) => tick === axis.tickvals[i])) return;
+        void Plotly.relayout(el, {
+          "xaxis.tickvals": ticks,
+          "xaxis.ticktext": ticks.map(i => labels[i]),
+        }).catch(console.error);
+      });
+    };
     const saved = cacheKey ? views.get(cacheKey) : undefined;
     const defaults: Record<string, unknown> = {};
     const reset = () => {
@@ -130,6 +160,8 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
       if (!isStatic && !usedFallback) el.addEventListener("webglcontextlost", onContextLost, true);
       restoreLimitLines();
       graph.on?.("plotly_afterplot", restoreLimitLines);
+      graph.on?.("plotly_afterplot", updateTicks);
+      updateTicks();
       if (!isStatic) {
         // Plotly can suppress native click counts after handling a drag.
         el.addEventListener("mousedown", resetFromPointer, true);
@@ -154,9 +186,11 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
       alive = false;
       el.removeEventListener("webglcontextlost", onContextLost, true);
       cancelAnimationFrame(resetFrame);
+      cancelAnimationFrame(tickFrame);
       el.removeEventListener('mousedown',resetFromPointer,true);
       window.removeEventListener("mouseup", finishClick, true);
       graph.removeListener?.("plotly_afterplot", restoreLimitLines);
+      graph.removeListener?.("plotly_afterplot", updateTicks);
       capture();
       graph.removeListener?.("plotly_relayout", capture);
       graph.removeListener?.("plotly_restyle", capture);

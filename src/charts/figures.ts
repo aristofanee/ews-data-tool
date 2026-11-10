@@ -33,6 +33,7 @@ export interface Figure {
   exportFilter?: Filter;
   data: any[];
   layout: any;
+  indexedXLabels?: string[];
   rasterScatter?: boolean;
   sampledMarkers?: boolean;
 }
@@ -298,20 +299,23 @@ function applyAxisRange(
 function addGroupBlocks(t: ChartTheme, groups: { groupLabel: string }[], spec: PlotSpec,
   style: ChartStyle, shapes: any[], annotations: any[]) {
   const groupLabels = [...new Set(groups.map((g) => g.groupLabel).filter(Boolean))];
+  const dense = groupLabels.length > 8;
+  let hasRotatedHeading = false;
   let start = 0;
   for (const label of groupLabels) {
     const length = groups.filter((g) => g.groupLabel === label).length;
     const heading = spec.groupBy === "wafer" ? shortTick(label) : label;
-    const dense = groupLabels.length > 8;
+    const textangle = dense && heading.length > 3 ? (groupLabels.length > 20 ? -75 : -55) : 0;
+    hasRotatedHeading ||= textangle !== 0;
     annotations.push({ xref: "x", x: start + (length - 1) / 2,
       yref: "paper", y: 1.02, xanchor: "center", yanchor: "bottom",
-      text: heading, textangle: dense && heading.length > 3 ? (groupLabels.length > 20 ? -75 : -55) : 0,
+      text: heading, textangle,
       showarrow: false, font: { size: dense ? Math.min(spec.presentation ? 11 : 13 + graphFontOffset(), style.annotation) : style.annotation, color: t.text, family: CHART_FONT } });
     if (start > 0) shapes.push({ type: "line", xref: "x", x0: start - 0.5, x1: start - 0.5,
       yref: "paper", y0: 0, y1: 1, line: { color: t.axis, width: 1, dash: "dot" } });
     start += length;
   }
-
+  return Math.round(style.annotation * (hasRotatedHeading ? 5 : 1.2));
 }
 
 function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
@@ -407,7 +411,12 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
           (k) => xPos + (pseudo(idx[k] + xIndex * 977) - 0.5) * width * 0.72
         );
         const py = pick.map((k) => ys[k]);
-        const cd = pick.map((k) => [g.xs[idx[k]], g.ys[idx[k]], `${g.xLabel}${hasGrouping ? " · " + g.groupLabel : ""}`]);
+        const category = `${g.xLabel}${hasGrouping ? " · " + g.groupLabel : ""}`;
+        const cd = preview ? [] : pick.map((k) => {
+          const i = idx[k];
+          const wafer = data.waferLabels[g.waferIndices[i]];
+          return [g.xs[i], g.ys[i], wafer === category ? wafer : `${wafer}<br>${category}`];
+        });
         traces.push({
           type: preview ? "scatter" : "scattergl",
           mode: "markers",
@@ -458,12 +467,14 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
         l: style.margin.l,
         r: style.margin.r,
         b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.2) : 0),
-        t: layout.margin.t + (hasGrouping ? Math.round(style.annotation * (groupLabels.length > 8 ? 5 : 1.2)) : 0),
       };
   layout.boxgap = 0.32;
   layout.boxgroupgap = 0;
   layout.showlegend = false;
-  if (hasGrouping) addGroupBlocks(t, groups, spec, style, limits.shapes, limits.annotations);
+  if (hasGrouping) {
+    const headingSpace = addGroupBlocks(t, groups, spec, style, limits.shapes, limits.annotations);
+    if (!preview) layout.margin.t += headingSpace;
+  }
   else if (!preview && spec.xAxis === "wafer" && addLabelBlocks(t, xLabels, limits.shapes, limits.annotations, style)) {
     layout.margin.t += Math.round(style.annotation * 1.2);
   }
@@ -530,6 +541,7 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
     for (const column of columns) for (const value of trace[column]) batch[column].push(value);
   }
   const result = previewFigure([...boxes, ...batches.values()], layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${units ? ` [${units}]` : ""}`);
+  if (!preview) result.indexedXLabels = short;
   result.sampledMarkers = sampledMarkers;
   result.exportNotes = [`${fmtInt(groups.reduce((n, g) => n + g.summary.n, 0))} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} excluded by statistical filtering` : ""}`,
     ...(sampledMarkers ? ["Regular markers are sampled; every outlier is retained. Box statistics use all considered measurements."] : [])];
@@ -990,8 +1002,7 @@ function figureTrendCore(data: TrendResponse, opts: FigureOpts): Figure {
   const ticks = tickSubset(labels, stride);
   const layout = baseLayout(t, preview ? "" : opts.title, spec.presentation);
   layout.margin = { ...layout.margin, l: style.margin.l, r: style.margin.r,
-    b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.2) : 0),
-    t: layout.margin.t + (hasGrouping ? Math.round(style.annotation * (groupLabels.length > 8 ? 5 : 1.2)) : 0) };
+    b: style.margin.b + (angle !== 0 ? Math.round(style.tick * 2.2) : 0) };
   layout.showlegend = false;
   layout.xaxis = { ...layout.xaxis,
     title: { text: categoryTitle(spec.xAxis), font: { size: style.axisTitle, color: t.muted, family: CHART_FONT } },
@@ -1009,12 +1020,13 @@ function figureTrendCore(data: TrendResponse, opts: FigureOpts): Figure {
   }
   const meanStats = summarize(points.map(p=>p.mean).filter(v=>!spec.logY||v>0));
   applyAxisRange(layout, "y", spec, meanStats, lsl, usl, min, max);
-  if (hasGrouping) addGroupBlocks(t, points, spec, style, shapes, annotations);
+  if (hasGrouping) layout.margin.t += addGroupBlocks(t, points, spec, style, shapes, annotations);
   else if (addLabelBlocks(t, labels, shapes, annotations, style)) {
     layout.margin.t = Math.max(layout.margin.t, style.margin.t + Math.round(style.annotation * 1.1));
   }
   layout.shapes = shapes; layout.annotations = annotations;
   return { ...previewFigure(traces, layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${data.test.units ? ` [${data.test.units}]` : ""}`),
+    indexedXLabels: preview ? undefined : short,
     exportNotes: [`${fmtInt(points.reduce((n, p) => n + p.n, 0))} considered measurements · ${fmtInt(points.length)} category means · ${spec.showBand ? "band: ±1 SD" : "band hidden"}`] };
 }
 

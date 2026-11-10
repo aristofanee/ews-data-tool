@@ -12,6 +12,7 @@ import type {
   ParetoResponse,
   PlotSpec,
   ScatterResponse,
+  TestDistribution,
   TrendResponse,
 } from "../types";
 import * as mock from "./mock";
@@ -215,6 +216,12 @@ export async function pareto(req: {
 export function histogramOptions(spec: PlotSpec) {
   const { limitMode, limitK, yMin, yMax, lsl, usl, splitPlots } = spec;
   return { range: { limitMode, limitK, yMin, yMax }, population: { lsl, usl, split: splitPlots } };
+}
+
+export function testDistribution(test: number): Promise<TestDistribution | null> {
+  return cachedPlot("test_distribution", { test }, () =>
+    !isTauri ? mock.testDistribution(test) : invoke<TestDistribution | null>("test_distribution", { test }),
+    () => 512);
 }
 
 export async function histogram(req: {

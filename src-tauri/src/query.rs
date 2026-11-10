@@ -1235,6 +1235,30 @@ fn histogram_bins(values: &[f32], summary: &Summary, req: &HistRequest, test: &T
     HistogramBins { edges, counts, bin_range, fit_summary: visible_summary }
 }
 
+#[derive(Serialize)]
+pub struct TestDistribution {
+    pub min: f32,
+    pub max: f32,
+    pub counts: Vec<usize>,
+}
+
+pub fn test_distribution(ds: &Dataset, test: usize) -> Option<TestDistribution> {
+    let col = ds.cols.get(test)?;
+    let values = || col.iter().copied().filter(|v| v.is_finite());
+    let (min, max) = values().fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), v| (min.min(v), max.max(v)));
+    if !min.is_finite() { return None; }
+    const BINS: usize = 36;
+    let mut counts = vec![0; if min == max { 1 } else { BINS }];
+    let scale = BINS as f64 / (f64::from(max) - f64::from(min));
+    for value in values() {
+        let bin = if min == max { 0 } else {
+            (((f64::from(value) - f64::from(min)) * scale) as usize).min(BINS - 1)
+        };
+        counts[bin] += 1;
+    }
+    Some(TestDistribution { min, max, counts })
+}
+
 pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
     let test = ds
         .tests
@@ -1814,6 +1838,32 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_range_and_category_filters_intersect_with_existing_filters() {
+        use crate::model::CustomFilter;
+
+        let mut ds = small_dataset(&[0.37, 0.38, 0.4, 0.44, 0.45, f32::NAN]);
+        ds.site = vec![Some(1), Some(1), Some(2), Some(1), Some(1), Some(1)];
+        let mut filter = Filter {
+            custom: vec![
+                CustomFilter::Numeric { test: 0, min: 0.38, max: 0.44, keep: true, include_ends: None },
+                CustomFilter::Category { category: "site".into(), values: vec!["2".into()], keep: false },
+            ],
+            ..Filter::default()
+        };
+        assert_eq!(ds.base_mask(&filter), vec![false, true, false, true, false, false]);
+        let CustomFilter::Numeric { include_ends, .. } = &mut filter.custom[0] else { unreachable!() };
+        *include_ends = Some(false);
+        assert!(!ds.base_mask(&filter).into_iter().any(|keep| keep));
+        let CustomFilter::Numeric { include_ends, .. } = &mut filter.custom[0] else { unreachable!() };
+        *include_ends = Some(true);
+        let CustomFilter::Numeric { keep, .. } = &mut filter.custom[0] else { unreachable!() };
+        *keep = false;
+        assert_eq!(ds.base_mask(&filter), vec![true, false, false, false, true, false]);
+        filter.sites = vec![2];
+        assert!(!ds.base_mask(&filter).into_iter().any(|keep| keep));
+    }
+
     #[test]
     fn scatter_statistics_and_z_range_are_independent_of_marker_sampling() {
         let x:Vec<_>=(0..100).map(|i|i as f32).collect();let mut ds=small_dataset(&x);

@@ -6,6 +6,7 @@ import { binColor } from "../lib/theme";
 import { fmtInt, tidyName } from "../lib/format";
 import { fuzzyMatch } from "../lib/search";
 import { naturalCompare } from "../lib/stats";
+import { CustomFiltersPanel } from "./CustomFiltersPanel";
 import {
   IconChevronDown,
   IconChevronUp,
@@ -56,7 +57,7 @@ function FilterPanel() {
   };
 
   const activeFilters =
-    filters.lots.length + filters.wafers.length + filters.hbins.length + (filters.stat ? 1 : 0);
+    filters.lots.length + filters.wafers.length + filters.hbins.length + (filters.stat ? 1 : 0) + (filters.custom?.length ?? 0);
 
   return (
     <div className="filter-panel">
@@ -324,6 +325,10 @@ function CustomColumnsPanel() {
     try {
       const updated = await api.removeCustomColumn(col.name);
       setInfo(updated, { keepFilters: true });
+      const { filters, patchFilters } = useStore.getState();
+      if (filters.custom?.some(rule => rule.kind === "category" && rule.category === col.name)) {
+        patchFilters({ custom: filters.custom.filter(rule => rule.kind !== "category" || rule.category !== col.name) });
+      }
       if (spec.groupBy === col.name) patchSpec({ groupBy: "none" });
       notify(`Deleted label column “${col.name}”.`);
     } catch (e) {
@@ -557,6 +562,7 @@ export function Sidebar() {
     <aside className="sidebar">
       <div className="side-scroll">
         <FilterPanel />
+        <CustomFiltersPanel />
         <CustomColumnsPanel />
       </div>
       <TestList />

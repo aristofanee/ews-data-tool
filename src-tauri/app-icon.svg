@@ -1,44 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <defs>
-    <clipPath id="wafer">
-      <circle cx="512" cy="512" r="302"/>
-    </clipPath>
-  </defs>
-  <!-- Solid blue tile: stays readable in the 16/32 px taskbar and avoids the
-       black-square look caused by a dark, transparent icon. -->
-  <rect width="1024" height="1024" rx="224" fill="#2563eb"/>
-  <rect x="16" y="16" width="992" height="992" rx="210" fill="none" stroke="#1d4ed8" stroke-width="20"/>
-  <circle cx="512" cy="512" r="326" fill="#f8fafc"/>
-  <g clip-path="url(#wafer)">
-    <g fill="#2563eb">
-      <rect x="246" y="246" width="88" height="88" rx="16"/>
-      <rect x="352" y="246" width="88" height="88" rx="16"/>
-      <rect x="458" y="246" width="88" height="88" rx="16"/>
-      <rect x="564" y="246" width="88" height="88" rx="16"/>
-      <rect x="670" y="246" width="88" height="88" rx="16"/>
-      <rect x="246" y="352" width="88" height="88" rx="16"/>
-      <rect x="352" y="352" width="88" height="88" rx="16"/>
-      <rect x="458" y="352" width="88" height="88" rx="16"/>
-      <rect x="564" y="352" width="88" height="88" rx="16"/>
-      <rect x="670" y="352" width="88" height="88" rx="16"/>
-      <rect x="246" y="458" width="88" height="88" rx="16"/>
-      <rect x="352" y="458" width="88" height="88" rx="16"/>
-      <rect x="564" y="458" width="88" height="88" rx="16"/>
-      <rect x="670" y="458" width="88" height="88" rx="16"/>
-      <rect x="246" y="564" width="88" height="88" rx="16"/>
-      <rect x="352" y="564" width="88" height="88" rx="16"/>
-      <rect x="458" y="564" width="88" height="88" rx="16"/>
-      <rect x="564" y="564" width="88" height="88" rx="16"/>
-      <rect x="670" y="564" width="88" height="88" rx="16"/>
-      <rect x="246" y="670" width="88" height="88" rx="16"/>
-      <rect x="352" y="670" width="88" height="88" rx="16"/>
-      <rect x="458" y="670" width="88" height="88" rx="16"/>
-      <rect x="564" y="670" width="88" height="88" rx="16"/>
-      <rect x="670" y="670" width="88" height="88" rx="16"/>
-    </g>
-    <rect x="458" y="458" width="88" height="88" rx="16" fill="#f5b301"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#2563eb"/>
+  <path d="M28 53.6a22 22 0 1 1 8 0l-4-5.2z" fill="#f8fafc"/>
+  <g shape-rendering="crispEdges">
+    <rect x="21.75" y="14" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="29.25" y="14" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="36.75" y="14" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="14.25" y="21.5" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="21.75" y="21.5" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="29.25" y="21.5" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="36.75" y="21.5" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="44.25" y="21.5" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="14.25" y="29" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="21.75" y="29" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="29.25" y="29" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="36.75" y="29" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="44.25" y="29" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="14.25" y="36.5" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="21.75" y="36.5" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="29.25" y="36.5" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="36.75" y="36.5" width="5.5" height="5.5" fill="#f5b301"/>
+    <rect x="44.25" y="36.5" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="21.75" y="44" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="29.25" y="44" width="5.5" height="5.5" fill="#2563eb"/>
+    <rect x="36.75" y="44" width="5.5" height="5.5" fill="#2563eb"/>
   </g>
-  <circle cx="512" cy="512" r="326" fill="none" stroke="#1d4ed8" stroke-width="26"/>
-  <!-- Wafer notch, in brand yellow so the silhouette reads at small sizes. -->
-  <path d="M 430 818 L 594 818 L 512 716 Z" fill="#f5b301"/>
 </svg>

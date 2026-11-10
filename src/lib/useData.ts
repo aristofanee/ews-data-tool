@@ -2,8 +2,8 @@ import { useCallback } from "react";
 import * as api from "./api";
 import { fmtInt, safeName } from "./format";
 import { useStore, type TemplateFile } from "../store";
-import type { CsvMapping } from "../types";
-import { templatePlots, validateTemplate } from "./reportReferences";
+import { emptyFilter, type CsvMapping } from "../types";
+import { reportFilters, templatePlots, validateTemplate } from "./reportReferences";
 
 const CSV_EXT = /\.(csv|txt|tsv|dat)$/i;
 
@@ -60,7 +60,6 @@ export function useOpenFiles() {
 }
 
 export function useExportCsv() {
-  const filters = useStore((s) => s.filters);
   const setBusy = useStore((s) => s.setBusy);
   const setError = useStore((s) => s.setError);
   const notify = useStore((s) => s.notify);
@@ -73,14 +72,14 @@ export function useExportCsv() {
       const path = await api.pickSavePath(`${base}_export.csv`, ["csv"]);
       if (!path) return;
       setBusy(true, 25, "Writing CSV (this can take a moment for large lots)…");
-      const msg = await api.exportCsv(path, filters);
+      const msg = await api.exportCsv(path, emptyFilter());
       notify(msg);
       setBusy(false);
     } catch (e) {
       setBusy(false);
       setError(String(e));
     }
-  }, [filters, info, setBusy, setError, notify]);
+  }, [info, setBusy, setError, notify]);
 }
 
 export function useSaveTemplate() {
@@ -100,7 +99,7 @@ export function useSaveTemplate() {
         created: new Date().toISOString(),
         theme: s.theme,
         presentation: s.presentation,
-        filters: s.filters,
+        filters: reportFilters(s.filters),
         plots,
       };
       const path = await api.pickSavePath(`${safeName(name)}.json`, ["json"]);

@@ -13,7 +13,7 @@ import type {
 import { defaultSpec, emptyFilter } from "./types";
 import type { Theme } from "./lib/theme";
 import { testLabelWithUnits } from "./lib/format";
-import { bindReportItem, captureReferences, referenceKey, remapReference, validateTemplate } from "./lib/reportReferences";
+import { bindReportItem, captureReferences, referenceKey, remapReference, reportFilters, validateTemplate } from "./lib/reportReferences";
 
 export const PLOT_LABELS: Record<PlotType, string> = {
   box: "Box plot",
@@ -142,6 +142,7 @@ export interface CsvPrompt {
 
 interface AppState {
   demoFontRevision: number;
+  demoXLabelDensity: number;
   info: DatasetInfo | null;
   busy: boolean;
   busyPct: number;
@@ -202,8 +203,11 @@ interface AppState {
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
+export const DEFAULT_X_LABEL_DENSITY = 500;
+
 export const useStore = create<AppState>((set, get) => ({
   demoFontRevision: 0,
+  demoXLabelDensity: DEFAULT_X_LABEL_DENSITY,
   info: null,
   busy: false,
   busyPct: 0,
@@ -399,7 +403,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
     const spec: PlotSpec = { ...s.spec, id: rid() };
-    const item: ReportItem = { id: spec.id, spec, filters: structuredClone(s.filters), selection: selection ? structuredClone(selection) : undefined };
+    const item: ReportItem = { id: spec.id, spec, filters: reportFilters(s.filters), selection: selection ? structuredClone(selection) : undefined };
     item.references=captureReferences(item,s.info);
     set({ report: [...s.report, item] });
     const title = spec.type === "map" && spec.test !== null
@@ -410,7 +414,7 @@ export const useStore = create<AppState>((set, get) => ({
     const s = get();
     const added: ReportItem[] = items.map((it) => {
       const spec = { ...it.spec, id: rid(), presentation: s.presentation };
-      const item:ReportItem={ id: spec.id, spec, filters: structuredClone(it.filters) };
+      const item:ReportItem={ id: spec.id, spec, filters: reportFilters(it.filters) };
       item.references=captureReferences(item,s.info);return item;
     });
     set({ report: [...s.report, ...added] });
@@ -429,7 +433,7 @@ export const useStore = create<AppState>((set, get) => ({
   setReportOpen: (reportOpen) => set({ reportOpen }),
   setTemplateName: (templateName) => set({ templateName }),
   updateReportItem: (id) => {
-    const s=get(),item:ReportItem={id,spec:structuredClone({...s.spec,id}),filters:structuredClone(s.filters),selection:s.plotSelection?structuredClone(s.plotSelection):undefined};
+    const s=get(),item:ReportItem={id,spec:structuredClone({...s.spec,id}),filters:reportFilters(s.filters),selection:s.plotSelection?structuredClone(s.plotSelection):undefined};
     item.references=captureReferences(item,s.info);
     set({report:s.report.map(r=>r.id===id?item:r)});s.notify("Report item updated.");
   },

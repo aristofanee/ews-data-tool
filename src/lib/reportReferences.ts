@@ -1,9 +1,16 @@
-import { defaultSpec, emptyFilter, type DatasetInfo, type PlotSpec, type ReportItem, type ReportReference, type ReportIssue, type TestIdentity, type WaferIdentity } from "../types";
+import { defaultSpec, emptyFilter, type DatasetInfo, type Filter, type PlotSpec, type ReportItem, type ReportReference, type ReportIssue, type TestIdentity, type WaferIdentity } from "../types";
 import { testLabelWithUnits } from "./format";
 import { categoryName } from "./categoryNames";
 
 const builtins = ["lot", "wafer", "site", "hbin", "sbin"];
 const types = ["box", "hist", "trend", "scatter", "pareto", "map", "binmap"];
+const isCustomFilterReference = (ref: ReportReference) => /^custom(?:Test|Category|Value):/.test(ref.field);
+
+export function reportFilters(filters: Filter): Filter {
+  const { custom: _custom, ...saved } = filters;
+  return structuredClone(saved);
+}
+
 export const referenceKey = (r: ReportReference) => JSON.stringify([r.kind, r.value]);
 export const testIdentity = (t: TestIdentity): TestIdentity => ({number:t.number,name:t.name.trim(),units:t.units.trim()});
 export const waferIdentity = (info: DatasetInfo, i: number): WaferIdentity => ({lot:info.lots[info.wafers[i].lot],name:info.wafers[i].name});
@@ -116,7 +123,10 @@ function resolve(r:ReportReference, info:DatasetInfo, item:ReportItem):number|st
 }
 
 export function bindReportItem(source: ReportItem, info: DatasetInfo | null): { item:ReportItem; issues:ReportIssue[] } {
-  const item=structuredClone(source),refs=item.references??captureReferences(item,info);item.references=refs;
+  const item=structuredClone(source);
+  delete item.filters.custom;
+  const refs=(item.references??captureReferences(item,info)).filter(ref=>!isCustomFilterReference(ref));
+  item.references=refs;
   const issues:ReportIssue[]=[],pending:ReportReference[]=[];
   // Clear positional filters before rebuilding them; unresolved entries are never queried.
   for(const field of ["lots","wafers","hbins","sbins","sites"] as const)item.filters[field]=[];
@@ -213,6 +223,7 @@ export function validateTemplate(value:unknown):asserts value is import("../stor
     if(p.references){
       const fields=new Set();
       for(const r of p.references){
+        if(isCustomFilterReference(r))continue;
         if(r.explicit&&(!Number.isInteger(r.explicit.index)||r.explicit.index<0||typeof r.explicit.dataset!=="string"))throw new Error("Invalid explicit test match.");
         if(fields.has(r.field))throw new Error("Duplicate template reference.");fields.add(r.field);
         const kind = r.field==="selection"?["wafer","lot","split"]
@@ -244,5 +255,5 @@ export function validateTemplate(value:unknown):asserts value is import("../stor
 export function templatePlots(items:ReportItem[],info:DatasetInfo|null){
   // Explicit choices between indistinguishable tests are valid for this import;
   // the next import must resolve that ambiguity again rather than trust an index.
-  return items.map(item=>({spec:{...item.spec,lsl:null,usl:null},filters:item.filters,selection:item.selection,references:(item.references??captureReferences(item,info)).map(({explicit,...ref})=>ref)}));
+  return items.map(item=>({spec:{...item.spec,lsl:null,usl:null},filters:reportFilters(item.filters),selection:item.selection,references:(item.references??captureReferences(item,info)).filter(ref=>!isCustomFilterReference(ref)).map(({explicit,...ref})=>ref)}));
 }

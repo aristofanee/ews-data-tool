@@ -1,4 +1,5 @@
 import type { DatasetInfo, Filter } from "../types";
+import { categoryPassesCustomFilters } from "./customFilters";
 
 export interface DataGroup {
   key: string;
@@ -28,7 +29,8 @@ export function dataGroups(
     });
   const kind = category || "none";
   if (kind === "site") {
-    return (info.sites ?? []).filter((site) => !filter.sites?.length || filter.sites.includes(site)).map((site) => ({
+    return (info.sites ?? []).filter(site => (!filter.sites?.length || filter.sites.includes(site))
+      && categoryPassesCustomFilters(filter, kind, String(site))).map((site) => ({
       key: `site${site}`, label: site === 65535 ? "Unknown site" : `Site ${site}`,
       wafer: null, filter: { ...filter, sites: [site] },
     }));
@@ -61,7 +63,7 @@ export function dataGroups(
       }));
   }
   const rowCategory=info.dataCategories?.find(c=>c.id===kind);
-  if(rowCategory)return rowCategory.values.flatMap((value,code)=>rowCategory.counts[code]>0&&(!filter.categories?.[kind]?.length||filter.categories[kind].includes(value))?[{
+  if(rowCategory)return rowCategory.values.flatMap((value,code)=>rowCategory.counts[code]>0&&(!filter.categories?.[kind]?.length||filter.categories[kind].includes(value))&&categoryPassesCustomFilters(filter,kind,value)?[{
     key:`data${code}`,label:rowCategory.labels[code],wafer:null,filter:{...filter,categories:{...filter.categories,[kind]:[value]}}
   }]:[]);
   const col = info.customColumns.find((c) => c.name === kind);
@@ -71,6 +73,7 @@ export function dataGroups(
   const byCode = new Map<number, number[]>();
   for (const { index } of candidates) {
     const code = col.waferValues[index] ?? 0;
+    if (!categoryPassesCustomFilters(filter, kind, col.categories[code] ?? "")) continue;
     const list = byCode.get(code) ?? [];
     list.push(index);
     byCode.set(code, list);

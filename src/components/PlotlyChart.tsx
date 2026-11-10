@@ -5,6 +5,8 @@ import { PLOTLY_CONFIG } from "../charts/plotlyTheme";
 import { rasterScatterPreview } from "../charts/scatterPreview";
 import { restoreBoundaryLimitLines } from "../charts/limitLineClipping";
 import { renderWithSvgFallback } from "../charts/plotlyFallback";
+import { isTauri } from "../lib/api";
+import { DEFAULT_X_LABEL_DENSITY, useStore } from "../store";
 
 interface Props {
   figure: Figure | null;
@@ -94,7 +96,8 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
         const end = Math.min(labels.length - 1, Math.floor(high));
         let widest = 0;
         for (let i = start; i <= end; i++) widest = Math.max(widest, labelWidths[i]);
-        const stride = Math.max(1, Math.ceil((high - low) * widest / axis._length));
+        const density = (isTauri ? DEFAULT_X_LABEL_DENSITY : useStore.getState().demoXLabelDensity) / 100;
+        const stride = Math.max(1, Math.ceil((high - low) * widest / (axis._length * density)));
         const ticks: number[] = [];
         for (let i = start; i <= end; i += stride) ticks.push(i);
         if (ticks.length === axis.tickvals?.length && ticks.every((tick, i) => tick === axis.tickvals[i])) return;
@@ -104,6 +107,9 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
         }).catch(console.error);
       });
     };
+    const unsubscribeDensity = !isTauri && labelWidths ? useStore.subscribe((state, previous) => {
+      if (state.demoXLabelDensity !== previous.demoXLabelDensity && graph._fullLayout) updateTicks();
+    }) : undefined;
     const saved = cacheKey ? views.get(cacheKey) : undefined;
     const defaults: Record<string, unknown> = {};
     const reset = () => {
@@ -184,6 +190,7 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     }).catch((error: unknown) => { if (alive) console.error("Unable to render plot", error); });
     return () => {
       alive = false;
+      unsubscribeDensity?.();
       el.removeEventListener("webglcontextlost", onContextLost, true);
       cancelAnimationFrame(resetFrame);
       cancelAnimationFrame(tickFrame);

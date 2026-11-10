@@ -34,6 +34,7 @@ pub fn run() {
             commands::bin_overview,
             commands::pareto,
             commands::histogram,
+            commands::test_distribution,
             commands::trend,
             commands::limit_counts,
             commands::scatter,

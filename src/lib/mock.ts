@@ -138,7 +138,7 @@ function buildDataset(): MockDataset {
   for (let lot = 0; lot < lots.length; lot++) {
     const lotShift = lot === 0 ? 0 : 0.004;
     for (let w = 0; w < WAFER_COUNT; w++) {
-      const name = String(w + 1).padStart(2, "0");
+      const name = `DEMO${lot + 1}X7-${String(w + 1).padStart(2, "0")}`;
       const xa = new Int16Array(n);
       const ya = new Int16Array(n);
       const hbin = new Uint16Array(n);
@@ -297,8 +297,45 @@ function addMockCategory(ds: MockDataset, name: string, categories: string[],
       { id, name, values, labels: ["Unassigned", ...categories], counts, automatic: true }],
   };
 }
+type MockFilterPredicate = (wafer: MockWafer, die: number) => boolean;
+const mockCustomPredicates = new WeakMap<Filter, MockFilterPredicate[]>();
+
+function prepareMockCustomFilters(ds: MockDataset, filter: Filter): MockFilterPredicate[] {
+  return (filter.custom ?? []).map(rule => {
+    if (rule.kind === "numeric") {
+      const min = Math.fround(rule.min), max = Math.fround(rule.max);
+      return (wafer, die) => {
+        const value = wafer.cols[rule.test]?.[die];
+        const inside = rule.includeEnds === false ? value > min && value < max : value >= min && value <= max;
+        return Number.isFinite(value) && (inside === rule.keep);
+      };
+    }
+    const values = new Set(rule.values);
+    switch (rule.category) {
+      case "site": return (_wafer, die) => values.has(String(die % 4)) === rule.keep;
+      case "hbin": return (wafer, die) => values.has(String(wafer.hbin[die])) === rule.keep;
+      case "sbin": return (wafer, die) => values.has(String(wafer.sbin[die])) === rule.keep;
+    }
+    const data = ds.categoryData.get(rule.category);
+    const column = ds.info.dataCategories?.find(c => c.id === rule.category);
+    if (data && column) return (wafer, die) => values.has(column.values[data.get(wafer.index)?.[die] ?? 0]) === rule.keep;
+    const custom = ds.customCols.find(c => c.name === rule.category);
+    if (custom) return wafer => values.has(custom.categories[custom.waferValues[wafer.index] ?? 0]) === rule.keep;
+    return () => false;
+  });
+}
+
 function categoryAllowed(w:MockWafer,i:number,f:Filter):boolean{
-  const ds=dataset();return Object.entries(f.categories??{}).every(([id,values])=>{if(!values.length)return true;const c=ds.info.dataCategories?.find(c=>c.id===id),code=ds.categoryData.get(id)?.get(w.index)?.[i];return !!c&&code!==undefined&&values.includes(c.values[code]);});
+  const ds = dataset();
+  if (f.custom?.length) {
+    let predicates = mockCustomPredicates.get(f);
+    if (!predicates) {
+      predicates = prepareMockCustomFilters(ds, f);
+      mockCustomPredicates.set(f, predicates);
+    }
+    if (!predicates.every(matches => matches(w, i))) return false;
+  }
+  return Object.entries(f.categories??{}).every(([id,values])=>{if(!values.length)return true;const c=ds.info.dataCategories?.find(c=>c.id===id),code=ds.categoryData.get(id)?.get(w.index)?.[i];return !!c&&code!==undefined&&values.includes(c.values[code]);});
 }
 
 function delay<T>(v: T, ms = 60): Promise<T> {
@@ -1088,6 +1125,23 @@ function histogramBins(values: number[], summary: Summary, req: {
   const end = hi > lo ? hi : lo + Math.max(Math.abs(lo), 1) * 1e-6;
   const edges = Array.from({ length: nBins + 1 }, (_, i) => i === nBins ? end : lo + (end - lo) / nBins * i);
   return { edges, counts: histogramCounts(values, edges), fitSummary, binRange };
+}
+
+export async function testDistribution(test: number) {
+  const cols = dataset().wafers.map(wafer => wafer.cols[test]).filter(Boolean);
+  let min = Infinity, max = -Infinity;
+  for (const col of cols) for (const value of col) {
+    if (Number.isFinite(value)) { min = Math.min(min, value); max = Math.max(max, value); }
+  }
+  if (!Number.isFinite(min)) return null;
+  const counts = Array<number>(min === max ? 1 : 36).fill(0);
+  const scale = counts.length / (max - min);
+  for (const col of cols) for (const value of col) {
+    if (!Number.isFinite(value)) continue;
+    const bin = min === max ? 0 : Math.min(counts.length - 1, Math.floor((value - min) * scale));
+    counts[bin]++;
+  }
+  return { min, max, counts };
 }
 
 export async function histogram(req: {

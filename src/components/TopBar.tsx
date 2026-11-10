@@ -13,24 +13,7 @@ import {
   IconSun,
 } from "./Icons";
 
-function BrandMark() {
-  return (
-    <div className="brand-mark" aria-hidden="true">
-      <svg width="22" height="22" viewBox="0 0 22 22">
-        <circle cx="11" cy="11" r="9.4" fill="none" stroke="rgba(255,255,255,.45)" strokeWidth="1" />
-        <rect x="6.4" y="5.6" width="3.1" height="3.1" rx=".5" fill="#ffffff" opacity=".92" />
-        <rect x="9.9" y="5.6" width="3.1" height="3.1" rx=".5" fill="#ffffff" opacity=".65" />
-        <rect x="13.4" y="5.6" width="3.1" height="3.1" rx=".5" fill="#ffffff" opacity=".92" />
-        <rect x="6.4" y="9.1" width="3.1" height="3.1" rx=".5" fill="#ffffff" opacity=".65" />
-        <rect x="9.9" y="9.1" width="3.1" height="3.1" rx=".5" fill="#f5b301" />
-        <rect x="13.4" y="9.1" width="3.1" height="3.1" rx=".5" fill="#ffffff" opacity=".65" />
-        <rect x="6.4" y="12.6" width="3.1" height="3.1" rx=".5" fill="#ffffff" opacity=".92" />
-        <rect x="9.9" y="12.6" width="3.1" height="3.1" rx=".5" fill="#ffffff" opacity=".65" />
-        <rect x="13.4" y="12.6" width="3.1" height="3.1" rx=".5" fill="#ffffff" opacity=".92" />
-      </svg>
-    </div>
-  );
-}
+const appIcon = new URL("../../src-tauri/app-icon.svg", import.meta.url).href;
 
 export function TopBar() {
   const info = useStore((s) => s.info);
@@ -58,7 +41,7 @@ export function TopBar() {
   return (
     <header className="topbar">
       <div className="brand">
-        <BrandMark />
+        <img className="brand-mark" src={appIcon} alt="" />
         <div className="brand-text">
           <div className="brand-name">EWS Data Tool</div>
           <div className="brand-sub">Wafer-sort analytics</div>
@@ -101,7 +84,7 @@ export function TopBar() {
           className="btn"
           onClick={exportCsv}
           disabled={!info}
-          title="Export the current selection to CSV — also works as an STDF → CSV converter"
+          title="Export the full dataset to CSV"
         >
           <IconDownload size={15} /> Export CSV
         </button>

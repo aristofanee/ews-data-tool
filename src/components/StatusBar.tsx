@@ -78,14 +78,22 @@ export function CsvImportWarning() {
   const error = useStore(s => s.error);
   const [dismissed, setDismissed] = useState<typeof warnings>();
   if (!warnings?.length || warnings === dismissed || busy || error) return null;
+  const skipped = warnings.reduce((total, warning) => total + warning.lines.length, 0);
+  const filePreviewLimit = 5;
+  const linePreviewLimit = 10;
+  const remainingFiles = warnings.length - filePreviewLimit;
   return (
     <div className="error-banner csv-warning" role="status">
       <IconAlert size={16} />
       <div className="csv-warning-details">
-        <strong>Skipped CSV rows with missing or invalid X/Y coordinates</strong>
-        {warnings.map(({ file, lines }, index) => (
-          <div key={index} title={file}>{fileName(file)} · {lines.length === 1 ? "line" : "lines"} {lines.join(", ")}</div>
+        <strong>Skipped {fmtInt(skipped)} CSV {skipped === 1 ? "row" : "rows"} with missing or invalid X/Y coordinates</strong>
+        {warnings.slice(0, filePreviewLimit).map(({ file, lines }, index) => (
+          <div key={index} title={file}>
+            {fileName(file)} · {lines.length === 1 ? "line" : "lines"} {lines.slice(0, linePreviewLimit).join(", ")}
+            {lines.length > linePreviewLimit && ` and ${fmtInt(lines.length - linePreviewLimit)} more`}
+          </div>
         ))}
+        {remainingFiles > 0 && <div>And {fmtInt(remainingFiles)} more {remainingFiles === 1 ? "file" : "files"}</div>}
       </div>
       <button onClick={() => setDismissed(warnings)} title="Dismiss CSV warning"><IconX size={14} /></button>
     </div>

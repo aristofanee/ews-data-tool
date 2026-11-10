@@ -189,6 +189,7 @@ impl CustomColumn {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Filter {
+    pub custom: Vec<CustomFilter>,
     pub categories: HashMap<String, Vec<String>>,
     /// Site codes; 65535 represents missing site metadata.
     pub sites: Vec<u16>,
@@ -197,6 +198,17 @@ pub struct Filter {
     pub hbins: Vec<u16>,
     pub sbins: Vec<u16>,
     pub stat: Option<StatFilter>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CustomFilter {
+    Numeric {
+        test: usize, min: f64, max: f64, keep: bool,
+        #[serde(default, rename = "includeEnds")]
+        include_ends: Option<bool>,
+    },
+    Category { category: String, values: Vec<String>, keep: bool },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -417,7 +429,54 @@ impl Dataset {
         Ok(())
     }
 
-    /// Rows that pass lot / wafer / bin filters.
+    fn custom_predicate(&self, rule: &CustomFilter) -> Option<Box<dyn Fn(usize) -> bool + '_>> {
+        match rule {
+            CustomFilter::Numeric { test, min, max, keep, include_ends } => {
+                // Match the precision used for stored CSV/STDF measurements.
+                let (min, max, keep) = (*min as f32, *max as f32, *keep);
+                let include_ends = include_ends.unwrap_or(true);
+                let col = self.cols.get(*test)?;
+                Some(Box::new(move |row| {
+                    col.get(row).is_some_and(|&v| {
+                        let inside = if include_ends { v >= min && v <= max } else { v > min && v < max };
+                        v.is_finite() && (inside == keep)
+                    })
+                }))
+            }
+            CustomFilter::Category { category, values, keep } => {
+                let keep = *keep;
+                if matches!(category.as_str(), "site" | "hbin" | "sbin") {
+                    let codes: std::collections::HashSet<u16> =
+                        values.iter().filter_map(|value| value.parse().ok()).collect();
+                    let category = match category.as_str() { "site" => 0, "hbin" => 1, _ => 2 };
+                    return Some(Box::new(move |row| {
+                        let code = match category {
+                            0 => self.site.get(row).copied().flatten().map(u16::from).unwrap_or(u16::MAX),
+                            1 => self.hbin[row],
+                            _ => self.sbin[row],
+                        };
+                        codes.contains(&code) == keep
+                    }));
+                }
+                let allowed = |labels: &[String]| -> std::collections::HashSet<u16> {
+                    labels.iter().enumerate().filter_map(|(i, label)|
+                        values.contains(label).then_some(i as u16)).collect()
+                };
+                if let Some(col) = self.data_categories.iter().find(|c| c.id == *category) {
+                    let codes = allowed(&col.values);
+                    return Some(Box::new(move |row| codes.contains(&col.codes[row]) == keep));
+                }
+                let col = self.custom_cols.iter().find(|c| c.name == *category)?;
+                let codes = allowed(&col.categories);
+                Some(Box::new(move |row| {
+                    let code = col.wafer_values.get(self.wafer_of_row[row] as usize).copied().unwrap_or(0);
+                    codes.contains(&code) == keep
+                }))
+            }
+        }
+    }
+
+    /// Rows that pass the non-statistical filters.
     pub fn base_mask(&self, f: &Filter) -> Vec<bool> {
         let lot_ok = |l: u16| f.lots.is_empty() || f.lots.contains(&l);
         let wafer_ok = |w: u16| f.wafers.is_empty() || f.wafers.contains(&w);
@@ -428,6 +487,7 @@ impl Dataset {
                 let allowed:std::collections::HashSet<_>=c.values.iter().enumerate().filter_map(|(i,v)|values.contains(v).then_some(i as u16)).collect();(c,allowed)
             })
         }).collect();
+        let custom: Vec<_> = f.custom.iter().map(|rule| self.custom_predicate(rule)).collect();
 
         (0..self.rows)
             .map(|r| {
@@ -437,6 +497,7 @@ impl Dataset {
                     && sbin_ok(self.sbin[r])
                     && (f.sites.is_empty() || f.sites.contains(&self.site.get(r).copied().flatten().map(u16::from).unwrap_or(u16::MAX)))
                     && categories.iter().all(|entry|entry.as_ref().is_some_and(|(c,allowed)|allowed.contains(&c.codes[r])))
+                    && custom.iter().all(|rule| rule.as_ref().is_some_and(|matches| matches(r)))
             })
             .collect()
     }

@@ -361,6 +361,11 @@ pub async fn bin_overview(
 }
 
 #[tauri::command]
+pub async fn test_distribution(state: State<'_, AppState>, test: usize) -> Result<Option<query::TestDistribution>, String> {
+    with_ds(state, move |ds| query::test_distribution(ds, test)).await
+}
+
+#[tauri::command]
 pub async fn histogram(
     state: State<'_, AppState>,
     req: query::HistRequest,

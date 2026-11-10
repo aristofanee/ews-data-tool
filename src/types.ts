@@ -67,6 +67,7 @@ export interface StatFilter {
 }
 
 export interface Filter {
+  custom?: CustomFilter[];
   categories?:Record<string,string[]>;
   /** Missing site metadata uses code 65535. */
   sites?: number[];
@@ -76,6 +77,12 @@ export interface Filter {
   sbins: number[];
   stat: StatFilter | null;
 }
+
+export type CustomFilter =
+  | { kind: "numeric"; test: number; min: number; max: number; keep: boolean; includeEnds?: boolean }
+  | { kind: "category"; category: string; values: string[]; keep: boolean };
+
+export interface TestDistribution { min: number; max: number; counts: number[] }
 
 export interface DataCategoryInfo {id:string;name:string;values:string[];labels:string[];counts:number[];automatic:boolean}
 

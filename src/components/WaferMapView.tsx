@@ -1,5 +1,6 @@
+import { effectiveLimit } from "../lib/stats";
 import { IMAGE_WIDTH, imageHeight } from "../charts/imageExport";
-import { binYieldText } from "../lib/theme";
+import { describeFilters } from "../lib/customFilters";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MapResponse, PlotSpec } from "../types";
 import {
@@ -12,7 +13,7 @@ import {
 } from "../charts/waferMap";
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
-import { fmtMap, testLabelWithUnits } from "../lib/format";
+import { fmtMap } from "../lib/format";
 import { binLabel } from "../lib/theme";
 
 export interface MapExportApi {
@@ -75,8 +76,9 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
       theme,
       palette: spec.palette,
       mode: spec.mapMode,
-      lsl: spec.showLimits ? (spec.lsl ?? data.lsl) : null,
-      usl: spec.showLimits ? (spec.usl ?? data.usl) : null,
+      lsl: effectiveLimit(spec, "lsl", data.lsl),
+      usl: effectiveLimit(spec, "usl", data.usl),
+      showSpecTicks: spec.showLimits,
       binNames,
       binCategory: spec.binCategory,
       binPass,
@@ -162,19 +164,13 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
       toDataURL: async (format = "jpeg", themeOverride, width = IMAGE_WIDTH, height = imageHeight("map")) => {
         const d = dataRef.current;
         const sp = specRef.current;
-        const test = d.test ? testLabelWithUnits(d.test) : "";
-        const scope = d.isMean
-          ? `All wafers (mean) · ${d.waferCount} wafer${d.waferCount === 1 ? "" : "s"}`
-          : `${d.lotName} · Wafer ${d.wafer?.name ?? "?"}`;
-        const subtitle =
-          scope + (test ? ` · ${test}` : "") + ` · Yield ${binYieldText(d.yieldPct, d.dice, 2, d.unknownBins)}`;
         const opts = themeOverride
           ? { ...optsRef.current, theme: themeOverride }
           : optsRef.current;
         const state = useStore.getState();
         const exported = {...opts,exportSpec:sp};
         const footer=await mapExportFooter(d,exported,state.filters);
-        return renderMapImage(d,{...exported,exportFooter:footer},width,height,sp.title,subtitle,format);
+        return renderMapImage(d,{...exported,exportFooter:footer},width,height,sp.title,describeFilters(state.filters,state.info),format);
       },
     });
 

@@ -35,6 +35,7 @@ pub fn run() {
             commands::pareto,
             commands::histogram,
             commands::test_distribution,
+            commands::test_iqr_limits,
             commands::trend,
             commands::limit_counts,
             commands::scatter,

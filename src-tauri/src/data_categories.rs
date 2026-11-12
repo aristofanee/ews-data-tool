@@ -51,11 +51,11 @@ mod tests {
         assert_eq!(b.groups.len(),2);assert_eq!(b.groups.iter().map(|g|g.summary.n).sum::<usize>(),200);
         let h=histogram(&ds,&HistRequest{range:None,population:None,test:1,bins:Some(4),group_by:Some(category.into()),filter:Default::default()});assert_eq!(h.groups.len(),2);assert_eq!(h.groups.iter().flat_map(|g|&g.counts).sum::<u32>(),200);
         let t=trend(&ds,&TrendRequest{test:1,by:category.into(),group_by:Some(category.into()),filter:Default::default()});assert_eq!(t.points.iter().map(|p|p.n).sum::<usize>(),200);
-        let s=scatter(&ds,&ScatterRequest{x_test:0,y_test:1,z_mode:ScatterZMode::None,z_col:None,z_test:None,group_by:Some(category.into()),filter:Default::default(),max_points:Some(5)});assert_eq!(s.series.len(),2);assert_eq!(s.group_totals.values().sum::<usize>(),200);
+        let s=scatter(&ds,&ScatterRequest{ axis_summaries: None,x_test:0,y_test:1,z_mode:ScatterZMode::None,z_col:None,z_test:None,group_by:Some(category.into()),filter:Default::default(),max_points:Some(5)});assert_eq!(s.series.len(),2);assert_eq!(s.group_totals.values().sum::<usize>(),200);
         let p=pareto(&ds,&ParetoRequest{category:BinCategory::Hard,group_by:Some(category.into()),top:Some(10),filter:Default::default()});assert_eq!(p.groups.len(),2);assert_eq!(p.groups.iter().find(|g|g.label=="0").unwrap().yield_pct,100.0);assert_eq!(p.groups.iter().find(|g|g.label=="1").unwrap().yield_pct,0.0);
         let mut f=Filter::default();f.categories.insert(category.into(),vec!["1".into()]);
         assert_eq!(ds.base_mask(&f).iter().filter(|&&v|v).count(),100);
-        let m=wafer_map(&ds,&MapRequest{test:Some(1),wafer:None,mode:MapMode::Value,filter:f.clone(),lsl:None,usl:None});assert_eq!(m.test_total,100);assert_eq!(m.dice.len(),50);
+        let m=wafer_map(&ds,&MapRequest{ no_lsl: false, no_usl: false, count_scope: None,test:Some(1),wafer:None,mode:MapMode::Value,filter:f.clone(),lsl:None,usl:None});assert_eq!(m.test_total,100);assert_eq!(m.dice.len(),50);
         let p=pareto(&ds,&ParetoRequest{category:BinCategory::Hard,group_by:None,top:Some(10),filter:f.clone()});assert_eq!(p.total,100);assert_eq!(p.yield_pct,0.0);
         let c=limit_counts(&ds,&LimitCountsRequest{test:1,paired_test:None,group_by:None,filter:f.clone(),lsl:Some(1.0),usl:Some(1.3)});assert_eq!(c.total,100);assert_eq!(c.in_limits,Some(100));
         f.categories.insert(category.into(),vec!["not-present".into()]);assert!(!ds.base_mask(&f).iter().any(|&v|v));

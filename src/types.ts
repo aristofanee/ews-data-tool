@@ -115,6 +115,8 @@ export interface PopulationStats {
 export interface PopulationRequest {
   lsl: number | null;
   usl: number | null;
+  noLsl?: boolean;
+  noUsl?: boolean;
   split: boolean;
 }
 
@@ -205,6 +207,7 @@ export interface ParetoSeries {
 }
 
 export interface ParetoResponse {
+  excluded: number;
   unknownTotal?: number;
   mode: "global" | "grouped";
   bars: ParetoBar[];
@@ -226,6 +229,7 @@ export interface BinOverviewWafer {
 }
 
 export interface BinOverviewResponse {
+  excluded: number;
   wafers: BinOverviewWafer[];
 }
 
@@ -282,6 +286,7 @@ export interface TrendPoint {
 }
 
 export interface TrendResponse {
+  excluded: number;
   points: TrendPoint[];
   test: TestInfo;
   lsl: number | null;
@@ -291,6 +296,7 @@ export interface TrendResponse {
 export type ScatterZMode = "none" | "continuous";
 export type ScatterColorMode = ScatterZMode | "category";
 export type LimitMode = "auto" | "manual" | "sigma" | "iqr" | "spec";
+export type ScatterAxis = "x" | "y" | "z";
 
 export interface ScatterPoint {
   x: number;
@@ -312,6 +318,8 @@ export interface ScatterSeries {
 
 export interface ScatterStatistics {
   summary: Summary;
+  xSummary?: Summary | null;
+  zSummary?: Summary | null;
   fit: {slope:number;intercept:number;r:number|null;xMin:number;xMax:number}|null;
 }
 
@@ -360,6 +368,8 @@ export interface PlotSpec {
   displayAllData: boolean;
   lsl: number | null;
   usl: number | null;
+  noLsl?: boolean;
+  noUsl?: boolean;
   showLimits: boolean;
   mapMode: "value" | "bin";
   palette: string;
@@ -384,8 +394,28 @@ export interface PlotSpec {
   scatterZMode: ScatterZMode;
   scatterZTest: number | null;
   scatterFit: boolean;
+  scatterLimits?: Partial<Record<ScatterAxis, PlotLimits>>;
   /** Render a grouped plot as one small chart per group. */
   splitPlots: boolean;
+}
+
+export type PlotLimits = Pick<PlotSpec, "limitMode" | "limitK" | "yMin" | "yMax" | "lsl" | "usl" | "noLsl" | "noUsl" | "showLimits">;
+
+export function scatterLimitsFor(spec: PlotSpec, axis: ScatterAxis): PlotLimits {
+  const saved = spec.scatterLimits?.[axis];
+  if (saved) return saved;
+  if (axis === "y") {
+    const { limitMode, limitK, yMin, yMax, lsl, usl, noLsl, noUsl } = spec;
+    return { limitMode, limitK, yMin, yMax, lsl, usl, noLsl, noUsl, showLimits: false };
+  }
+  return { limitMode: "auto", limitK: 3, yMin: null, yMax: null, lsl: null, usl: null, showLimits: axis === "z" };
+}
+
+export function scatterAxisSummaries(spec: PlotSpec) {
+  return {
+    x: scatterLimitsFor(spec, "x").limitMode !== "auto",
+    z: spec.scatterZMode === "continuous" && scatterLimitsFor(spec, "z").limitMode !== "auto",
+  };
 }
 
 export const defaultSpec = (type: PlotType, test: number | null, title: string): PlotSpec => ({

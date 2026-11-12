@@ -49,3 +49,31 @@ export function describeCustomFilter(rule: CustomFilter, info: DatasetInfo | nul
     detail: `${rule.keep ? "Keep" : "Exclude"} ${rule.values.map(value => labels.get(value) ?? (value || "Unassigned")).join(", ")}`,
   };
 }
+
+export function describeFilters(filter: Filter, info: DatasetInfo | null, measurementPlot = true): string {
+  const parts: string[] = [];
+  const add = (name: string, values: (string | number)[]) => {
+    if (values.length) parts.push(`${name} ${values.slice(0, 4).join(", ")}${values.length > 4 ? ` (+${values.length - 4} more)` : ""}`);
+  };
+  add("Lot", filter.lots.map(i => info?.lots[i] ?? i));
+  add("Wafer", filter.wafers.map(i => {
+    const wafer = info?.wafers[i];
+    return wafer ? `${info?.lots[wafer.lot]} / ${wafer.name}` : i;
+  }));
+  add("Site", (filter.sites ?? []).map(code => code === 65535 ? "Unknown" : code));
+  add("HBIN", filter.hbins.map(code => code === 65535 ? "Unknown" : code));
+  add("SBIN", filter.sbins.map(code => code === 65535 ? "Unknown" : code));
+  for (const [category, values] of Object.entries(filter.categories ?? {})) {
+    const labels = new Map(info ? filterValues(info, category).map(option => [option.value, option.label]) : []);
+    add(categoryName(category), values.map(value => labels.get(value) ?? (value || "Unassigned")));
+  }
+  if (filter.stat) {
+    const { kind, k, perWafer } = filter.stat;
+    parts.push(`Outliers ±${k}${kind === "sigma" ? "σ" : " IQR"} (${perWafer ? "per wafer" : "pooled"}${measurementPlot ? "" : ", inactive for this plot"})`);
+  }
+  for (const rule of filter.custom ?? []) {
+    const { title, detail } = describeCustomFilter(rule, info);
+    parts.push(`${title} ${detail}`);
+  }
+  return parts.length ? `Filters · ${parts.join(" · ")}` : "";
+}

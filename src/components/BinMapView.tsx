@@ -124,22 +124,28 @@ export function BinMapView({ data, spec, onReady, onSelection }: Props) {
   useEffect(()=>()=>onSelection?.(null),[onSelection]);
 
   useEffect(()=>{
-    const single=(md:MapResponse,sp:PlotSpec,o:MapOptions,format:"jpeg"|"png",width=IMAGE_WIDTH,height=imageHeight("binmap"))=>
-      renderMapImage(md,{...o,exportSpec:{...sp,groupBy:"wafer"},exportGroupLabel:`${md.lotName} / ${md.wafer?.name}`,mode:"bin"},width,height,sp.title,"",format);
-    const overview=(d:BinOverviewResponse,sp:PlotSpec,o:MapOptions,format:"jpeg"|"png")=>
-      renderBinOverviewImage(d.wafers,{...o,exportSpec:sp},BIN_OVERVIEW_WIDTH,Math.round(BIN_OVERVIEW_WIDTH*9/16),sp.title,"",format);
+    const single=(md:MapResponse,sp:PlotSpec,o:MapOptions,format:"jpeg"|"png",subtitle:string,width=IMAGE_WIDTH,height=imageHeight("binmap"))=>
+      renderMapImage(md,{...o,exportSpec:{...sp,groupBy:"wafer"},exportGroupLabel:`${md.lotName} / ${md.wafer?.name}`,mode:"bin"},width,height,sp.title,subtitle,format);
+    const overview=(d:BinOverviewResponse,sp:PlotSpec,o:MapOptions,format:"jpeg"|"png",subtitle:string)=>
+      renderBinOverviewImage(d.wafers,{...o,exportSpec:sp},BIN_OVERVIEW_WIDTH,Math.round(BIN_OVERVIEW_WIDTH*9/16),sp.title,subtitle,format);
+    const filterSubtitle = () => {
+      const { filters, info } = useStore.getState();
+      return describeFilters(filters, info, false);
+    };
     readyRef.current?.({
       toDataURL:(format="jpeg",themeOverride,width=IMAGE_WIDTH,height=imageHeight("binmap"))=>{
         const d=dataRef.current,sp=specRef.current,o={...optsRef.current,theme:themeOverride??optsRef.current.theme};
         const idx=selectedRef.current;
-        return idx!==null&&mapsRef.current[idx]?single(mapsRef.current[idx],sp,o,format,width,height):overview(d,sp,o,format);
+        const subtitle = filterSubtitle();
+        return idx!==null&&mapsRef.current[idx]?single(mapsRef.current[idx],sp,o,format,subtitle,width,height):overview(d,sp,o,format,subtitle);
       },
       jobs:(themeOverride,selectedOnly=false)=>{
         const d=dataRef.current,sp={...specRef.current},maps=mapsRef.current,o={...optsRef.current,theme:themeOverride??optsRef.current.theme};
         const index=selectedRef.current;
+        const subtitle = filterSubtitle();
         const entries=selectedOnly&&index!==null?[maps[index]]:maps;
-        const jobs:ImageExportJob[]=entries.filter(Boolean).map(md=>({label:`${md.lotName} / ${md.wafer?.name}`,render:async(format)=>{await document.fonts.ready;return single(md,sp,o,format);}}));
-        if(!selectedOnly)jobs.unshift({label:"Overview",render:async(format)=>{await document.fonts.ready;return overview(d,sp,o,format);}});
+        const jobs:ImageExportJob[]=entries.filter(Boolean).map(md=>({label:`${md.lotName} / ${md.wafer?.name}`,render:async(format)=>{await document.fonts.ready;return single(md,sp,o,format,subtitle);}}));
+        if(!selectedOnly)jobs.unshift({label:"Overview",render:async(format)=>{await document.fonts.ready;return overview(d,sp,o,format,subtitle);}});
         return jobs;
       }
     });
@@ -164,3 +170,4 @@ export function BinMapView({ data, spec, onReady, onSelection }: Props) {
     label: `${w.lotName} / ${w.wafer.name}`, lot: w.lotName }))}
     spec={spec} mode="bin" onOpen={setSelected} />;
 }
+import { describeFilters } from "../lib/customFilters";

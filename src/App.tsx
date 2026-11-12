@@ -11,8 +11,18 @@ import { ReportDrawer } from "./components/ReportDrawer";
 import { CsvMappingDialog } from "./components/CsvMappingDialog";
 import { StatusBar, CsvImportWarning, ErrorBanner, ProgressOverlay, Toast } from "./components/StatusBar";
 import type { PlotType } from "./types";
+import { usePlotData } from "./lib/usePlotData";
 
 const PLOT_KEYS: PlotType[] = ["box", "map", "hist", "scatter", "trend", "binmap", "pareto"];
+
+function PlotWorkspace({ hasData }: { hasData: boolean }) {
+  const plot = usePlotData();
+  const autoBins = !plot.loading && plot.data?.kind === "hist" ? plot.data.data.counts.length : 0;
+  return <>
+    <main className="main"><ChartPanel {...plot} /></main>
+    {hasData && <Inspector autoBins={autoBins} />}
+  </>;
+}
 
 export default function App() {
   const theme = useStore((s) => s.theme);
@@ -72,15 +82,12 @@ export default function App() {
   }, [open, saveTemplate, exportCsv]);
 
   return (
-    <div className={api.isTauri ? "app desktop" : "app"}>
+    <div className={api.isTauri ? "app desktop" : "app"} onContextMenu={event => event.preventDefault()}>
       <TopBar />
       {!api.isTauri && <DemoFontControls />}
       <div className="app-body">
         {info && <Sidebar />}
-        <main className="main">
-          <ChartPanel />
-        </main>
-        {info && <Inspector />}
+        <PlotWorkspace hasData={!!info} />
       </div>
       <StatusBar />
       <ReportDrawer />

@@ -1,7 +1,9 @@
+import { effectiveLimit, limitOverrides } from "../lib/stats";
 import { useRestorePlotSelection } from "../lib/usePlotMemory";
 import { IMAGE_WIDTH, imageHeight } from "../charts/imageExport";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Filter, MapResponse, PlotSpec, PlotSelection } from "../types";
+import { emptyFilter } from "../types";
 import * as api from "../lib/api";
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
@@ -53,7 +55,7 @@ export function MapFacetView({ spec, filter, onReady, onSelection }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const dataVersion = useStore((s) => s.dataVersion);
-  const requestKey = JSON.stringify([mapGeneration(), dataVersion, filter, spec.test, spec.groupBy, spec.lsl, spec.usl]);
+  const requestKey = JSON.stringify([mapGeneration(), dataVersion, filter, spec.test, spec.groupBy, limitOverrides(spec)]);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [selected, setSelected] = useMapSelection("value", [dataVersion, filter, spec.test, spec.groupBy, spec.lsl, spec.usl]);
 
@@ -70,18 +72,21 @@ export function MapFacetView({ spec, filter, onReady, onSelection }: Props) {
     (async () => {
       try {
         const out: Entry[] = [];
+        const unfilteredGroups = info && spec.groupBy !== "wafer"
+          ? new Map(dataGroups(info, emptyFilter(), spec.groupBy).map(group => [group.key, group.filter]))
+          : undefined;
         const batch = spec.groupBy === "wafer" ? await api.waferMaps({
-          wafer: null, test: spec.test, mode: "value", filter, lsl: spec.lsl, usl: spec.usl,
+          wafer: null, test: spec.test, mode: "value", filter, ...limitOverrides(spec),
         }) : null;
         for (const group of groups) {
           if (!alive) return;
           const md = batch?.find((m) => m.wafer?.name === info?.wafers[group.wafer!]?.name && m.wafer?.lot === info?.wafers[group.wafer!]?.lot) ?? await api.waferMap({
-            lsl: spec.lsl,
-            usl: spec.usl,
+            ...limitOverrides(spec),
             wafer: group.wafer,
             test: spec.test,
             mode: "value",
             filter: group.filter,
+            countScope: unfilteredGroups?.get(group.key),
           });
           if (md.dice.length === 0) continue;
           out.push({ md, label: group.label });
@@ -151,17 +156,18 @@ export function MapFacetView({ spec, filter, onReady, onSelection }: Props) {
     const jobs=(themeOverride?:Theme,selectedOnly=false):ImageExportJob[]=>{
       if (!validRef.current) throw new Error("The maps are still loading.");
       const sp={...specRef.current}, exportGroups=groupsRef.current, exportFilter=filterRef.current;
+      const subtitle = describeFilters(exportFilter, useStore.getState().info);
       const entries=selectedOnly?entriesRef.current.slice(selectedRef.current??0,(selectedRef.current??0)+1):entriesRef.current;
       const theme=themeOverride??themeRef.current, binNames=binNamesRef.current, binPass=binPassRef.current;
       return entries.map(({md,label})=>({label,render:async(format)=>{
         await document.fonts.ready;
         const limits=mapColorLimits(sp,md);
         const opts:MapOptions={exportSpec:sp,exportGroupLabel:label,theme,palette:sp.palette,mode:"value",
-          lsl:sp.showLimits?(sp.lsl??md.lsl):null,usl:sp.showLimits?(sp.usl??md.usl):null,
+          lsl:effectiveLimit(sp, "lsl", md.lsl),usl:effectiveLimit(sp, "usl", md.usl),showSpecTicks:sp.showLimits,
           binNames,binCategory:sp.binCategory,binPass,...limits,presentation:false};
         const group=exportGroups.find(g=>g.label===label);
         const footer=await mapExportFooter(md,opts,group?.filter??exportFilter);
-        return renderMapImage(md,{...opts,exportFooter:footer},IMAGE_WIDTH,imageHeight("map"),`${sp.title} · ${label}`,"",format);
+        return renderMapImage(md,{...opts,exportFooter:footer},IMAGE_WIDTH,imageHeight("map"),`${sp.title} · ${label}`,subtitle,format);
       }}));
     };
     readyRef.current?.({isReady:()=>validRef.current,jobs,
@@ -198,3 +204,4 @@ export function MapFacetView({ spec, filter, onReady, onSelection }: Props) {
     lot: !md.isMean ? md.lotName : spec.groupBy === "lot" ? label : "Grouped maps" }))}
     spec={spec} mode="value" onOpen={setSelected} />;
 }
+import { describeFilters } from "../lib/customFilters";

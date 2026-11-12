@@ -198,8 +198,8 @@ export const IconSliders = (p: IconProps) => (
 
 export const IconRefresh = (p: IconProps) => (
   <Svg {...p}>
-    <path d="M20 11a8 8 0 10-2.3 5.7" />
-    <path d="M20 4v7h-7" />
+    <path d="M4 10a8 8 0 0 1 13.7-3.7L20 9m0-5v5h-5" />
+    <path d="M20 14a8 8 0 0 1-13.7 3.7L4 15m0 5v-5h5" />
   </Svg>
 );
 

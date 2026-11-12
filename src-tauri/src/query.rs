@@ -164,7 +164,19 @@ pub struct PopulationRequest {
     pub lsl: Option<f32>,
     pub usl: Option<f32>,
     #[serde(default)]
+    pub no_lsl: bool,
+    #[serde(default)]
+    pub no_usl: bool,
+    #[serde(default)]
     pub split: bool,
+}
+
+fn effective_limit(value: Option<f32>, disabled: bool, imported: Option<f32>) -> Option<f32> {
+    if disabled { None } else { value.or(imported) }
+}
+
+fn filtered_count(mask: &[bool]) -> usize {
+    mask.iter().filter(|&&included| !included).count()
 }
 
 #[derive(Serialize)]
@@ -175,8 +187,8 @@ pub struct PopulationStats {
 }
 
 fn test_yield(values: &[f32], test: &TestInfo, request: Option<&PopulationRequest>) -> Option<f64> {
-    let lo = request.and_then(|r| r.lsl).or(test.lo_spec);
-    let hi = request.and_then(|r| r.usl).or(test.hi_spec);
+    let lo = effective_limit(request.and_then(|r| r.lsl), request.is_some_and(|r| r.no_lsl), test.lo_spec);
+    let hi = effective_limit(request.and_then(|r| r.usl), request.is_some_and(|r| r.no_usl), test.hi_spec);
     if values.is_empty() || (lo.is_none() && hi.is_none()) || lo.zip(hi).is_some_and(|(l, h)| l > h) {
         return None;
     }
@@ -351,7 +363,7 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
         usl: test.hi_spec,
         cp,
         cpk,
-        excluded,
+        excluded: excluded + filtered_count(&mask),
         truncated: stride > 1,
         test,
     }
@@ -362,6 +374,11 @@ pub fn box_plot(ds: &Dataset, req: &BoxRequest) -> BoxResponse {
 pub struct MapRequest {
     pub lsl: Option<f32>,
     pub usl: Option<f32>,
+    #[serde(default)]
+    pub no_lsl: bool,
+    #[serde(default)]
+    pub no_usl: bool,
+    pub count_scope: Option<Filter>,
     /// `None` means the mean map across every selected wafer.
     #[serde(default)]
     pub wafer: Option<u16>,
@@ -591,7 +608,8 @@ pub fn wafer_map(ds: &Dataset, req: &MapRequest) -> MapResponse {
         None
     };
     let rows: Vec<usize> = (0..ds.rows).filter(|&r| req.wafer.map_or(true, |w| ds.wafer_of_row[r] == w)).collect();
-    wafer_map_prepared(ds, req, keep.as_ref().map(|(mask, _)| mask.as_slice()), &considered, &rows)
+    let count_scope = req.count_scope.as_ref().map(|scope| ds.base_mask(scope));
+    wafer_map_prepared(ds, req, keep.as_ref().map(|(mask, _)| mask.as_slice()), &considered, &rows, count_scope.as_deref())
 }
 
 /// Batch individual-wafer maps with one filter/outlier calculation and one
@@ -609,21 +627,24 @@ pub fn wafer_maps(ds: &Dataset, req: &MapRequest) -> Vec<MapResponse> {
             && (req.filter.lots.is_empty() || req.filter.lots.contains(&w.lot))
     }).map(|(wi, rows)| {
         let single = MapRequest { wafer: Some(wi as u16), test: req.test, mode: req.mode,
+            no_lsl: req.no_lsl, no_usl: req.no_usl, count_scope: None,
             filter: req.filter.clone(), lsl: req.lsl, usl: req.usl };
-        wafer_map_prepared(ds, &single, keep.as_ref().map(|(mask, _)| mask.as_slice()), &considered, rows)
+        wafer_map_prepared(ds, &single, keep.as_ref().map(|(mask, _)| mask.as_slice()), &considered, rows, None)
     }).collect()
 }
 
-fn wafer_map_prepared(ds: &Dataset, req: &MapRequest, keep_ref: Option<&[bool]>, considered: &[bool], rows: &[usize]) -> MapResponse {
+fn wafer_map_prepared(ds: &Dataset, req: &MapRequest, keep_ref: Option<&[bool]>, considered: &[bool], rows: &[usize], count_scope: Option<&[bool]>) -> MapResponse {
     let test = req.test.and_then(|t| ds.tests.get(t).cloned());
-    let excluded = rows.iter().filter(|&&r| considered[r] && keep_ref.is_some_and(|k| !k[r])
-        && req.test.and_then(|t| ds.cols.get(t)).and_then(|c| c.get(r)).is_some_and(|v| v.is_finite())).count();
+    let col = req.test.and_then(|t| ds.cols.get(t));
+    let excluded = rows.iter().filter(|&&r| count_scope.is_none_or(|scope| scope[r]) && (!considered[r] || (
+        keep_ref.is_some_and(|k| !k[r]) && col.and_then(|c| c.get(r)).is_some_and(|v| v.is_finite())
+    ))).count();
     let (dice, _, _, vmin, vmax, wafer_count) =
         aggregate_map(ds, req.wafer, req.test, req.mode, considered, rows, keep_ref);
 
     let is_mean = req.wafer.is_none();
-    let lsl = req.lsl.or_else(|| test.as_ref().and_then(|t| t.lo_spec));
-    let usl = req.usl.or_else(|| test.as_ref().and_then(|t| t.hi_spec));
+    let lsl = effective_limit(req.lsl, req.no_lsl, test.as_ref().and_then(|t| t.lo_spec));
+    let usl = effective_limit(req.usl, req.no_usl, test.as_ref().and_then(|t| t.hi_spec));
     let valid_limits = (lsl.is_some() || usl.is_some())
         && lsl.map_or(true, |v| v.is_finite()) && usl.map_or(true, |v| v.is_finite())
         && lsl.zip(usl).map_or(true, |(l, u)| l <= u);
@@ -746,6 +767,7 @@ pub struct BinOverviewWafer {
 #[serde(rename_all = "camelCase")]
 pub struct BinOverviewResponse {
     pub wafers: Vec<BinOverviewWafer>,
+    pub excluded: usize,
 }
 
 /// Bin maps for every selected wafer, in dataset order. The frontend groups
@@ -779,7 +801,7 @@ pub fn bin_overview(ds: &Dataset, req: &BinOverviewRequest) -> BinOverviewRespon
             pass, fail, yield_pct: pass as f32 * 100.0 / (pass + fail) as f32,
         });
     }
-    BinOverviewResponse { wafers }
+    BinOverviewResponse { wafers, excluded: filtered_count(&mask) }
 }
 
 #[derive(Deserialize)]
@@ -836,6 +858,7 @@ pub struct ParetoSeries {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParetoResponse {
+    pub excluded: usize,
     pub unknown_total: usize,
     pub mode: ParetoMode,
     pub bars: Vec<ParetoBar>,
@@ -1033,6 +1056,7 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
         }
 
         return ParetoResponse {
+            excluded: filtered_count(&mask),
             unknown_total,
             mode: ParetoMode::Grouped,
             bars: Vec::new(),
@@ -1087,6 +1111,7 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
         });
     }
     ParetoResponse {
+        excluded: filtered_count(&mask),
         unknown_total,
         mode: ParetoMode::Global,
         bars,
@@ -1174,8 +1199,8 @@ fn histogram_window(s: &Summary, req: &HistRequest, test: &TestInfo) -> Option<[
         let window = match range.limit_mode.as_str() {
             "manual" => [range.y_min.unwrap_or(min), range.y_max.unwrap_or(max)],
             "spec" => [
-                population.and_then(|p| p.lsl).or(test.lo_spec).map(f64::from).unwrap_or(min),
-                population.and_then(|p| p.usl).or(test.hi_spec).map(f64::from).unwrap_or(max),
+                effective_limit(population.and_then(|p| p.lsl), population.is_some_and(|p| p.no_lsl), test.lo_spec).map(f64::from).unwrap_or(min),
+                effective_limit(population.and_then(|p| p.usl), population.is_some_and(|p| p.no_usl), test.hi_spec).map(f64::from).unwrap_or(max),
             ],
             "iqr" if iqr > 0.0 => [q1 - k * iqr, q3 + k * iqr],
             "sigma" if sd > 0.0 => [mean - k * sd, mean + k * sd],
@@ -1242,6 +1267,18 @@ pub struct TestDistribution {
     pub counts: Vec<usize>,
 }
 
+pub fn test_iqr_limits(ds: &Dataset, test: usize) -> Option<[f64; 2]> {
+    let mut values: Vec<_> = ds.cols.get(test)?.iter().copied().filter(|v| v.is_finite()).collect();
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable_by(f32::total_cmp);
+    let q1 = f64::from(quantile_sorted(&values, 0.25));
+    let q3 = f64::from(quantile_sorted(&values, 0.75));
+    let fence = 1.5 * (q3 - q1);
+    Some([q1 - fence, q3 + fence])
+}
+
 pub fn test_distribution(ds: &Dataset, test: usize) -> Option<TestDistribution> {
     let col = ds.cols.get(test)?;
     let values = || col.iter().copied().filter(|v| v.is_finite());
@@ -1278,8 +1315,9 @@ pub fn histogram(ds: &Dataset, req: &HistRequest) -> HistResponse {
         };
     }
     let mask = ds.base_mask(&req.filter);
-    let (stat_keep, excluded) =
+    let (stat_keep, outliers) =
         stat_keep_rows(ds, req.test, &req.filter, None, &mask).unwrap_or_else(||(vec![true; ds.rows], 0));
+    let excluded = outliers + filtered_count(&mask);
     let col = &ds.cols[req.test];
     let multi_lot = ds.lots.len() > 1;
     let group_category = req
@@ -1375,6 +1413,7 @@ pub struct TrendPoint {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrendResponse {
+    pub excluded: usize,
     pub points: Vec<TrendPoint>,
     pub test: TestInfo,
     pub lsl: Option<f32>,
@@ -1389,6 +1428,7 @@ pub fn trend(ds: &Dataset, req: &TrendRequest) -> TrendResponse {
         .unwrap_or_else(|| TestInfo::new("?"));
     if req.test >= ds.cols.len() || ds.cols[req.test].is_empty() {
         return TrendResponse {
+            excluded: 0,
             points: Vec::new(),
             test,
             lsl: None,
@@ -1396,7 +1436,7 @@ pub fn trend(ds: &Dataset, req: &TrendRequest) -> TrendResponse {
         };
     }
     let mask = ds.base_mask(&req.filter);
-    let (stat_keep, _) = stat_keep_rows(ds, req.test, &req.filter, None, &mask)
+    let (stat_keep, outliers) = stat_keep_rows(ds, req.test, &req.filter, None, &mask)
         .unwrap_or_else(||(vec![true; ds.rows], 0));
     let col = &ds.cols[req.test];
     let multi_lot = ds.lots.len() > 1;
@@ -1431,6 +1471,7 @@ pub fn trend(ds: &Dataset, req: &TrendRequest) -> TrendResponse {
         });
     }
     TrendResponse {
+        excluded: outliers + filtered_count(&mask),
         points,
         lsl: test.lo_spec,
         usl: test.hi_spec,
@@ -1462,6 +1503,13 @@ pub struct ScatterRequest {
     #[serde(default)]
     pub filter: Filter,
     pub max_points: Option<usize>,
+    pub axis_summaries: Option<ScatterAxisSummaries>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ScatterAxisSummaries {
+    pub x: bool,
+    pub z: bool,
 }
 
 #[derive(Serialize)]
@@ -1515,16 +1563,20 @@ pub struct ScatterResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ScatterStatistics {
     pub summary: Summary,
+    pub x_summary: Option<Summary>,
+    pub z_summary: Option<Summary>,
     pub fit: Option<ScatterFit>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScatterFit { pub slope:f64, pub intercept:f64, pub r:Option<f64>, pub x_min:f32, pub x_max:f32 }
 
-fn scatter_statistics(x: &[f32], y: &[f32], rows:&[usize]) -> ScatterStatistics {
+fn scatter_statistics(x: &[f32], y: &[f32], z: Option<&[f32]>, rows: &[usize], axes: &ScatterAxisSummaries) -> ScatterStatistics {
     let summary=summarize(&rows.iter().map(|&r|y[r]).collect::<Vec<_>>());
+    let x_summary = axes.x.then(|| summarize(&rows.iter().map(|&r| x[r]).collect::<Vec<_>>()));
+    let z_summary = z.filter(|_| axes.z).map(|z| summarize(&rows.iter().map(|&r| z[r]).collect::<Vec<_>>()));
     let n = rows.len();
-    if n < 2 {return ScatterStatistics{summary,fit:None};}
+    if n < 2 {return ScatterStatistics{summary,x_summary,z_summary,fit:None};}
     let mut sx = 0.0f64;
     let mut sy = 0.0f64;
     let mut x_min=f32::INFINITY;let mut x_max=f32::NEG_INFINITY;
@@ -1546,7 +1598,7 @@ fn scatter_statistics(x: &[f32], y: &[f32], rows:&[usize]) -> ScatterStatistics 
         syy += dy * dy;
     }
     let fit=(sxx>0.0).then(||{let slope=sxy/sxx;ScatterFit{slope,intercept:my-slope*mx,r:(syy>0.0).then(||(sxy/(sxx*syy).sqrt()).clamp(-1.0,1.0)),x_min,x_max}});
-    ScatterStatistics{summary,fit}
+    ScatterStatistics{summary,x_summary,z_summary,fit}
 }
 
 fn scatter_category(ds: &Dataset, col: &str, row: usize, multi_lot: bool) -> (u16, String) {
@@ -1630,7 +1682,7 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
     }
 
     let mut kept: Vec<usize> = Vec::new();
-    let mut excluded = 0usize;
+    let mut excluded = filtered_count(&mask);
     if let Some(sf) = &req.filter.stat {
         if sf.per_wafer {
             let mut by_wafer: HashMap<u16, Vec<usize>> = HashMap::new();
@@ -1678,8 +1730,6 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
     let mut sampled: Vec<usize> = kept.iter().step_by(stride).copied().collect();
     let truncated = stride > 1;
 
-    let statistics=scatter_statistics(xcol,ycol,&kept);
-    let r=statistics.fit.as_ref().and_then(|f|f.r).map(|r|r as f32).unwrap_or(f32::NAN);
 
     let multi_lot = ds.lots.len() > 1;
     let zcol = match req.z_mode {
@@ -1693,6 +1743,11 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
         ScatterZMode::Continuous => req.z_test.and_then(|i| ds.tests.get(i).cloned()),
         _ => None,
     };
+    let default_axes = ScatterAxisSummaries::default();
+    let axes = req.axis_summaries.as_ref().unwrap_or(&default_axes);
+    let z_values = zcol.map(Vec::as_slice);
+    let statistics = scatter_statistics(xcol, ycol, z_values, &kept, axes);
+    let r=statistics.fit.as_ref().and_then(|f|f.r).map(|r|r as f32).unwrap_or(f32::NAN);
     // Categorical colouring and grouping share the same series machinery. A
     // group-by is now independent from continuous Z colouring, so both can be
     // active at the same time.
@@ -1714,7 +1769,10 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
             representatives.entry(key).or_insert(*row);
             group_rows.entry(label).or_default().push(*row);
         }
-        for (label,rows)in group_rows{group_totals.insert(label.clone(),rows.len());group_statistics.insert(label,scatter_statistics(xcol,ycol,&rows));}
+        for (label, rows) in group_rows {
+            group_totals.insert(label.clone(), rows.len());
+            group_statistics.insert(label, scatter_statistics(xcol, ycol, z_values, &rows, axes));
+        }
         let present:HashSet<_>=sampled.iter().map(|&row|category_for_row(ds,category,row,multi_lot).0).collect();
         for (key,row)in representatives {if !present.contains(&key){sampled.push(row);}}
         sampled.sort_unstable();
@@ -1839,6 +1897,13 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn suggested_limits_use_quartiles_with_extreme_values() {
+        let ds = small_dataset(&[-1000.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 1000.0, f32::NAN]);
+        assert_eq!(test_iqr_limits(&ds, 0), Some([5.0, 21.0]));
+        assert_eq!(test_iqr_limits(&ds, 1), None);
+    }
+
+    #[test]
     fn custom_range_and_category_filters_intersect_with_existing_filters() {
         use crate::model::CustomFilter;
 
@@ -1870,12 +1935,14 @@ mod tests {
         ds.tests.extend([TestInfo::new("Y"),TestInfo::new("Z")]);
         ds.cols.push(x.iter().enumerate().map(|(i,v)|if i%2==0{2.0*v+10.0}else{-3.0*v+20.0}).collect());
         let mut z=vec![0.0;100];z[99]=1000.0;ds.cols.push(z);ds.site=(0..100).map(|i|Some((i%2)as u8)).collect();
-        let mut req=ScatterRequest{x_test:0,y_test:1,z_mode:ScatterZMode::Continuous,z_test:Some(2),z_col:None,group_by:Some("site".into()),filter:Filter::default(),max_points:Some(1)};
+        let mut req=ScatterRequest{ axis_summaries: Some(ScatterAxisSummaries { x: true, z: true }),x_test:0,y_test:1,z_mode:ScatterZMode::Continuous,z_test:Some(2),z_col:None,group_by:Some("site".into()),filter:Filter::default(),max_points:Some(1)};
         let sample=scatter(&ds,&req);req.max_points=Some(1000);let all=scatter(&ds,&req);
         assert!(sample.truncated);assert_eq!(sample.total,100);assert_eq!(sample.series.iter().map(|s|s.points.len()).sum::<usize>(),2);
         assert_eq!(serde_json::to_value(&sample.statistics).unwrap(),serde_json::to_value(&all.statistics).unwrap());
         assert_eq!(serde_json::to_value(&sample.group_statistics).unwrap(),serde_json::to_value(&all.group_statistics).unwrap());
         assert_eq!(sample.z_max,1000.0);assert_eq!(sample.z_max,all.z_max);
+        assert_eq!(sample.statistics.x_summary.as_ref().unwrap().max, 99.0);
+        assert_eq!(sample.statistics.z_summary.as_ref().unwrap().max, 1000.0);
         let zero=sample.group_statistics.get("Site 0").unwrap();let one=sample.group_statistics.get("Site 1").unwrap();
         assert_eq!(zero.summary.n,50);assert_eq!(zero.fit.as_ref().unwrap().slope,2.0);assert_eq!(one.fit.as_ref().unwrap().slope,-3.0);
         assert_eq!(zero.fit.as_ref().unwrap().r,Some(1.0));assert_eq!(one.fit.as_ref().unwrap().r,Some(-1.0));
@@ -1886,7 +1953,7 @@ mod tests {
         let source=[vec![(0,0.0),(1,f32::NAN),(2,20.0)],vec![(0,10.0),(1,100.0),(3,300.0)],vec![(0,20.0),(1,200.0),(2,40.0)]];
         for (w,dice)in source.iter().enumerate(){let wi=imp.wafer_index(lot,&format!("W{w}"));for &(x,v)in dice{let r=imp.new_row(lot,wi);imp.x[r]=x;imp.y[r]=0;imp.hbin[r]=if w==2{2}else{1};imp.column((100,0),r,v);}}
         let mut ds=Dataset::new();ds.merge(imp.finish());
-        let req=MapRequest{test:Some(0),wafer:None,mode:MapMode::Value,filter:Filter::default(),lsl:None,usl:None};
+        let req=MapRequest{ no_lsl: false, no_usl: false, count_scope: None,test:Some(0),wafer:None,mode:MapMode::Value,filter:Filter::default(),lsl:None,usl:None};
         let result=wafer_map(&ds,&req);assert_eq!(result.test_total,8);assert_eq!(result.wafer_count,3);
         assert_eq!(result.dice.iter().map(|d|(d.x,d.v)).collect::<Vec<_>>(),vec![(0,10.0),(1,150.0),(2,30.0),(3,300.0)]);
         let mut filtered=req;filtered.filter.hbins=vec![1];let result=wafer_map(&ds,&filtered);
@@ -1917,7 +1984,7 @@ mod tests {
         let mut ds = small_dataset(&values);
         ds.site = (0..values.len()).map(|i| Some(if i < 500 { 0 } else { 1 })).collect();
         let mut request = HistRequest {
-            range: None, population: Some(PopulationRequest { lsl: Some(1.01), usl: Some(1.08), split: true }),
+            range: None, population: Some(PopulationRequest { no_lsl: false, no_usl: false, lsl: Some(1.01), usl: Some(1.08), split: true }),
             test: 0, filter: Filter::default(), bins: None, group_by: Some("site".into()),
         };
         let auto = histogram(&ds, &request);
@@ -1979,7 +2046,7 @@ mod tests {
         let c=limit_counts(&ds,&req); assert_eq!((c.total,c.in_limits),(2,Some(2)));
         let bx=box_plot(&ds,&BoxRequest { population: None,test:0,x_axis:"site".into(),group_by:None,filter:req.filter.clone(),max_points:Some(1)});
         assert_eq!(c.total,bx.summary.n);
-        let scatter = scatter(&ds, &ScatterRequest {x_test:0,y_test:0,z_mode:ScatterZMode::None,z_test:None,z_col:None,
+        let scatter = scatter(&ds, &ScatterRequest { axis_summaries: None,x_test:0,y_test:0,z_mode:ScatterZMode::None,z_test:None,z_col:None,
             group_by:Some("site".into()),filter:Filter::default(),max_points:Some(1)});
         assert_eq!(scatter.group_totals.values().sum::<usize>(),5);
         assert_eq!(scatter.group_totals["Site 0"],2);
@@ -2009,7 +2076,7 @@ mod tests {
     fn box_and_histogram_split_stats_use_full_populations_and_inclusive_limits() {
         let mut ds = small_dataset(&[1.0, 2.0, 3.0, 6.0, 8.0, f32::NAN]);
         ds.site = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
-        let population = || Some(PopulationRequest { lsl: Some(2.0), usl: Some(6.0), split: true });
+        let population = || Some(PopulationRequest { no_lsl: false, no_usl: false, lsl: Some(2.0), usl: Some(6.0), split: true });
         let b = box_plot(&ds, &BoxRequest {
             population: population(), test: 0, x_axis: "wafer".into(), group_by: Some("site".into()),
             filter: Filter::default(), max_points: Some(1),
@@ -2104,13 +2171,13 @@ mod tests {
         ds.wafers.push(ds.wafers[0].clone());
         ds.wafer_of_row = vec![0, 0, 0, 1, 1, 1];
         for per_wafer in [false, true] {
-            let req = MapRequest { wafer: None, test: Some(0), mode: MapMode::Value,
+            let req = MapRequest { no_lsl: false, no_usl: false, count_scope: None, wafer: None, test: Some(0), mode: MapMode::Value,
                 filter: Filter { stat: Some(StatFilter { kind: StatKind::Sigma, k: 1.0, per_wafer }), ..Filter::default() },
                 lsl: Some(0.0), usl: Some(15.0) };
             let maps = wafer_maps(&ds, &req);
             assert_eq!(maps.len(), 2);
             for (wi, map) in maps.iter().enumerate() {
-                let single = MapRequest { wafer: Some(wi as u16), test: req.test, mode: req.mode,
+                let single = MapRequest { no_lsl: false, no_usl: false, count_scope: None, wafer: Some(wi as u16), test: req.test, mode: req.mode,
                     filter: req.filter.clone(), lsl: req.lsl, usl: req.usl };
                 assert_eq!(serde_json::to_value(map).unwrap(), serde_json::to_value(wafer_map(&ds, &single)).unwrap());
             }
@@ -2126,7 +2193,7 @@ mod tests {
         ds.wafers.extend([first.clone(), first]);
         ds.wafer_of_row = vec![0, 1, 2];
         ds.x = vec![0; 3];
-        let req = MapRequest { wafer: None, test: Some(0), mode: MapMode::Value,
+        let req = MapRequest { no_lsl: false, no_usl: false, count_scope: None, wafer: None, test: Some(0), mode: MapMode::Value,
             filter: Filter::default(), lsl: Some(0.0), usl: Some(7.0) };
         let m = wafer_map(&ds, &req);
         assert_eq!(m.dice.len(), 1);
@@ -2172,7 +2239,7 @@ mod tests {
         let start = std::time::Instant::now();
         ds.info();
         let info_ms = start.elapsed().as_millis();
-        let req = MapRequest { wafer: None, test: Some(0), mode: MapMode::Value,
+        let req = MapRequest { no_lsl: false, no_usl: false, count_scope: None, wafer: None, test: Some(0), mode: MapMode::Value,
             filter: Filter { stat: Some(StatFilter { kind: StatKind::Sigma, k: 3.0, per_wafer: true }), ..Filter::default() },
             lsl: None, usl: None };
         let start = std::time::Instant::now();
@@ -2180,7 +2247,7 @@ mod tests {
         let batch_ms = start.elapsed().as_millis();
         let start = std::time::Instant::now();
         for wi in 0..25 {
-            let single = MapRequest { wafer: Some(wi), test: req.test, mode: req.mode,
+            let single = MapRequest { no_lsl: false, no_usl: false, count_scope: None, wafer: Some(wi), test: req.test, mode: req.mode,
                 filter: req.filter.clone(), lsl: None, usl: None };
             wafer_map(&ds, &single);
         }
@@ -2230,7 +2297,7 @@ mod tests {
 
         let mp = wafer_map(
             &ds,
-            &MapRequest {
+            &MapRequest { no_lsl: false, no_usl: false, count_scope: None,
                 lsl: None,
                 usl: None,
                 wafer: Some(0),
@@ -2246,7 +2313,7 @@ mod tests {
 
         let all = wafer_map(
             &ds,
-            &MapRequest {
+            &MapRequest { no_lsl: false, no_usl: false, count_scope: None,
                 lsl: None,
                 usl: None,
                 wafer: None,
@@ -2319,7 +2386,7 @@ mod tests {
             .unwrap_or(test);
         let sc = scatter(
             &ds,
-            &ScatterRequest {
+            &ScatterRequest { axis_summaries: None,
                 x_test: test,
                 y_test: other,
                 z_mode: ScatterZMode::Continuous,
@@ -2359,7 +2426,7 @@ mod tests {
 
         let sc_cat = scatter(
             &ds2,
-            &ScatterRequest {
+            &ScatterRequest { axis_summaries: None,
                 x_test: test,
                 y_test: other,
                 z_mode: ScatterZMode::Category,
@@ -2379,7 +2446,7 @@ mod tests {
 
         let sc_split = scatter(
             &ds2,
-            &ScatterRequest {
+            &ScatterRequest { axis_summaries: None,
                 x_test: test,
                 y_test: other,
                 z_mode: ScatterZMode::Category,
@@ -2465,7 +2532,7 @@ mod tests {
         };
         let pooled = wafer_map(
             &ds,
-            &MapRequest {
+            &MapRequest { no_lsl: false, no_usl: false, count_scope: None,
                 lsl: None,
                 usl: None,
                 wafer: Some(0),
@@ -2485,7 +2552,7 @@ mod tests {
         per_wafer_filter.stat.as_mut().unwrap().per_wafer = true;
         let per_wafer = wafer_map(
             &ds,
-            &MapRequest {
+            &MapRequest { no_lsl: false, no_usl: false, count_scope: None,
                 lsl: None,
                 usl: None,
                 wafer: Some(0),
@@ -2499,7 +2566,7 @@ mod tests {
 
         let mean = wafer_map(
             &ds,
-            &MapRequest {
+            &MapRequest { no_lsl: false, no_usl: false, count_scope: None,
                 lsl: None,
                 usl: None,
                 wafer: None,

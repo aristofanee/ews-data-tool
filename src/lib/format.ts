@@ -1,5 +1,10 @@
 import type { TestInfo } from "../types";
 
+export const statisticalRangeLabels = {
+  sigma: { range: "±kσ", multiplier: "k (σ)" },
+  iqr: { range: "±k IQR", multiplier: "k (IQR)" },
+};
+
 export function fmt(v: number | null | undefined, digits = 4): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return "–";
   const a = Math.abs(v);

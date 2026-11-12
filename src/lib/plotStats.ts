@@ -2,7 +2,7 @@ import type { MapResponse, PlotSelection, PlotSpec, Summary } from "../types";
 import type { PlotData } from "./usePlotData";
 import { categoryName } from "./categoryNames";
 import { fmt, fmtInt } from "./format";
-import { capability, valueMapSummary } from "./stats";
+import { effectiveLimit, capability, valueMapSummary } from "./stats";
 import { binLabel } from "./theme";
 
 export interface Stat {
@@ -37,7 +37,8 @@ function addTestYield(stats: Stat[], yieldPct: number | null, title?: string) {
 export function valueMapStats(data: MapResponse): Stat[] {
   const out = measurementStats(valueMapSummary(data.dice));
   addTestYield(out, data.testYieldPct ?? null, data.isMean ? "Test yield uses the individual dice that contributed to this map." : undefined);
-  if (data.excluded > 0) out.push({ k: "Excluded", v: fmtInt(data.excluded), tone: "warn" });
+  if (data.excluded > 0) out.push({ k: "Filtered", v: fmtInt(data.excluded), tone: "warn",
+    title: "Individual dice removed by filters before combining matching wafer coordinates." });
   return out;
 }
 
@@ -64,14 +65,14 @@ export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection, 
         k: "In Limits", v: fmtInt(inLimits), tone: inLimits < s.n ? "warn" : undefined,
         title: "Dice inside the plot range. Statistics use the full filtered population.",
       });
-      const process = capability(s.mean, s.sd, spec.lsl ?? d.test.loSpec, spec.usl ?? d.test.hiSpec);
+      const process = capability(s.mean, s.sd, effectiveLimit(spec, "lsl", d.test.loSpec), effectiveLimit(spec, "usl", d.test.hiSpec));
       if (process.cp !== null) out.push({ k: "Cp", v: fmt(process.cp, 2) });
       if (process.cpk !== null) {
         const k = process.cpk;
         out.push({ k: "Cpk", v: fmt(k, 2), tone: k < 1.33 ? "warn" : k >= 1.67 ? "good" : undefined });
       }
       addTestYield(out, population.testYieldPct);
-      if (!facet && d.excluded > 0) out.push({ k: "Excluded", v: fmtInt(d.excluded), tone: "warn" });
+      if (!facet && d.excluded > 0) out.push({ k: "Filtered", v: fmtInt(d.excluded), tone: "warn" });
       if (data.kind === "box" && sampledMarkers) out.push({
         k: "Rendering", v: "Sampled", tone: "warn",
         title: "Some regular markers are skipped. All outliers are retained and statistics use the full filtered population.",
@@ -103,6 +104,7 @@ export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection, 
         { k: "Wafers", v: fmtInt(d.wafers.length) },
         { k: "Pass", v: fmtInt(pass) },
         { k: "Other / unknown bins", v: fmtInt(fail) },
+        ...(d.excluded > 0 ? [{ k: "Filtered", v: fmtInt(d.excluded), tone: "warn" as const }] : []),
       ];
     }
     case "pareto": {
@@ -123,6 +125,7 @@ export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection, 
       ];
       if (top) out.push({ k: "Top bin", v: `${binLabel(spec.binCategory, top.code, top.name, false)} · ${top.pct.toFixed(1)}%` });
       if (d.mode === "grouped") out.push({ k: "Groups", v: fmtInt(d.groups.length) });
+      if (!facet && d.excluded > 0) out.push({ k: "Filtered", v: fmtInt(d.excluded), tone: "warn" });
       if (!facet && spec.groupBy !== "none") {
         out.unshift({ k: "View", v: `Split by ${categoryLabel(spec.groupBy)}` });
       } else if (spec.xAxis !== "none") {
@@ -139,6 +142,7 @@ export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection, 
         { k: "Points", v: fmtInt(points.length) },
         { k: "Mean", v: fmt(avg) },
       ];
+      if (!facet && d.excluded > 0) out.push({ k: "Filtered", v: fmtInt(d.excluded), tone: "warn" });
       if (means.length) {
         let min = Infinity;
         let max = -Infinity;
@@ -166,7 +170,8 @@ export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection, 
         out.push({ k: "R²", v: fmt(r * r, 3) });
       }
       if (series.length > 1) out.push({ k: "Groups", v: fmtInt(series.length) });
-      if (!facet && d.excluded > 0) out.push({ k: "Excluded", v: fmtInt(d.excluded), tone: "warn" });
+      if (!facet && d.excluded > 0) out.push({ k: "Filtered", v: fmtInt(d.excluded), tone: "warn",
+        title: "Dice removed by active filters. The outlier filter checks both X and Y." });
       if (points < total) out.push({
         k: "Rendering", v: "Sampled", tone: "warn",
         title: "The fit line, correlation and statistics use all eligible X/Y pairs.",

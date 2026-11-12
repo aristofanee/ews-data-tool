@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import * as api from "./api";
 import { useStore } from "../store";
 import { mapGeneration } from "./mapCache";
+import { limitOverrides } from "./stats";
+import { scatterAxisSummaries } from "../types";
 import type {
   BinOverviewResponse,
   BoxResponse,
@@ -43,8 +45,7 @@ export function usePlotData(): PlotDataState {
     xAxis: spec.xAxis,
     groupBy: spec.groupBy,
     mapMode: spec.mapMode,
-    mapLsl: spec.type === "map" ? spec.lsl : null,
-    mapUsl: spec.type === "map" ? spec.usl : null,
+    mapLimits: spec.type === "map" ? limitOverrides(spec) : null,
     binCategory: spec.binCategory,
     top: spec.top,
     bins: spec.bins,
@@ -52,9 +53,10 @@ export function usePlotData(): PlotDataState {
     scatterY: spec.scatterY,
     scatterZMode: spec.scatterZMode,
     scatterZTest: spec.scatterZTest,
+    scatterSummaries: spec.type === "scatter" ? scatterAxisSummaries(spec) : null,
     maxPoints,
     filters,
-    population: spec.type === "box" || spec.type === "hist" ? [spec.lsl, spec.usl, spec.splitPlots] : null,
+    population: spec.type === "box" || spec.type === "hist" ? { ...limitOverrides(spec), split: spec.splitPlots } : null,
     histogramRange: spec.type === "hist" ? api.histogramOptions(spec).range : null,
     dataVersion,
   });
@@ -76,7 +78,7 @@ export function usePlotData(): PlotDataState {
               kind: "box",
               data: await api.boxPlot({
                 maxPoints,
-                population: { lsl: spec.lsl, usl: spec.usl, split: spec.splitPlots },
+                population: { ...limitOverrides(spec), split: spec.splitPlots },
                 test: spec.test,
                 xAxis: spec.xAxis,
                 groupBy: spec.groupBy,
@@ -89,8 +91,7 @@ export function usePlotData(): PlotDataState {
             result = {
               kind: "map",
               data: await api.waferMap({
-                lsl: spec.lsl,
-                usl: spec.usl,
+                ...limitOverrides(spec),
                 wafer: null,
                 test: spec.test,
                 mode: "value",
@@ -147,6 +148,7 @@ export function usePlotData(): PlotDataState {
             result = {
               kind: "scatter",
               data: await api.scatter({
+                axisSummaries: scatterAxisSummaries(spec),
                 maxPoints,
                 xTest: spec.scatterX,
                 yTest: spec.scatterY,

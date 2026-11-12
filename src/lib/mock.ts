@@ -22,7 +22,7 @@ import type {
   TrendResponse,
   WaferInfo,
 } from "../types";
-import { cpCpk, keepMask, limitRange, naturalCompare, summarize, scatterStatistics } from "./stats";
+import { effectiveLimit, cpCpk, keepMask, limitRange, naturalCompare, quantileSorted, summarize, scatterStatistics } from "./stats";
 
 /* ------------------------------------------------------------------ */
 /* Synthetic dataset used when the app runs in a plain browser (dev).  */
@@ -360,6 +360,22 @@ function binAllowed(w: MockWafer, i: number, f: Filter): boolean {
   return true;
 }
 
+function countFiltered(ds: MockDataset, filter: Filter, wafer: number | null = null, scope?: Filter): number {
+  if (!filter.lots.length && !filter.wafers.length && !filter.hbins.length && !filter.sbins.length &&
+      !filter.sites?.length && !filter.custom?.length && !Object.values(filter.categories ?? {}).some(values => values.length)) return 0;
+  let count = 0;
+  for (const w of ds.wafers) {
+    if (wafer !== null && w.index !== wafer) continue;
+    if (scope && !waferAllowed(w, scope)) continue;
+    const wholeWaferFiltered = !waferAllowed(w, filter);
+    if (wholeWaferFiltered && !scope) { count += w.x.length; continue; }
+    for (let i = 0; i < w.x.length; i++) {
+      if ((!scope || binAllowed(w, i, scope)) && (wholeWaferFiltered || !binAllowed(w, i, filter))) count++;
+    }
+  }
+  return count;
+}
+
 function labelOf(w: MockWafer, multiLot: boolean): string {
   return multiLot ? `${dataset().lots[w.lot]} / ${w.name}` : w.name;
 }
@@ -487,11 +503,27 @@ export async function inspectCsv(_path: string): Promise<CsvInspection> {
 }
 
 function testYield(values: number[], test: TestInfo | undefined, request?: PopulationRequest): number | null {
-  const lo = request?.lsl ?? test?.loSpec;
-  const hi = request?.usl ?? test?.hiSpec;
+  const lo = effectiveLimit(request, "lsl", test?.loSpec);
+  const hi = effectiveLimit(request, "usl", test?.hiSpec);
   if (!values.length || (lo == null && hi == null) || (lo != null && hi != null && lo > hi)) return null;
   const passed = values.filter(v => (lo == null || v >= lo) && (hi == null || v <= hi)).length;
   return 100 * passed / values.length;
+}
+
+function measurementKeepMask(values: number[], wafers: number[], filter: NonNullable<Filter["stat"]>): boolean[] {
+  if (!filter.perWafer) return keepMask(values, filter.kind, filter.k);
+  const rowsByWafer = new Map<number, number[]>();
+  wafers.forEach((wafer, row) => {
+    const rows = rowsByWafer.get(wafer);
+    if (rows) rows.push(row);
+    else rowsByWafer.set(wafer, [row]);
+  });
+  const keep = new Array<boolean>(values.length);
+  for (const rows of rowsByWafer.values()) {
+    const allowed = keepMask(rows.map(row => values[row]), filter.kind, filter.k);
+    rows.forEach((row, i) => { keep[row] = allowed[i]; });
+  }
+  return keep;
 }
 
 export async function boxPlot(req: {
@@ -559,7 +591,7 @@ export async function boxPlot(req: {
   if (req.filter.stat) {
     const sf = req.filter.stat;
     const flat = ordered.flatMap((g) => g.values);
-    const keep = keepMask(flat, sf.kind, sf.k);
+    const keep = measurementKeepMask(flat, ordered.flatMap(g => g.waferIndices), sf);
     let idx = 0;
     for (const g of ordered) {
       const nv: number[] = [];
@@ -661,7 +693,7 @@ export async function boxPlot(req: {
     usl: test?.hiSpec ?? null,
     cp,
     cpk,
-    excluded,
+    excluded: excluded + countFiltered(ds, req.filter),
     truncated: stride > 1,
   });
 }
@@ -669,6 +701,9 @@ export async function boxPlot(req: {
 export async function waferMap(req: {
   lsl?: number | null;
   usl?: number | null;
+  noLsl?: boolean;
+  noUsl?: boolean;
+  countScope?: Filter;
   wafer: number | null;
   test: number | null;
   mode: "value" | "bin";
@@ -695,7 +730,7 @@ export async function waferMap(req: {
       yieldPct: 0,
       isMean,
       waferCount: 0,
-      excluded: 0,
+      excluded: countFiltered(ds, req.filter, req.wafer, req.countScope),
     });
   }
 
@@ -834,8 +869,8 @@ export async function waferMap(req: {
   for (const w of selected) {
     for (const bin of w.hbin) { if (bin === 1) pass++; else fail++; }
   }
-  const lsl = req.lsl ?? test?.loSpec ?? null;
-  const usl = req.usl ?? test?.hiSpec ?? null;
+  const lsl = effectiveLimit(req, "lsl", test?.loSpec);
+  const usl = effectiveLimit(req, "usl", test?.hiSpec);
   let testTotal = 0;
   let testPass = 0;
   let testFail = 0;
@@ -887,7 +922,7 @@ export async function waferMap(req: {
     yieldPct: pass + fail > 0 ? (pass * 100) / (pass + fail) : 0,
     isMean,
     waferCount: selected.length,
-    excluded,
+    excluded: excluded + countFiltered(ds, req.filter, req.wafer, req.countScope),
   });
 }
 
@@ -939,7 +974,7 @@ export async function binOverview(req: {
       });
     }
   }
-  return delay({ wafers });
+  return delay({ wafers, excluded: countFiltered(ds, req.filter) });
 }
 
 export async function pareto(req: {
@@ -1041,6 +1076,7 @@ export async function pareto(req: {
           : ds.customCols.find((c) => c.name === req.groupBy)?.name ?? "Group";
     return delay({
       mode: "grouped",
+      excluded: countFiltered(ds, req.filter),
       bars: [],
       groups,
       series,
@@ -1070,6 +1106,7 @@ export async function pareto(req: {
   }
   return delay({
     mode: "global",
+    excluded: countFiltered(ds, req.filter),
     bars,
     groups: [],
     series: [],
@@ -1103,7 +1140,7 @@ function histogramBins(values: number[], summary: Summary, req: {
   const robustLo = Math.max(min, q1 - 3 * iqr);
   const robustHi = Math.min(max, q3 + 3 * iqr);
   const candidate: HistogramBins["binRange"] = req.range && req.range.limitMode !== "auto"
-    ? limitRange(req.range, summary, req.population?.lsl ?? test.loSpec, req.population?.usl ?? test.hiSpec, min, max)
+    ? limitRange(req.range, summary, effectiveLimit(req.population, "lsl", test.loSpec), effectiveLimit(req.population, "usl", test.hiSpec), min, max)
     : iqr > 0 && max - min > 4 * (robustHi - robustLo) ? [robustLo, robustHi] : null;
   let binRange = candidate?.every(Number.isFinite) && candidate[1] > candidate[0] ? candidate : null;
   let [lo, hi] = binRange ?? [min, max];
@@ -1125,6 +1162,21 @@ function histogramBins(values: number[], summary: Summary, req: {
   const end = hi > lo ? hi : lo + Math.max(Math.abs(lo), 1) * 1e-6;
   const edges = Array.from({ length: nBins + 1 }, (_, i) => i === nBins ? end : lo + (end - lo) / nBins * i);
   return { edges, counts: histogramCounts(values, edges), fitSummary, binRange };
+}
+
+export async function testIqrLimits(test: number): Promise<[number, number] | null> {
+  const values: number[] = [];
+  for (const wafer of dataset().wafers) {
+    const column = wafer.cols[test];
+    if (!column) continue;
+    for (const value of column) if (Number.isFinite(value)) values.push(value);
+  }
+  if (!values.length) return null;
+  values.sort((a, b) => a - b);
+  const q1 = quantileSorted(values, 0.25);
+  const q3 = quantileSorted(values, 0.75);
+  const fence = 1.5 * (q3 - q1);
+  return [q1 - fence, q3 + fence];
 }
 
 export async function testDistribution(test: number) {
@@ -1167,7 +1219,7 @@ export async function histogram(req: {
   const before = rows.length;
   let kept = rows;
   if (req.filter.stat) {
-    const keep = keepMask(rows.map((r) => r.v), req.filter.stat.kind, req.filter.stat.k);
+    const keep = measurementKeepMask(rows.map(r => r.v), rows.map(r => r.w.index), req.filter.stat);
     kept = rows.filter((_, i) => keep[i]);
   }
   const vals = kept.map((r) => r.v);
@@ -1185,7 +1237,7 @@ export async function histogram(req: {
       test,
       lsl: test?.loSpec ?? null,
       usl: test?.hiSpec ?? null,
-      excluded: before,
+      excluded: before + countFiltered(ds, req.filter),
     });
   }
   const histogram = histogramBins(vals, summary, req, test);
@@ -1220,7 +1272,7 @@ export async function histogram(req: {
     test,
     lsl: test?.loSpec ?? null,
     usl: test?.hiSpec ?? null,
-    excluded: before - kept.length,
+    excluded: before - kept.length + countFiltered(ds, req.filter),
   });
 }
 
@@ -1237,10 +1289,11 @@ export async function trend(req: {
   return { points: box.groups.map((g) => ({ label: g.xLabel,
     groupKey: g.groupKey, groupLabel: g.groupLabel, mean: g.summary.mean,
     sd: g.summary.sd, min: g.summary.min, max: g.summary.max, n: g.summary.n })),
-    test: box.test, lsl: box.lsl, usl: box.usl };
+    test: box.test, lsl: box.lsl, usl: box.usl, excluded: box.excluded };
 }
 
 export async function scatter(req: {
+  axisSummaries?: { x: boolean; z: boolean };
   xTest: number;
   yTest: number;
   zMode: "none" | "continuous" | "category";
@@ -1336,8 +1389,13 @@ export async function scatter(req: {
   const groupTotals: Record<string, number> = Object.create(null);
   const groupStatistics:NonNullable<ScatterResponse["groupStatistics"]>=Object.create(null),groupPoints=new Map<string,Raw[]>();
   for(const p of points)if(p.name){const rows=groupPoints.get(p.name)??[];rows.push(p);groupPoints.set(p.name,rows);}
-  for(const [name,rows]of groupPoints){groupTotals[name]=rows.length;groupStatistics[name]=scatterStatistics(rows);}
-  const statistics=scatterStatistics(points);
+  const summarizePoints = (rows: Raw[]) => ({
+    ...scatterStatistics(rows),
+    xSummary: req.axisSummaries?.x ? summarize(rows.map(p => p.x)) : null,
+    zSummary: req.axisSummaries?.z ? summarize(rows.map(p => p.z ?? NaN)) : null,
+  });
+  for(const [name,rows]of groupPoints){groupTotals[name]=rows.length;groupStatistics[name]=summarizePoints(rows);}
+  const statistics=summarizePoints(points);
   const total = points.length;
   const cap = Math.max(1, req.maxPoints ?? 30000);
   const stride = total > cap ? Math.ceil(total / cap) : 1;
@@ -1407,7 +1465,7 @@ export async function scatter(req: {
     zMin,
     zMax,
     total,
-    excluded,
+    excluded: excluded + countFiltered(ds, req.filter),
     truncated: stride > 1,
     r,
     lots: ds.lots,

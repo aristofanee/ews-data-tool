@@ -1,6 +1,6 @@
 import type { BinOverviewWafer, MapDie, MapResponse, PlotSpec, Filter } from "../types";
-import { fmtMap } from "../lib/format";
-import { quantileSorted, valueMapSummary } from "../lib/stats";
+import { drawWaferColorbar, FONT, LegendBounds, mapColors, type MapColors } from "./waferLegend";
+import { effectiveLimit, quantileSorted, valueMapSummary } from "../lib/stats";
 import type { Theme } from "../lib/theme";
 import { binColor, binLabel, paletteColor, binYieldText, hexToRgb } from "../lib/theme";
 import * as api from "../lib/api";
@@ -32,6 +32,7 @@ export interface MapOptions {
   presentation?: boolean;
   /** Hide the colour/bin legend for small bin-overview thumbnails. */
   showLegend?: boolean;
+  showSpecTicks?: boolean;
 }
 
 export interface MapHit {
@@ -74,59 +75,11 @@ export function mapColorLimits(
   }
   if (spec.limitMode === "spec") {
     return {
-      vmin: spec.lsl ?? data.lsl ?? undefined,
-      vmax: spec.usl ?? data.usl ?? undefined,
+      vmin: effectiveLimit(spec, "lsl", data.lsl) ?? undefined,
+      vmax: effectiveLimit(spec, "usl", data.usl) ?? undefined,
     };
   }
   return {};
-}
-
-interface MapColors {
-  bg: string;
-  wafer: string;
-  outline: string;
-  empty: string;
-  text: string;
-  muted: string;
-  limit: string;
-}
-
-const FONT = '"Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif';
-
-class LegendBounds {
-  left = Infinity; top = Infinity; right = -Infinity; bottom = -Infinity;
-  include(x: number, y: number, width: number, height: number) {
-    this.left = Math.min(this.left, x); this.top = Math.min(this.top, y);
-    this.right = Math.max(this.right, x + width); this.bottom = Math.max(this.bottom, y + height);
-  }
-  text(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth?: number) {
-    const m = ctx.measureText(text), factor = maxWidth ? Math.min(1, maxWidth / Math.max(1, m.width)) : 1;
-    this.include(x - m.actualBoundingBoxLeft * factor, y - m.actualBoundingBoxAscent,
-      (m.actualBoundingBoxLeft + m.actualBoundingBoxRight) * factor, m.actualBoundingBoxAscent + m.actualBoundingBoxDescent);
-    if (maxWidth === undefined) ctx.fillText(text, x, y); else ctx.fillText(text, x, y, maxWidth);
-  }
-}
-
-function mapColors(theme: Theme): MapColors {
-  return theme === "dark"
-    ? {
-        bg: "#0f1726",
-        wafer: "#0a1322",
-        outline: "#34455f",
-        empty: "#1b2940",
-        text: "#dbe4f3",
-        muted: "#8fa1bd",
-        limit: "#fb7185",
-      }
-    : {
-        bg: "#ffffff",
-        wafer: "#f8fafc",
-        outline: "#cbd5e1",
-        empty: "#dbe3ee",
-        text: "#0f172a",
-        muted: "#64748b",
-        limit: "#e11d48",
-      };
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -634,16 +587,15 @@ export class WaferMapRenderer {
     }
 
     if (legendCtx && mode === "value") {
-      this.drawColorbar(
+      drawWaferColorbar(
         legendCtx,
         legendColors,
         barX,
         pad + 8,
         26,
         Math.min(availH, h - pad * 2 - 20),
-        lo,
-        hi,
-        pres, bounds
+        { ...this.opts, lo, hi, units: this.data.test?.units ?? "" },
+        bounds, Math.max(20, w - barX - 24), this.opts.exportInk
       );
     } else if (legendCtx) {
       // Keep the bin counts off the canvas edge. The bin legend uses the full
@@ -777,86 +729,6 @@ export class WaferMapRenderer {
     ctx.arc(0, 0, radius, end, start, false);
     ctx.lineTo(Math.cos(theta) * (radius - depth), Math.sin(theta) * (radius - depth));
     ctx.closePath();
-  }
-
-  private drawColorbar(
-    ctx: CanvasRenderingContext2D,
-    t: MapColors,
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    lo: number,
-    hi: number,
-    pres = false, bounds = new LegendBounds()
-  ): void {
-    const k = pres ? 1.55 : 1;
-    const textSize = Math.round(10 * k + (pres ? 0 : 2 + graphFontOffset()));
-    // Reserve separate vertical bands for the units and the upper tick.
-    // The old 7px gap let their bounding boxes overlap after larger fonts.
-    const barY = y + textSize * 2 + 12;
-    const barH = Math.max(20, height - (barY - y) - textSize / 2);
-    bounds.include(x - 1, barY - 1, width + 2, barH + 2);
-    const grad = ctx.createLinearGradient(0, barY + barH, 0, barY);
-    for (let i = 0; i <= 24; i++) {
-      grad.addColorStop(i / 24, this.colorFor(i / 24));
-    }
-    ctx.fillStyle = grad;
-    ctx.fillRect(x, barY, width, barH);
-    ctx.strokeStyle = t.outline;
-    ctx.lineWidth = k;
-    ctx.strokeRect(x + 0.5, barY + 0.5, width - 1, barH - 1);
-
-    const units = this.data?.test?.units || "value";
-    ctx.font = `${this.opts?.exportInk ? "400" : "600"} ${textSize}px ${FONT}`;
-    ctx.fillStyle = t.muted;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-    // Fit to the actual reserved legend width, not a character count.
-    const maxUnitsWidth = Math.max(20, this.w / this.scale - x - 24);
-    let unitsLabel = units;
-    while (unitsLabel.length > 1 && ctx.measureText(unitsLabel).width > maxUnitsWidth) unitsLabel = unitsLabel.slice(0, -1);
-    if (unitsLabel !== units) { unitsLabel = unitsLabel.slice(0, -1) + "…"; }
-    bounds.text(ctx, unitsLabel, x, y + textSize);
-
-    ctx.font = `${this.opts?.exportInk ? "400 " : ""}${textSize}px ${FONT}`;
-    ctx.textBaseline = "middle";
-    for (let i = 0; i <= 4; i++) {
-      const f = i / 4;
-      const yy = barY + barH * (1 - f);
-      const v = lo + (hi - lo) * f;
-      ctx.strokeStyle = t.muted;
-      ctx.beginPath();
-      ctx.moveTo(x + width, yy);
-      ctx.lineTo(x + width + 4 * k, yy);
-      ctx.stroke();
-      ctx.fillStyle = t.text;
-      ctx.textAlign = "left";
-      bounds.include(x + width, yy - 1, 4 * k, 2);
-      bounds.text(ctx, fmtMap(v), x + width + 7 * k, yy);
-    }
-
-    const mark = (v: number, label: string) => {
-      if (!Number.isFinite(v) || hi <= lo) return;
-      const f = (v - lo) / (hi - lo);
-      if (f < 0 || f > 1) return;
-      const yy = barY + barH * (1 - f);
-      ctx.strokeStyle = t.limit;
-      ctx.lineWidth = 2 * k;
-      ctx.beginPath();
-      ctx.moveTo(x - 2 * k, yy);
-      ctx.lineTo(x + width + 2 * k, yy);
-      ctx.stroke();
-      ctx.font = `${this.opts?.exportInk ? "400" : "700"} ${Math.round(9 * k + (pres ? 0 : 2) + (pres ? 0 : graphFontOffset()))}px ${FONT}`;
-      ctx.fillStyle = t.limit;
-      ctx.textAlign = "right";
-      bounds.include(x - 2 * k, yy - k, width + 4 * k, 2 * k);
-      bounds.text(ctx, label, x - 5 * k, yy);
-    };
-    if (this.opts) {
-      mark(this.opts.lsl ?? NaN, "LSL");
-      mark(this.opts.usl ?? NaN, "USL");
-    }
   }
 
   private drawBinLegend(
@@ -995,19 +867,19 @@ export async function mapExportFooter(data: MapResponse, opts: MapOptions, filte
   if (!Number.isFinite(lo)||!Number.isFinite(hi)) return limitFooter(total,null);
   if(data.isMean){const inside=data.dice.filter(d=>Number.isFinite(d.v)&&d.v>=lo&&d.v<=hi).length;
     const explicit=Number.isFinite(opts.vmin)||Number.isFinite(opts.vmax);
-    return limitFooter(total,inside,spec.lsl??data.lsl,spec.usl??data.usl,explicit?spec:{...spec,limitMode:"auto"});}
+    return limitFooter(total,inside,effectiveLimit(spec, "lsl", data.lsl),effectiveLimit(spec, "usl", data.usl),explicit?spec:{...spec,limitMode:"auto"});}
   const grouped=!data.isMean&&!!data.wafer;
   const counts=await api.limitCounts({test:spec.test,filter,lsl:lo,usl:hi,groupBy:grouped?"wafer":null});
   const label=`${data.lotName} / ${data.wafer?.name}`;
   const count=grouped?counts.groups.find(g=>g.label===label)||counts.groups.find(g=>g.label===data.wafer?.name):counts;
   const explicit=Number.isFinite(opts.vmin)||Number.isFinite(opts.vmax);
-  return limitFooter(count?.total??0,count?.inLimits??0,spec.lsl??data.lsl,spec.usl??data.usl,
+  return limitFooter(count?.total??0,count?.inLimits??0,effectiveLimit(spec, "lsl", data.lsl),effectiveLimit(spec, "usl", data.usl),
     explicit?spec:{...spec,limitMode:"auto"});
 }
 
 /** Standalone maps share the same header, pixel size and encoder as Plotly. */
 export function renderMapImage(data: MapResponse, opts: MapOptions, width: number, height: number,
-  title: string, _subtitle: string, format: "jpeg" | "png" = "jpeg"): string {
+  title: string, subtitle: string, format: "jpeg" | "png" = "jpeg"): string {
   const bin = opts.mode === "bin";
   const spec = opts.exportSpec;
   const group = opts.exportGroupLabel ?? (!data.isMean && data.wafer ? `${data.lotName} / ${data.wafer.name}` : undefined);
@@ -1016,7 +888,7 @@ export function renderMapImage(data: MapResponse, opts: MapOptions, width: numbe
   const total = bin ? data.dice.length : data.testTotal ?? (numericTotal || data.dice.filter(d=>Number.isFinite(d.v)).length);
 
   const statistics = bin ? "" : statisticsFooter(valueMapSummary(data.dice));
-  const frame = imageFrame(width, height, title, "", opts.presentation, [opts.exportFooter??limitFooter(total,null)], statistics);
+  const frame = imageFrame(width, height, title, subtitle, opts.presentation, [opts.exportFooter??limitFooter(total,null)], statistics);
   const right = bin ? rightBinLegend(frame.ctx, data.dice, opts, frame.contentHeight) : null;
   const mapWidth = right ? 1152 - right.width - 16 : 1200;
   const mapHeight = frame.contentHeight;
@@ -1030,13 +902,13 @@ export function renderMapImage(data: MapResponse, opts: MapOptions, width: numbe
 
 /** All wafers plus a shared, complete bin legend; no category is silently dropped. */
 export function renderBinOverviewImage(wafers: BinOverviewWafer[], opts: MapOptions, width: number, height: number,
-  title: string, _subtitle: string, format: "jpeg" | "png" = "jpeg"): string {
+  title: string, subtitle: string, format: "jpeg" | "png" = "jpeg"): string {
   if (opts.exportSpec) title = exportPlotTitle(opts.exportSpec, null, "WaferID");
   // An overview is always a 16:9 image; enlarged individual wafers remain square.
   height = Math.round(width * 9 / 16);
   const lots = [...new Set(wafers.map(w=>w.lotName))];
   if (opts.exportSpec && lots.length === 1) title = exportPlotTitle({...opts.exportSpec,groupBy:"lot"}, null, "WaferID", lots[0]);
-  const frame = imageFrame(width, height, title, "", opts.presentation,
+  const frame = imageFrame(width, height, title, subtitle, opts.presentation,
     []);
   if (!wafers.length) return encodeImage(frame.canvas, format);
   const {legend, width:legendW} = rightBinLegend(frame.ctx, wafers.flatMap(w=>w.dice), opts, frame.contentHeight);

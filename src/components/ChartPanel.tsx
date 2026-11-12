@@ -2,7 +2,7 @@ import { useRestorePlotSelection } from "../lib/usePlotMemory";
 import { useEffect, useMemo, useRef, useState, useCallback, type ComponentType } from "react";
 import { PLOT_LABELS, useStore } from "../store";
 import type { PlotSpec, PlotType, PlotSelection } from "../types";
-import { usePlotData, type PlotData } from "../lib/usePlotData";
+import type { PlotData, PlotDataState } from "../lib/usePlotData";
 import {
   figureBox,
   figureHist,
@@ -22,6 +22,7 @@ import { MapFacetView, type MapFacetExportApi } from "./MapFacetView";
 import { ParetoFacetView, type ParetoFacetExportApi } from "./ParetoFacetView";
 import { EmptyState } from "./EmptyState";
 import { renderExportFigure, splitImageName, IMAGE_WIDTH, imageHeight } from "../charts/imageExport";
+import { describeFilters } from "../lib/customFilters";
 import type { Theme } from "../lib/theme";
 import * as api from "../lib/api";
 import { paintExportProgress, type ImageExportJob } from "../lib/exportJobs";
@@ -37,6 +38,7 @@ import {
   IconMap,
   IconPareto,
   IconPlus,
+  IconRefresh,
   IconScatter,
   IconTrend,
 } from "./Icons";
@@ -369,7 +371,7 @@ function SplitPlotView({
   );
 }
 
-export function ChartPanel() {
+export function ChartPanel({ data, loading, error }: PlotDataState) {
   const info = useStore((s) => s.info);
   const spec = useStore((s) => s.spec);
   const viewKey = usePlotViewKey(spec);
@@ -379,10 +381,11 @@ export function ChartPanel() {
   const setPlotType = useStore((s) => s.setPlotType);
   const patchSpec = useStore((s) => s.patchSpec);
   const addReport = useStore((s) => s.addReport);
+  const selectedReportId = useStore(s => s.report.find(item => item.id === s.editingReportId)?.id);
+  const updateReportItem = useStore(s => s.updateReportItem);
   const notify = useStore((s) => s.notify);
   const setError = useStore((s) => s.setError);
 
-  const { data, loading, error } = usePlotData();
   const plotRef = useRef<HTMLDivElement>(null);
   const [selectionState,setSelectionState]=useState<{key:string;selection:PlotSelection|null}>({key:"",selection:null});
   const onSelection=useCallback((selection:PlotSelection|null)=>{setSelectionState({key:viewKey,selection});useStore.setState({plotSelection:selection});},[viewKey]);
@@ -458,7 +461,7 @@ export function ChartPanel() {
   };
 
   const renderImage = (fig: Figure, format: "png" | "jpeg") =>
-    renderExportFigure({ ...fig, exportFilter: filters }, format);
+    renderExportFigure({ ...fig, exportFilter: filters, exportSubtitle: describeFilters(filters, info, spec.type !== "pareto") }, format);
   const assertUnchanged = () => {
     if (revisionRef.current !== exportRevision) throw new Error("The plot changed during export. Start the export again.");
   };
@@ -553,6 +556,12 @@ export function ChartPanel() {
           </button>
         ))}
         <div className="tabs-spacer" />
+        {selectedReportId && (
+          <button className="btn" onClick={() => updateReportItem(selectedReportId, opened)}
+            disabled={loading || exporting || !!error} title="Save the current plot to the selected report item">
+            <IconRefresh size={15} /> Update report item
+          </button>
+        )}
         <button className="btn" onClick={()=>addReport(opened??undefined)} disabled={loading||exporting||!!error} title={opened?"Add the opened plot to the report":"Add this plot to the report"}>
           <IconPlus size={15} /> Add to report
         </button>

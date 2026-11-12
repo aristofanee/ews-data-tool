@@ -1,9 +1,14 @@
 import { useStore } from "../store";
-import { defaultSpec, type LimitMode, type PlotType } from "../types";
+import { defaultSpec, scatterLimitsFor, type LimitMode, type PlotLimits, type PlotType, type ScatterAxis } from "../types";
 import { PALETTES, paletteGradient } from "../lib/theme";
-import { fmt, fmtInt, testLabelWithUnits } from "../lib/format";
-import { Fragment, type ReactNode } from "react";
+import { fmt, fmtInt, statisticalRangeLabels, testLabelWithUnits } from "../lib/format";
+import { Fragment, useState, type ReactNode } from "react";
 import { TestCombobox } from "./TestCombobox";
+import { testIqrLimits } from "../lib/api";
+
+function specLimitStep(value: number | null): number {
+  return value ? 10 ** (Math.floor(Math.log10(Math.abs(value))) - 1) : 0.1;
+}
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -49,25 +54,40 @@ function Num({
   placeholder,
   step = "any",
   disabled,
+  min,
+  stepFromValue,
 }: {
   value: number | null;
   onChange: (v: number | null) => void;
   placeholder?: string;
   step?: string;
   disabled?: boolean;
+  min?: number;
+  stepFromValue?: boolean;
 }) {
+  const [draft, setDraft] = useState<string | null>(null);
   return (
     <input
       className="input"
       type="number"
       step={step}
+      min={min}
       disabled={disabled}
-      value={value === null || !Number.isFinite(value) ? "" : value}
+      value={draft ?? (value === null || !Number.isFinite(value) ? "" : value)}
       placeholder={placeholder}
       onChange={(e) => {
         const v = e.target.value;
-        onChange(v === "" ? null : Number(v));
+        // Keep the native spinner's step base at the last entered value.
+        if (stepFromValue) e.target.defaultValue = v;
+        if (min === undefined) { onChange(v === "" ? null : Number(v)); return; }
+        setDraft(v);
+        if (v !== "" && Number(v) >= min) onChange(Number(v));
       }}
+      onBlur={() => {
+        if (draft !== null && draft !== "" && min !== undefined && Number(draft) < min) onChange(min);
+        setDraft(null);
+      }}
+      onKeyDown={e => { if (min !== undefined && e.key === "Enter") e.currentTarget.blur(); }}
     />
   );
 }
@@ -101,16 +121,17 @@ function Check({
 const RANGE_OPTIONS: { v: LimitMode; label: string }[] = [
   { v: "auto", label: "Auto" },
   { v: "manual", label: "Manual" },
-  { v: "sigma", label: "±kσ" },
-  { v: "iqr", label: "±k IQR" },
-  { v: "spec", label: "LSL/USL" },
+  { v: "sigma", label: statisticalRangeLabels.sigma.range },
+  { v: "iqr", label: statisticalRangeLabels.iqr.range },
+  { v: "spec", label: "USL/LSL" },
 ];
 
-export function Inspector() {
+export function Inspector({ autoBins }: { autoBins: number }) {
   const info = useStore((s) => s.info);
   const spec = useStore((s) => s.spec);
   const patch = useStore((s) => s.patchSpec);
   const show = useStore((s) => s.showInspector);
+  const [pendingLimits, setPendingLimits] = useState<Set<string>>(() => new Set());
 
   if (!show) return null;
   if (!info) return null;
@@ -121,10 +142,103 @@ export function Inspector() {
   const showTest = spec.type !== "binmap" && spec.type !== "pareto";
   const showLimits =
     spec.type === "box" || spec.type === "hist" || spec.type === "trend" || spec.type === "map" || isScatter;
-  const supportsSpec = spec.type === "box" || spec.type === "hist" || spec.type === "trend";
-  const supportsSpecRange = supportsSpec || spec.type === "map";
-  const supportsLog = spec.type === "box" || spec.type === "hist" || spec.type === "trend" || isScatter;
-  const valueAxis = spec.type === "map" ? "Colour scale" : spec.type === "hist" ? "Value axis" : "Y axis";
+  const suggestLimit = async (side: "usl" | "lsl", key: string, index: number, settings: PlotLimits,
+    change: (value: Partial<PlotLimits>) => void, axis?: ScatterAxis) => {
+    setPendingLimits(current => new Set(current).add(key));
+    try {
+      const limits = await testIqrLimits(index);
+      const current = useStore.getState();
+      const currentTest = axis === "x" ? current.spec.scatterX : axis === "y" ? current.spec.scatterY
+        : axis === "z" ? current.spec.scatterZTest : current.spec.test;
+      const currentLimits = axis ? scatterLimitsFor(current.spec, axis) : current.spec;
+      if (current.info !== info || current.spec.type !== spec.type || currentTest !== index ||
+          currentLimits[side] !== settings[side]) return;
+      if (!limits) {
+        current.notify("No measured values to suggest a limit.");
+        return;
+      }
+      const edge = limits[side === "usl" ? 1 : 0];
+      const step = specLimitStep(edge);
+      const rounded = side === "usl" ? Math.ceil(edge / step) : Math.floor(edge / step);
+      change({ [side]: Number((rounded * step).toPrecision(15)), [side === "usl" ? "noUsl" : "noLsl"]: false });
+    } catch (error) {
+      useStore.getState().setError(String(error));
+    } finally {
+      setPendingLimits(current => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
+  const limitControls = (settings: PlotLimits, testIndex: number | null, axis?: ScatterAxis) => {
+    const axisTest = testIndex === null ? null : info.tests[testIndex];
+    const colour = spec.type === "map" || axis === "z";
+    const name = axis ? axis.toUpperCase() : "";
+    const rangeLabel = axis ? `${name} range` : colour ? "Range" : spec.type === "hist" ? "Value axis range" : "Y axis range";
+    const change = (values: Partial<PlotLimits>) => {
+      if (!axis) { patch(values); return; }
+      const current = useStore.getState().spec;
+      patch({ scatterLimits: { ...current.scatterLimits, [axis]: { ...scatterLimitsFor(current, axis), ...values } } });
+    };
+    const showLog = axis === "y" || (!axis && !colour);
+    return <>
+      <Check label={colour ? "Show spec ticks (USL/LSL)" : "Show spec limits (USL/LSL)"}
+        checked={settings.showLimits} onChange={showLimits => change({ showLimits })} />
+      {(settings.showLimits || settings.limitMode === "spec") && <>
+        {(["usl", "lsl"] as const).map(side => {
+          const none = side === "usl" ? "noUsl" : "noLsl";
+          const imported = side === "usl" ? axisTest?.hiSpec : axisTest?.loSpec;
+          const limit = settings[side] ?? imported ?? null;
+          const pendingKey = `${spec.type}:${axis ?? ""}:${testIndex}:${side}`;
+          const pending = pendingLimits.has(pendingKey);
+          const label = side.toUpperCase();
+          return <Row key={side} label={label}>
+            <div className="spec-limit-control">
+              <Num value={settings[none] ? null : limit} disabled={limit !== null && settings[none]}
+                onChange={value => change({ [side]: value, [none]: false })}
+                placeholder={pending ? "Loading…" : "None"} step={String(specLimitStep(limit))} stepFromValue />
+              <input type="checkbox" aria-label={`Enable ${name ? `${name} ` : ""}${label}`} title={`Enable ${label}`}
+                checked={limit !== null && !settings[none]} disabled={pending || testIndex === null}
+                onChange={e => {
+                  if (e.target.checked && limit === null && testIndex !== null)
+                    void suggestLimit(side, pendingKey, testIndex, settings, change, axis);
+                  else change({ [none]: !e.target.checked });
+                }} />
+            </div>
+          </Row>;
+        })}
+        <button className="link-btn" onClick={() => change({ lsl: null, usl: null, noLsl: false, noUsl: false })}
+          disabled={settings.lsl === null && settings.usl === null && !settings.noLsl && !settings.noUsl}>
+          Use limits from the test
+        </button>
+      </>}
+      <Row label={rangeLabel}>
+        <select className="input" aria-label={rangeLabel} value=""
+          onChange={e => { if (e.target.value) change({ limitMode: e.target.value as LimitMode }); }}>
+          {RANGE_OPTIONS.map(option => <Fragment key={option.v}>
+            <option value={option.v}>{option.label}</option>
+            {option.v === settings.limitMode && <option value="" hidden disabled>{option.label}</option>}
+          </Fragment>)}
+        </select>
+      </Row>
+      {(settings.limitMode === "sigma" || settings.limitMode === "iqr") && (
+        <Row label={statisticalRangeLabels[settings.limitMode].multiplier}>
+          <Num value={settings.limitK} onChange={value => { if (value !== null) change({ limitK: value }); }} step="0.1" min={0.1} />
+        </Row>
+      )}
+      {settings.limitMode === "manual" && <>
+        <Row label="Max"><Num value={settings.yMax} onChange={yMax => change({ yMax })} placeholder="auto" /></Row>
+        <Row label="Min"><Num value={settings.yMin} onChange={yMin => change({ yMin })} placeholder="auto" /></Row>
+      </>}
+      {showLog && <Check label={spec.type === "hist" ? "Logarithmic count axis" : "Logarithmic Y axis"}
+        checked={spec.logY} onChange={logY => patch({ logY })} />}
+      <button className="link-btn" onClick={() => change({ limitMode: "auto", yMin: null, yMax: null })}
+        disabled={settings.limitMode === "auto" && settings.yMin === null && settings.yMax === null}>
+        Reset limits
+      </button>
+    </>;
+  };
   const categoryOptions = (noneLabel?: string) => (
     <>
       {noneLabel !== undefined && <option value="none">{noneLabel}</option>}
@@ -179,6 +293,7 @@ export function Inspector() {
       id: spec.id,
       scatterX: spec.scatterX,
       scatterY: spec.scatterY,
+      scatterLimits: undefined,
     });
   };
 
@@ -213,8 +328,8 @@ export function Inspector() {
             </div>
             {!isScatter && test && (test.loSpec !== null || test.hiSpec !== null) && (
               <div className="test-card-limits">
-                spec {test.loSpec !== null ? fmt(test.loSpec) : "—"} …{" "}
-                {test.hiSpec !== null ? fmt(test.hiSpec) : "—"}
+                USL/LSL {test.hiSpec !== null ? fmt(test.hiSpec) : "—"} /{" "}
+                {test.loSpec !== null ? fmt(test.loSpec) : "—"}
               </div>
             )}
           </div>
@@ -328,7 +443,7 @@ export function Inspector() {
             />
           </Row>
           <Row label="Top bins">
-            <Num value={spec.top} onChange={(v) => patch({ top: v ?? 10 })} step="1" />
+            <Num value={spec.top} onChange={(v) => { if (v !== null) patch({ top: Math.round(v) }); }} step="1" min={1} />
           </Row>
           <Row label="X axis">
             <select
@@ -368,8 +483,18 @@ export function Inspector() {
             onChange={(v) => patch({ splitPlots: v })}
           />
           <Row label="Bins">
-            <Num value={spec.bins} onChange={(v) => patch({ bins: v })} placeholder="auto" step="1" />
+            <select className="input" aria-label="Bins" value={spec.bins === null ? "auto" : "manual"}
+              onChange={e => patch({ bins: e.target.value === "auto" ? null : autoBins })}>
+              <option value="auto">Auto</option>
+              <option value="manual" disabled={spec.bins === null && !autoBins}>Manual</option>
+            </select>
           </Row>
+          {spec.bins !== null && (
+            <Row label="Bin count">
+              <Num value={spec.bins} step="1" min={1}
+                onChange={v => { if (v !== null) patch({ bins: Math.round(v) }); }} />
+            </Row>
+          )}
           <Check
             label="Normal curve overlay"
             checked={spec.showNormal}
@@ -460,104 +585,13 @@ export function Inspector() {
 
       {showLimits && (
         <Section title={spec.type === "map" ? "Colour limits" : "Limits"}>
-          {supportsSpec && (
-            <Check
-              label="Show spec limits (LSL/USL)"
-              checked={spec.showLimits}
-              onChange={(v) => patch({ showLimits: v })}
-            />
-          )}
-          {((supportsSpec && spec.showLimits) ||
-            (spec.type === "map" && spec.limitMode === "spec")) && (
-            <>
-              <Row label="LSL">
-                <Num
-                  value={spec.lsl}
-                  onChange={(v) => patch({ lsl: v })}
-                  placeholder={test?.loSpec != null ? fmt(test.loSpec) : "none"}
-                />
-              </Row>
-              <Row label="USL">
-                <Num
-                  value={spec.usl}
-                  onChange={(v) => patch({ usl: v })}
-                  placeholder={test?.hiSpec != null ? fmt(test.hiSpec) : "none"}
-                />
-              </Row>
-              <button
-                className="link-btn"
-                onClick={() => patch({ lsl: null, usl: null })}
-                disabled={spec.lsl === null && spec.usl === null}
-              >
-                Use limits from the test
-              </button>
-            </>
-          )}
-          <Row label={spec.type === "map" ? "Range" : `${valueAxis} range`}>
-            <select
-              className="input"
-              aria-label={spec.type === "map" ? "Range" : `${valueAxis} range`}
-              value=""
-              onChange={(e) => {
-                if (e.target.value) patch({ limitMode: e.target.value as LimitMode });
-              }}
-            >
-              {RANGE_OPTIONS.map((o) => (
-                <Fragment key={o.v}>
-                  <option value={o.v} disabled={o.v === "spec" && !supportsSpecRange}>{o.label}</option>
-                  {/* Keep the displayed label separate so selecting it again fires change. */}
-                  {o.v === spec.limitMode && <option value="" hidden disabled>{o.label}</option>}
-                </Fragment>
-              ))}
-            </select>
-          </Row>
-          {(spec.limitMode === "sigma" || spec.limitMode === "iqr") && (
-            <Row label={spec.limitMode === "sigma" ? "k (σ)" : "k (IQR)"}>
-              <Num
-                value={spec.limitK}
-                onChange={(v) => patch({ limitK: v ?? 3 })}
-                step="0.1"
-              />
-            </Row>
-          )}
-          {spec.limitMode === "manual" && (
-            <>
-              <Row label="Min">
-                <Num
-                  value={spec.yMin}
-                  onChange={(v) => patch({ yMin: v })}
-                  placeholder="auto"
-                />
-              </Row>
-              <Row label="Max">
-                <Num
-                  value={spec.yMax}
-                  onChange={(v) => patch({ yMax: v })}
-                  placeholder="auto"
-                />
-              </Row>
-            </>
-          )}
-          {supportsLog && (
-            <Check
-              label={spec.type === "hist" ? "Logarithmic count axis" : "Logarithmic Y axis"}
-              checked={spec.logY}
-              onChange={(v) => patch({ logY: v })}
-            />
-          )}
-          <button
-            className="link-btn"
-            onClick={() =>
-              patch({
-                limitMode: "auto",
-                yMin: null,
-                yMax: null,
-              })
-            }
-            disabled={spec.limitMode === "auto" && spec.yMin === null && spec.yMax === null}
-          >
-            Reset limits
-          </button>
+          {isScatter ? <>
+            <div className="axis-limits"><h4>X axis</h4>{limitControls(scatterLimitsFor(spec, "x"), spec.scatterX, "x")}</div>
+            <div className="axis-limits"><h4>Y axis</h4>{limitControls(scatterLimitsFor(spec, "y"), spec.scatterY, "y")}</div>
+            {spec.scatterZMode === "continuous" && spec.scatterZTest !== null && (
+              <div className="axis-limits"><h4>Z colour scale</h4>{limitControls(scatterLimitsFor(spec, "z"), spec.scatterZTest, "z")}</div>
+            )}
+          </> : limitControls(spec, spec.test)}
         </Section>
       )}
 

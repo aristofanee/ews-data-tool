@@ -11,7 +11,7 @@ export interface ResolutionNode extends RememberedNode {
   children:ResolutionNode[];
 }
 const slot=(id:string,field:string)=>`${id}:${field}`;
-const rank=(field:string)=>field==="selection"?2:field.startsWith("wafers:")||field.startsWith("categoryFilter:")?1:field==="runtime"?3:0;
+const rank=(field:string)=>field==="selection"?2:/^(wafers|categoryFilter|customValue):/.test(field)?1:field==="runtime"?3:0;
 const title=(issue:ReportIssue)=>{
   const value=issue.reference?.value;
   return typeof value==="object"&&"category"in value?value.label||"Unassigned":issue.label;
@@ -19,8 +19,9 @@ const title=(issue:ReportIssue)=>{
 
 function dependencies(item:ReportItem,ref:ReportReference):string[]{
   const refs=item.references??[];
+  if(ref.field.startsWith("customValue:"))return [slot(item.id,`customCategory:${ref.field.split(":")[1]}`)];
   if(ref.field.startsWith("categoryFilter:")&&typeof ref.value==="object"&&"category"in ref.value){const category=ref.value.category;return refs.filter(r=>r.field.startsWith("filterCategory:")&&r.value===category).map(r=>slot(item.id,r.field));}
-  if(ref.field==="selection")return refs.filter(r=>r.field==="groupBy"||/^(lots|wafers|categoryFilter|filterCategory):/.test(r.field)||
+  if(ref.field==="selection")return refs.filter(r=>r.field==="groupBy"||/^(lots|wafers|categoryFilter|filterCategory|customCategory|customValue):/.test(r.field)||
     r.field.startsWith(`${item.spec.groupBy==="site"?"sites":item.spec.groupBy==="hbin"?"hbins":item.spec.groupBy==="sbin"?"sbins":"_"}:`)).map(r=>slot(item.id,r.field));
   if(ref.field.startsWith("wafers:"))return refs.filter(r=>r.field.startsWith("lots:")&&
     (typeof ref.value!=="object"||!("lot"in ref.value)||r.value===ref.value.lot)).map(r=>slot(item.id,r.field));

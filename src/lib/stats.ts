@@ -190,3 +190,11 @@ export function limitRange(
   }
   return null;
 }
+export function effectiveLimit(spec: Partial<Pick<PlotSpec, "lsl" | "usl" | "noLsl" | "noUsl">> | undefined, side: "lsl" | "usl", imported?: number | null): number | null {
+  return (side === "lsl" ? spec?.noLsl : spec?.noUsl) ? null : spec?.[side] ?? imported ?? null;
+}
+
+export function limitOverrides(spec: PlotSpec) {
+  const { lsl, usl, noLsl, noUsl } = spec;
+  return { lsl, usl, noLsl, noUsl };
+}

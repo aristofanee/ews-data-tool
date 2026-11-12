@@ -5,15 +5,18 @@ import type {
   PlotSpec,
   ScatterPoint,
   ScatterResponse,
+  ScatterStatistics,
   TrendResponse,
 } from "../types";
+import { scatterLimitsFor } from "../types";
 import { axisTitle, fmt, fmtInt, testLabel, tidyName } from "../lib/format";
-import { capability, limitRange, mean, normalPdf, stdDev, summarize, scatterStatistics, type AxisStats } from "../lib/stats";
+import { effectiveLimit, capability, limitRange, mean, normalPdf, stdDev, summarize, scatterStatistics, type AxisStats } from "../lib/stats";
 import { categoryName, statisticsFooter, type ExportPlotStyle } from "./imageExport";
 import type { Filter } from "../types";
 import { graphFontOffset } from "../lib/demoFonts";
 import type { Theme } from "../lib/theme";
-import { binColor, binLabel } from "../lib/theme";
+import { binColor, binLabel, PALETTES } from "../lib/theme";
+import { SCATTER_COLOR_LEGEND_WIDTH, type WaferColorLegend } from "./waferLegend";
 import {
   baseLayout,
   categoricalColor,
@@ -35,6 +38,7 @@ export interface Figure {
   layout: any;
   indexedXLabels?: string[];
   rasterScatter?: boolean;
+  colorLegend?: WaferColorLegend;
   sampledMarkers?: boolean;
 }
 
@@ -179,7 +183,7 @@ interface LimitLines {
   annotations: any[];
 }
 
-/** LSL/USL (red dashed) on a cartesian axis. */
+/** USL/LSL (red dashed) on a cartesian axis. */
 export function limitLines(
   t: ChartTheme,
   lsl: number | null,
@@ -222,12 +226,12 @@ export function limitLines(
       opacity: 1,
     });
   };
-  if (lsl !== null && Number.isFinite(lsl)) add(lsl, "LSL", "bottom");
   if (usl !== null && Number.isFinite(usl)) add(usl, "USL", "top");
+  if (lsl !== null && Number.isFinite(lsl)) add(lsl, "LSL", "bottom");
   return { shapes, annotations };
 }
 
-/** LSL/USL (red dashed) on a value x-axis. */
+/** USL/LSL (red dashed) on a value x-axis. */
 export function limitLinesX(
   t: ChartTheme,
   lsl: number | null,
@@ -264,15 +268,15 @@ export function limitLinesX(
       opacity: 1,
     });
   };
-  if (lsl !== null && Number.isFinite(lsl)) add(lsl, "LSL", "left");
   if (usl !== null && Number.isFinite(usl)) add(usl, "USL", "right");
+  if (lsl !== null && Number.isFinite(lsl)) add(lsl, "LSL", "left");
   return { shapes, annotations };
 }
 
 function applyAxisRange(
   layout: any,
   axis: "x" | "y",
-  spec: PlotSpec,
+  spec: Pick<PlotSpec, "limitMode" | "limitK" | "yMin" | "yMax" | "logY">,
   stats: AxisStats,
   lsl: number | null,
   usl: number | null,
@@ -445,8 +449,8 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
     }
   }
 
-  const lsl = spec.lsl ?? data.test.loSpec;
-  const usl = spec.usl ?? data.test.hiSpec;
+  const lsl = effectiveLimit(spec, "lsl", data.test.loSpec);
+  const usl = effectiveLimit(spec, "usl", data.test.hiSpec);
   const limits = preview || !spec.showLimits
     ? { shapes: [], annotations: [] }
     : limitLines(t, lsl, usl, "y", style, spec.logY);
@@ -543,7 +547,7 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
   const result = previewFigure([...boxes, ...batches.values()], layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${units ? ` [${units}]` : ""}`);
   if (!preview) result.indexedXLabels = short;
   result.sampledMarkers = sampledMarkers;
-  result.exportNotes = [`${fmtInt(groups.reduce((n, g) => n + g.summary.n, 0))} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} excluded by statistical filtering` : ""}`,
+  result.exportNotes = [`${fmtInt(groups.reduce((n, g) => n + g.summary.n, 0))} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} filtered` : ""}`,
     ...(sampledMarkers ? ["Regular markers are sampled; every outlier is retained. Box statistics use all considered measurements."] : [])];
   return result;
 }
@@ -579,6 +583,7 @@ function figureParetoCore(data: ParetoResponse, opts: FigureOpts): Figure {
       .sort((a, b) => b.count - a.count || a.code - b.code);
     data = {
       mode: "global",
+      excluded: 0,
       bars,
       groups: [],
       series: [],
@@ -868,8 +873,8 @@ function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
     });
   }
 
-  const lsl = spec.lsl ?? data.test.loSpec;
-  const usl = spec.usl ?? data.test.hiSpec;
+  const lsl = effectiveLimit(spec, "lsl", data.test.loSpec);
+  const usl = effectiveLimit(spec, "usl", data.test.hiSpec);
   const limits = preview || !spec.showLimits
     ? { shapes: [], annotations: [] }
     : limitLinesX(t, lsl, usl, style);
@@ -950,7 +955,7 @@ function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
   layout.shapes = shapes;
   layout.annotations = annotations;
   return { ...previewFigure(traces, layout, preview, `${testLabel(data.test)}${data.test.units ? ` [${data.test.units}]` : ""}`, "Count"),
-    exportNotes: [`${fmtInt(data.summary.n)} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} excluded by statistical filtering` : ""}`] };
+    exportNotes: [`${fmtInt(data.summary.n)} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} filtered` : ""}`] };
 }
 
 /* ------------------------------------------------------------------ */
@@ -991,8 +996,8 @@ function figureTrendCore(data: TrendResponse, opts: FigureOpts): Figure {
         "sd %{customdata[0]:.4~g} · n %{customdata[1]}<extra></extra>", showlegend: false });
     offset += block.length;
   }
-  const lsl = spec.lsl ?? data.test.loSpec;
-  const usl = spec.usl ?? data.test.hiSpec;
+  const lsl = effectiveLimit(spec, "lsl", data.test.loSpec);
+  const usl = effectiveLimit(spec, "usl", data.test.hiSpec);
   const { shapes, annotations } = spec.showLimits
     ? limitLines(t, lsl, usl, "y", style, spec.logY)
     : { shapes: [], annotations: [] };
@@ -1089,55 +1094,25 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
   const showLegend = hasGroups && series.length > 1 && !facet && !preview;
   const symbols = ["circle", "square", "diamond", "triangle-up", "cross", "x", "star", "hexagon"];
   const groupedZ = data.zMode === "continuous" && !!data.groupLabel;
+  const statistics: ScatterStatistics = (facet ? data.groupStatistics?.[series[0]?.name] : data.statistics)
+    ?? scatterStatistics(series.flatMap(s => s.points));
+  const xLimits = scatterLimitsFor(spec, "x");
+  const yLimits = scatterLimitsFor(spec, "y");
+  let colorLegend: WaferColorLegend | undefined;
 
   if (data.zMode === "continuous") {
-    const colorbar = groupedZ
-      ? {
-          orientation: "h",
-          x: 0.5,
-          xanchor: "center",
-          y: -0.2,
-          yanchor: "top",
-          len: 0.55,
-          thickness: spec.presentation ? 16 : 12,
-          title: {
-            text: data.zColLabel || "Z",
-            side: "top",
-            font: {
-              size: scaledFont(style.axisTitle, 0.72, spec.presentation),
-              color: t.muted,
-              family: CHART_FONT,
-            },
-          },
-          tickfont: {
-            size: scaledFont(style.tick, 0.72, spec.presentation),
-            color: t.muted,
-            family: CHART_FONT,
-          },
-          outlinewidth: 0,
-        }
-      : {
-          title: {
-            text: data.zColLabel || "Z",
-            side: "right",
-            font: {
-              size: scaledFont(style.axisTitle, 0.78, spec.presentation),
-              color: t.muted,
-              family: CHART_FONT,
-            },
-          },
-          tickfont: {
-            size: scaledFont(style.tick, 0.78, spec.presentation),
-            color: t.muted,
-            family: CHART_FONT,
-          },
-          thickness: spec.presentation ? 28 : 16,
-          len: 0.82,
-          x: 1.015,
-          xpad: 8,
-          outlinewidth: 0,
-        };
-    let colorbarShown = false;
+    const zLimits = scatterLimitsFor(spec, "z");
+    const lsl = effectiveLimit(zLimits, "lsl", data.zTest?.loSpec);
+    const usl = effectiveLimit(zLimits, "usl", data.zTest?.hiSpec);
+    const stats = statistics.zSummary;
+    const range = stats?.n ? limitRange(zLimits, stats, lsl, usl, stats.min, stats.max) : null;
+    const cmin = range?.[0] ?? data.zMin;
+    const cmax = range?.[1] ?? data.zMax;
+    const palette = PALETTES.find(p => p.id === spec.palette) ?? PALETTES[0];
+    if (!preview && cmin !== null && cmax !== null && Number.isFinite(cmin) && Number.isFinite(cmax)) {
+      colorLegend = { theme: opts.theme, palette: palette.id, units: data.zTest?.units ?? "",
+        lo: cmin, hi: cmax, lsl, usl, showSpecTicks: zLimits.showLimits, presentation: spec.presentation };
+    }
     for (let i = 0; i < series.length; i++) {
       const s = series[i];
       const finite = s.points.filter((p) => p.z !== null && Number.isFinite(p.z));
@@ -1147,9 +1122,6 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
         traces.push({
           type: traceType,
           mode: "markers",
-          // Plotly retains colourbar drawing state by trace identity. A change
-          // of orientation needs a fresh identity to discard the old bar axes.
-          uid: `scatter-z-${groupedZ ? "h" : "v"}-${s.key}`,
           name: s.name || data.groupLabel || undefined,
           x: arr.x,
           y: arr.y,
@@ -1160,22 +1132,16 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
           marker: {
             size: style.marker * 2,
             color: finite.map((p) => p.z as number),
-            colorscale: [
-              [0, t.heat[0]],
-              [0.5, t.heat[1]],
-              [1, t.heat[2]],
-            ],
-            cmin: data.zMin ?? undefined,
-            cmax: data.zMax ?? undefined,
-            showscale: !preview && !colorbarShown,
-            colorbar: !preview && !colorbarShown ? colorbar : undefined,
+            colorscale: palette.stops,
+            cmin: cmin ?? undefined,
+            cmax: cmax ?? undefined,
+            showscale: false,
             opacity: 0.82,
             symbol: groupedZ && !facet ? symbols[i % symbols.length] : "circle",
             line: { width: 0 },
           },
           hovertemplate: scatterHover(data, s.name, "continuous"),
         });
-        if (!preview) colorbarShown = true;
       }
       if (missing.length) {
         const arr = pointArrays(missing, data, preview);
@@ -1259,7 +1225,6 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
   // traces in their own canvas layer, so a normal line trace can end up under
   // the markers even when it is added last. A layout shape with
   // layer:"above" is composited over both SVG and WebGL traces.
-  const statistics=(facet?data.groupStatistics?.[series[0]?.name]:data.statistics)??scatterStatistics(series.flatMap(s=>s.points));
   const annotations: any[] = [];
   let fitShape: any = null;
   if (spec.scatterFit && statistics.fit) {
@@ -1295,22 +1260,11 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
   }
 
   const layout = baseLayout(t, preview ? "" : opts.title, spec.presentation);
-  const horizontalColorbar = groupedZ && !preview;
-  const colorbarSpace =
-    data.zMode === "continuous" && !preview && !horizontalColorbar
-      ? spec.presentation
-        ? 96
-        : 70
-      : 0;
   const legendSpace = showLegend ? (spec.presentation ? 190 : 130) : 0;
   layout.margin = preview
     ? { l: 8, r: 8, t: 8, b: 8 }
-    : {
-        ...layout.margin,
-        l: style.margin.l,
-        r: style.margin.r + Math.max(colorbarSpace, legendSpace),
-        b: style.margin.b + (horizontalColorbar ? Math.round(style.annotation * 3.2) : 0),
-      };
+    : { ...layout.margin, l: style.margin.l,
+        r: style.margin.r + legendSpace + (colorLegend ? SCATTER_COLOR_LEGEND_WIDTH : 0) };
   layout.showlegend = showLegend;
   layout.hovermode = "closest";
   layout.xaxis = {
@@ -1339,18 +1293,20 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
     zeroline: false,
   };
   if (!preview) {
-    const s=statistics.summary;
-    if (s.n) {
-      applyAxisRange(
-        layout,
-        "y",
-        spec,
-        s,
-        spec.lsl ?? data.yTest.loSpec,
-        spec.usl ?? data.yTest.hiSpec,
-        s.min,
-        s.max
-      );
+    const xLsl = effectiveLimit(xLimits, "lsl", data.xTest.loSpec);
+    const xUsl = effectiveLimit(xLimits, "usl", data.xTest.hiSpec);
+    const yLsl = effectiveLimit(yLimits, "lsl", data.yTest.loSpec);
+    const yUsl = effectiveLimit(yLimits, "usl", data.yTest.hiSpec);
+    const x = statistics.xSummary;
+    const y = statistics.summary;
+    if (x?.n) applyAxisRange(layout, "x", { ...xLimits, logY: false }, x, xLsl, xUsl, x.min, x.max);
+    if (y.n) applyAxisRange(layout, "y", { ...yLimits, logY: spec.logY }, y, yLsl, yUsl, y.min, y.max);
+    const xLines = xLimits.showLimits ? limitLinesX(t, xLsl, xUsl, style) : null;
+    const yLines = yLimits.showLimits ? limitLines(t, yLsl, yUsl, "y", style, spec.logY) : null;
+    if (xLines || yLines) {
+      layout.shapes = [...(xLines?.shapes ?? []), ...(yLines?.shapes ?? [])];
+      annotations.push(...(xLines?.annotations ?? []), ...(yLines?.annotations ?? []));
+      if (xLines?.annotations.length) layout.margin.t += style.annotation + 6;
     }
   }
   if (showLegend) {
@@ -1383,8 +1339,8 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
   }
   if (fitShape) layout.shapes = [...(layout.shapes ?? []), fitShape];
   if (annotations.length && !preview) layout.annotations = annotations;
-  return { ...previewFigure(traces, layout, preview, `${testLabel(data.xTest)}${data.xTest.units ? ` [${data.xTest.units}]` : ""}`, `${testLabel(data.yTest)}${data.yTest.units ? ` [${data.yTest.units}]` : ""}`), rasterScatter: preview,
-    exportNotes: [`${fmtInt(series.reduce((n, s) => n + s.points.length, 0))} displayed points · ${fmtInt(data.total)} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} excluded` : ""}`,
+  return { ...previewFigure(traces, layout, preview, `${testLabel(data.xTest)}${data.xTest.units ? ` [${data.xTest.units}]` : ""}`, `${testLabel(data.yTest)}${data.yTest.units ? ` [${data.yTest.units}]` : ""}`), rasterScatter: preview, colorLegend,
+    exportNotes: [`${fmtInt(series.reduce((n, s) => n + s.points.length, 0))} displayed points · ${fmtInt(data.total)} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} filtered` : ""}`,
       ...(data.truncated ? ["Sampled display. Correlation and the fitted line use all considered measurements."] : [])] };
 }
 
@@ -1406,7 +1362,7 @@ function exportStyle(figure: Figure, opts: FigureOpts, test: import("../types").
 
 function capabilityFooter(summary: BoxResponse["summary"] | undefined, test: BoxResponse["test"], spec: PlotSpec) {
   if (!summary?.n) return "";
-  const { cpk } = capability(summary.mean, summary.sd, spec.lsl ?? test.loSpec, spec.usl ?? test.hiSpec);
+  const { cpk } = capability(summary.mean, summary.sd, effectiveLimit(spec, "lsl", test.loSpec), effectiveLimit(spec, "usl", test.hiSpec));
   return statisticsFooter(summary, cpk);
 }
 export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {
@@ -1431,5 +1387,6 @@ export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
 }
 export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
   const label = opts.facetKey === undefined ? opts.facetLabel : data.series.find(s=>s.key===opts.facetKey)?.name;
-  return exportStyle(figureScatterCore(data,opts),opts,data.yTest,testLabel(data.xTest)+(data.xTest.units ? ` [${data.xTest.units}]` : ""),(label ? data.groupTotals?.[label] ?? data.series.find(s=>s.name===label)?.points.length ?? 0 : data.total),label);
+  const exportOpts = { ...opts, spec: { ...opts.spec, ...scatterLimitsFor(opts.spec, "y") } };
+  return exportStyle(figureScatterCore(data,opts),exportOpts,data.yTest,testLabel(data.xTest)+(data.xTest.units ? ` [${data.xTest.units}]` : ""),(label ? data.groupTotals?.[label] ?? data.series.find(s=>s.name===label)?.points.length ?? 0 : data.total),label);
 }

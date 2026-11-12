@@ -3,7 +3,7 @@ import { useStore } from "../store";
 import type { CustomColumn, Filter } from "../types";
 import * as api from "../lib/api";
 import { binColor } from "../lib/theme";
-import { fmtInt, tidyName } from "../lib/format";
+import { fmtInt, statisticalRangeLabels, tidyName } from "../lib/format";
 import { fuzzyMatch } from "../lib/search";
 import { naturalCompare } from "../lib/stats";
 import { CustomFiltersPanel } from "./CustomFiltersPanel";
@@ -161,13 +161,14 @@ function FilterPanel() {
           onChange={(e) => setStatKind(e.target.value as "none" | "sigma" | "iqr")}
         >
           <option value="none">None</option>
-          <option value="sigma">k · sigma</option>
-          <option value="iqr">IQR fence (k · IQR)</option>
+          <option value="sigma">{statisticalRangeLabels.sigma.range}</option>
+          <option value="iqr">{statisticalRangeLabels.iqr.range}</option>
         </select>
         {filters.stat && (
           <div className="stat-row">
-            <span className="muted">k</span>
+            <label className="muted" htmlFor="outlier-multiplier">{statisticalRangeLabels[filters.stat.kind].multiplier}</label>
             <input
+              id="outlier-multiplier"
               className="input tiny"
               type="number"
               step="0.1"
@@ -265,11 +266,7 @@ function CustomColumnsPanel() {
 
   /** Stage a label for the selected wafers; nothing is sent to Rust yet. */
   const assignToSelected = () => {
-    if (!draft) return;
-    if (!draft.selected.length) {
-      setError("Select at least one wafer first.");
-      return;
-    }
+    if (!draft?.selected.length) return;
     const label = draft.label.trim();
     const pending = { ...draft.pending };
     for (const wi of draft.selected) pending[wi] = label;
@@ -277,31 +274,25 @@ function CustomColumnsPanel() {
     setError(null);
   };
 
+  const name = draft?.name.trim() ?? "";
+  const label = draft?.label.trim() ?? "";
+  const canSave = draft !== null && name !== "" &&
+    !["lot", "wafer", "hbin", "sbin", "site", "__wafer"].includes(name.toLowerCase()) &&
+    ((label !== "" && draft.selected.length > 0) ||
+      Object.values(draft.pending).some((value) => draft.editing || value.trim() !== ""));
+
   const apply = async () => {
-    if (!draft) return;
-    const name = draft.name.trim();
-    if (!name) {
-      setError("Enter a column name.");
-      return;
-    }
+    if (!draft || !canSave) return;
     // Saving also commits a label that is currently typed but not yet staged,
     // so the quick one-label workflow still works without an extra click.
     const pending = { ...draft.pending };
-    if (draft.label.trim() && draft.selected.length) {
-      for (const wi of draft.selected) pending[wi] = draft.label.trim();
+    if (label) {
+      for (const wi of draft.selected) pending[wi] = label;
     }
     const assignments = Object.entries(pending).map(([wafer, label]) => ({
       wafer: Number(wafer),
       label,
     }));
-    if (!assignments.length) {
-      setError("Assign a label to at least one wafer.");
-      return;
-    }
-    if (!draft.editing && !assignments.some((a) => a.label.trim())) {
-      setError("Assign a label to at least one wafer.");
-      return;
-    }
     try {
       const before = useStore.getState();
       const title = before.spec.title;
@@ -321,7 +312,6 @@ function CustomColumnsPanel() {
   };
 
   const remove = async (col: CustomColumn) => {
-    if (!window.confirm(`Delete the label column “${col.name}”?`)) return;
     try {
       const updated = await api.removeCustomColumn(col.name);
       setInfo(updated, { keepFilters: true });
@@ -412,7 +402,7 @@ function CustomColumnsPanel() {
                       }
                     }}
                   />
-                  <button className="btn" onClick={assignToSelected} type="button">
+                  <button className="btn" onClick={assignToSelected} type="button" disabled={!draft.selected.length}>
                     Assign
                   </button>
                 </div>
@@ -438,11 +428,9 @@ function CustomColumnsPanel() {
                 <button className="link-btn" onClick={() => setDraft({ ...draft, selected: [] })}>
                   None
                 </button>
-                {draft.editing && (
-                  <button className="link-btn" onClick={selectUnassigned}>
-                    Unassigned
-                  </button>
-                )}
+                <button className="link-btn" onClick={selectUnassigned}>
+                  Unassigned
+                </button>
               </div>
               <div className="column-wafer-list">
                 {info.wafers.map((w,i)=>({w,i})).sort((a,b)=>naturalCompare(info.lots[a.w.lot]??"",info.lots[b.w.lot]??"")||naturalCompare(a.w.name,b.w.name)||a.i-b.i).map(({w,i}) => {
@@ -472,7 +460,7 @@ function CustomColumnsPanel() {
               <button className="btn" onClick={() => setDraft(null)}>
                 Cancel
               </button>
-              <button className="btn primary" onClick={() => void apply()}>
+              <button className="btn primary" onClick={() => void apply()} disabled={!canSave}>
                 {draft.editing ? "Save labels" : "Create column"}
               </button>
             </div>

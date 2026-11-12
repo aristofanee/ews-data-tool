@@ -117,7 +117,10 @@ code {
   height: 100vh;
   display: flex;
   flex-direction: column;
+  user-select: none;
 }
+
+.app :is(input, textarea, [contenteditable="true"]) { user-select: text; }
 
 .app.desktop {
   --topbar-height: 44px;
@@ -445,7 +448,7 @@ select.input {
   flex: 0 1 auto;
   max-height: 57%;
   overflow-y: auto;
-  padding: 13px 14px 2px;
+  padding: 13px 14px 4px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -592,6 +595,12 @@ select.input {
   gap: 8px;
   margin-top: 8px;
 }
+
+.spec-limit-control { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.spec-limit-control .input { min-width: 0; }
+.spec-limit-control input[type="checkbox"] { flex: none; margin: 0; accent-color: var(--blue); }
+.axis-limits + .axis-limits { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+.axis-limits h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--text); }
 
 .test-panel {
   flex: 1;
@@ -890,9 +899,12 @@ select.input {
 }
 
 .plotly-host {
+  position: relative;
   width: 100%;
   height: 100%;
 }
+
+.scatter-color-legend { position: absolute; top: 0; right: 0; pointer-events: none; }
 
 .facet-grid {
   position: absolute;
@@ -1634,12 +1646,6 @@ select.input {
   flex: 1;
 }
 
-.batch-row {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
 .report-list {
   flex: 1;
   min-height: 0;
@@ -1665,6 +1671,11 @@ select.input {
 .report-item.invalid .ri-icon { color: #dc2626; background: #fee2e2; }
 .report-item.invalid .ri-sub { color: #b91c1c; }
 .report-item.invalid .ri-main { color: #1f2937; }
+.report-item.selected {
+  border-color: var(--blue);
+  box-shadow: inset 3px 0 var(--blue);
+}
+.report-item.selected:not(.invalid) { background: var(--blue-soft); }
 .report-validation-summary { display: flex; justify-content: space-between; gap: 10px; padding: 10px 18px; font-size: 12px; border-bottom: 1px solid var(--border); }
 .report-resolver { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 18px; font-size: 12px; }
 .report-resolver h3 { margin: 16px 0 6px; }
@@ -2068,8 +2079,8 @@ select.input {
 }
 
 .badge-cpk {
-  left: -26px;
-  bottom: 58px;
+  left: -5px;
+  bottom: 54px;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2135,8 +2146,8 @@ select.input {
 .custom-filter-modal .test-combobox { width: 100%; }
 .custom-filter-bounds { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .custom-filter-bounds .input { min-width: 0; }
-.custom-filter-summary { display: grid; gap: 2px; min-width: 0; padding: 5px 8px; }
-.custom-filter-summary .custom-column-count { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.custom-filter-summary .custom-column-count { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.custom-filter-summary .custom-filter-values { max-width: 100%; }
 .custom-filter-options, .custom-filter-values { display: flex; align-items: center; gap: 8px; }
 .custom-filter-options { font-size: 12px; }
 .custom-filter-options label { display: inline-flex; align-items: center; gap: 4px; }
@@ -2213,6 +2224,10 @@ select.input {
 
 .custom-column-main:hover {
   background: var(--panel);
+}
+
+.custom-filter-summary:hover .custom-filter-value {
+  background: transparent;
 }
 
 .custom-column-name {

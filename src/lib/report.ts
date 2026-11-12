@@ -1,3 +1,4 @@
+import { effectiveLimit, limitOverrides } from "./stats";
 import { binYieldText } from "./theme";
 import type { DatasetInfo, MapResponse, ReportItem } from "../types";
 import type { Theme } from "./theme";
@@ -212,8 +213,9 @@ export async function generateReport(opts: {
       theme,
       palette: spec.palette,
       mode: "value",
-      lsl: spec.showLimits ? (spec.lsl ?? md.lsl) : null,
-      usl: spec.showLimits ? (spec.usl ?? md.usl) : null,
+      lsl: effectiveLimit(spec, "lsl", md.lsl),
+      usl: effectiveLimit(spec, "usl", md.usl),
+      showSpecTicks: spec.showLimits,
       binNames: binNamesFor(spec.binCategory),
       binCategory: spec.binCategory,
       binPass: binPassFor(spec.binCategory),
@@ -221,15 +223,8 @@ export async function generateReport(opts: {
       vmax: limits.vmax,
       presentation: spec.presentation,
     };
-    const scope = md.isMean
-      ? `All wafers (mean) · ${md.waferCount} wafer${md.waferCount === 1 ? "" : "s"}`
-      : `${md.lotName} · Wafer ${md.wafer?.name ?? "?"}`;
-    const subtitle =
-      scope +
-      (md.test ? ` · ${testLabelWithUnits(md.test)}` : "") +
-      ` · Yield ${binYieldText(md.yieldPct, md.dice, 2, md.unknownBins)}`;
     const footer=await mapExportFooter(md,mapOpts,filters);
-    return renderMapImage(md, {...mapOpts,exportFooter:footer}, IMAGE_WIDTH, imageHeight("map"), title, subtitle, "jpeg");
+    return renderMapImage(md, {...mapOpts,exportFooter:footer}, IMAGE_WIDTH, imageHeight("map"), title, describeFilters(filters, info), "jpeg");
   };
 
   for (let i = 0; i < valid.length; i++) {
@@ -240,10 +235,11 @@ export async function generateReport(opts: {
     let itemFailed=false;
     try {
     const spec = item.spec;
+    const filterSubtitle = describeFilters(item.filters, info, spec.type !== "pareto" && spec.type !== "binmap");
     const maxPoints = api.plotPointLimit(spec);
     const renderFigure = async(fig: Figure) => {
       await beginImage(fig.exportStyle?.facetLabel?`${spec.title} · ${fig.exportStyle.facetLabel}`:spec.title);
-      return renderExportFigure({ ...fig, exportFilter: item.filters }, "jpeg");
+      return renderExportFigure({ ...fig, exportFilter: item.filters, exportSubtitle: filterSubtitle }, "jpeg");
     };
     imageProgress(`Preparing JPG ${workDone+1} of ${totalImages()} · ${spec.title}`);
     await paintExportProgress();
@@ -255,7 +251,7 @@ export async function generateReport(opts: {
       if(spec.type==="map"){
         const group=dataGroups(info,item.filters,spec.groupBy).find(g=>g.label===selected.label);
         if(!group)throw new Error(`Map group “${selected.label}” is not present in this dataset.`);
-        const md=await api.waferMap({wafer:group.wafer,test:spec.test,mode:"value",filter:group.filter,lsl:spec.lsl,usl:spec.usl});
+        const md=await api.waferMap({wafer:group.wafer,test:spec.test,mode:"value",filter:group.filter,...limitOverrides(spec)});
         image=await mapImage(md,`${spec.title} · ${group.label}`,spec,group.filter,group.label);
       }else if(spec.type==="binmap"){
         const d=await api.binOverview({filter:item.filters,category:spec.binCategory});
@@ -265,7 +261,7 @@ export async function generateReport(opts: {
           pass:w.pass,fail:w.fail,yieldPct:w.yieldPct,isMean:false,waferCount:1,excluded:0};
         await beginImage(title);
         image=renderMapImage(md,{theme,palette:spec.palette,mode:"bin",lsl:null,usl:null,binNames:binNamesFor(spec.binCategory),binCategory:spec.binCategory,
-          exportSpec:{...spec,groupBy:"wafer"},exportGroupLabel:selected.label},IMAGE_WIDTH,imageHeight("binmap"),title,"","jpeg");
+          exportSpec:{...spec,groupBy:"wafer"},exportGroupLabel:selected.label},IMAGE_WIDTH,imageHeight("binmap"),title,filterSubtitle,"jpeg");
       }else if(spec.type==="pareto"){
         const group=dataGroups(info,item.filters,spec.groupBy).find(g=>g.label===selected.label);
         if(!group)throw new Error(`Pareto group “${selected.label}” is not present in this dataset.`);
@@ -273,7 +269,7 @@ export async function generateReport(opts: {
         figure=figurePareto(d,{theme,spec,title,facetLabel:selected.label});
       }else if(spec.type==="scatter"){
         if(spec.scatterX===null||spec.scatterY===null)throw new Error("Select both scatter tests.");
-        const d=await api.scatter({xTest:spec.scatterX,yTest:spec.scatterY,zMode:spec.scatterZMode,zTest:spec.scatterZTest,groupBy:spec.groupBy,filter:item.filters,maxPoints});
+        const d=await api.scatter({axisSummaries:scatterAxisSummaries(spec),xTest:spec.scatterX,yTest:spec.scatterY,zMode:spec.scatterZMode,zTest:spec.scatterZTest,groupBy:spec.groupBy,filter:item.filters,maxPoints});
         const series=d.series.find(s=>s.name===selected.label);
         if(!series)throw new Error(`Scatter group “${selected.label}” is not present in this dataset.`);
         figure=figureScatter(d,{theme,spec,title,facetKey:series.key});
@@ -281,7 +277,7 @@ export async function generateReport(opts: {
         if(spec.test===null)throw new Error("Select a test.");
         if(spec.type==="box"){
           const d=await api.boxPlot({test:spec.test,xAxis:spec.xAxis,groupBy:spec.groupBy,filter:item.filters,maxPoints,
-            population:{lsl:spec.lsl,usl:spec.usl,split:true}});
+            population:{...limitOverrides(spec),split:true}});
           if(!d.groups.some(g=>g.groupLabel===selected.label))throw new Error(`Missing group “${selected.label}”.`);
           if(!d.summary.n)throw new Error("No measurements for this report item.");
           figure=figureBox(d,{theme,spec,title,facetLabel:selected.label});
@@ -324,7 +320,7 @@ export async function generateReport(opts: {
         const title=`${spec.title} · Lot ${lot}`;
         await beginImage(title);
         await addImage(title, `${lot} · ${wafers.length} wafers`,
-          renderBinOverviewImage(wafers, base, BIN_OVERVIEW_WIDTH, Math.round(BIN_OVERVIEW_WIDTH*9/16), title, "", "jpeg"));
+          renderBinOverviewImage(wafers, base, BIN_OVERVIEW_WIDTH, Math.round(BIN_OVERVIEW_WIDTH*9/16), title, filterSubtitle, "jpeg"));
       }
       continue;
     }
@@ -334,8 +330,7 @@ export async function generateReport(opts: {
       expectImages(groups.length);
       for (const group of groups) {
         const md = await api.waferMap({
-          lsl: spec.lsl,
-          usl: spec.usl,
+          ...limitOverrides(spec),
           wafer: group.wafer,
           test: spec.test,
           mode: "value",
@@ -364,7 +359,7 @@ export async function generateReport(opts: {
           xAxis: spec.xAxis,
           groupBy: spec.groupBy,
           filter: item.filters,
-          population: { lsl: spec.lsl, usl: spec.usl, split: spec.splitPlots },
+          population: { ...limitOverrides(spec), split: spec.splitPlots },
         });
         if(!d.summary.n)throw new Error("No measurements for this report item.");
         const baseSubtitle = `${testLabelWithUnits(test)} · ${d.summary.n.toLocaleString("en-US")} dice · X ${spec.xAxis}${spec.groupBy !== "none" ? ` · group ${spec.groupBy}` : ""}`;
@@ -478,6 +473,7 @@ export async function generateReport(opts: {
       case "scatter": {
         if (spec.scatterX === null || spec.scatterY === null) throw new Error("Select both scatter tests.");
         const d = await api.scatter({
+          axisSummaries: scatterAxisSummaries(spec),
           xTest: spec.scatterX,
           yTest: spec.scatterY,
           maxPoints,
@@ -555,3 +551,5 @@ export async function generateReport(opts: {
   onProgress(100, "Report complete");
   return { files, indexHtml: join(folder, "index.html"), folder, skipped };
 }
+import { describeFilters } from "./customFilters";
+import { scatterAxisSummaries } from "../types";

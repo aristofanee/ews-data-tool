@@ -1,7 +1,9 @@
 import type { DatasetInfo, ReportItem, TestInfo } from "../types";
+import { scatterLimitsFor } from "../types";
 import { categoryName, exportPlotTitle } from "../charts/imageExport";
 import { fmt, testLabelWithUnits } from "./format";
 import { referenceLabel } from "./reportReferences";
+import { describeCustomFilter } from "./customFilters";
 
 type DescribedTest=Pick<TestInfo,"number"|"name"|"units"> & Partial<Pick<TestInfo,"loSpec"|"hiSpec">>;
 function testFor(item:ReportItem,info:DatasetInfo,field:"test"|"scatterY"|"scatterZTest"):DescribedTest|null{
@@ -36,12 +38,23 @@ export function reportItemDescription(item:ReportItem,info:DatasetInfo):{title:s
   for(const ref of item.references??[])if(ref.field.startsWith("categoryFilter:")&&typeof ref.value==="object"&&"category"in ref.value){const v=ref.value;categoryFilters[v.category]=[...new Set([...(categoryFilters[v.category]??[]),v.label])];}
   for(const [id,values]of Object.entries(categoryFilters))if(values.length)filters.push(`${categoryName(id)}: ${shortList(values.map(v=>v||"Unassigned"))}`);
   if(f.stat)filters.push(`Filter: ${f.stat.kind==="sigma"?`±${f.stat.k}σ`:`${f.stat.k} IQR`} (${f.stat.perWafer?"per wafer":"pooled"})`);
+  for (const [index, rule] of (f.custom ?? []).entries()) {
+    const { title, detail } = describeCustomFilter(rule, info);
+    const ref = rule.kind === "numeric" ? item.references?.find(r => r.field === `customTest:${index}`) : undefined;
+    filters.push(`${ref ? referenceLabel(ref) : title} ${detail}`);
+  }
   if(!filters.length)filters.push("All data");
-  if(!["pareto","binmap"].includes(s.type)&&s.limitMode!=="auto"){
-    const range=s.limitMode==="manual"?`Custom (${s.yMin===null?"Auto":fmt(s.yMin)} to ${s.yMax===null?"Auto":fmt(s.yMax)})`
-      :s.limitMode==="sigma"?`Mean ±${s.limitK}σ`:s.limitMode==="iqr"?`Q1/Q3 ±${s.limitK} IQR`
-      :"LSL/USL";
-    filters.push(`Range: ${range}`);
+  if(!["pareto","binmap"].includes(s.type)){
+    const axes = s.type === "scatter"
+      ? (["x", "y", ...(s.scatterZMode === "continuous" ? ["z" as const] : [])] as const)
+        .map(axis => ({ label: `${axis.toUpperCase()} range`, limits: scatterLimitsFor(s, axis) }))
+      : [{ label: "Range", limits: s }];
+    for (const { label, limits } of axes) {
+      if (limits.limitMode === "auto") continue;
+      const range = limits.limitMode === "manual" ? `Custom (${limits.yMin === null ? "Auto" : fmt(limits.yMin)} to ${limits.yMax === null ? "Auto" : fmt(limits.yMax)})`
+        : limits.limitMode === "sigma" ? `Mean ±${limits.limitK}σ` : limits.limitMode === "iqr" ? `Q1/Q3 ±${limits.limitK} IQR` : "USL/LSL";
+      filters.push(`${label}: ${range}`);
+    }
   }
   return {title:details.join(" · "),subtitle:filters.join(" · ")};
 }

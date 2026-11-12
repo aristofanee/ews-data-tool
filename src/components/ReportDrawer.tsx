@@ -2,11 +2,10 @@ import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ReportResolver } from "./ReportResolver";
 import { bindReportItem } from "../lib/reportReferences";
 import { reportItemDescription } from "../lib/reportDescription";
-import { PLOT_LABELS, useStore } from "../store";
+import { useStore } from "../store";
 import type { ReportItem } from "../types";
 import * as api from "../lib/api";
 import { generateReport } from "../lib/report";
-import { tidyName } from "../lib/format";
 import { useLoadTemplate, useSaveTemplate } from "../lib/useData";
 import {
   IconAlert,
@@ -14,7 +13,6 @@ import {
   IconChevronDown,
   IconChevronUp,
   IconHist,
-  IconLayers,
   IconMap,
   IconOpen,
   IconPareto,
@@ -51,12 +49,9 @@ export function ReportDrawer() {
   const setOpen = useStore((s) => s.setReportOpen);
   const report = useStore((s) => s.report);
   const info = useStore((s) => s.info);
-  const spec = useStore((s) => s.spec);
-  const filters = useStore((s) => s.filters);
   const theme = useStore((s) => s.theme);
   const templateName = useStore((s) => s.templateName);
   const setTemplateName = useStore((s) => s.setTemplateName);
-  const addReportItems = useStore((s) => s.addReportItems);
   const removeReport = useStore((s) => s.removeReport);
   const moveReport = useStore((s) => s.moveReport);
   const clearReport = useStore((s) => s.clearReport);
@@ -75,30 +70,21 @@ export function ReportDrawer() {
   const [generating,setGenerating]=useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const listScrollTop = useRef(0);
+  const lastVisibleSelection = useRef<string | null>(null);
 
   useLayoutEffect(() => {
     if (!report.length) listScrollTop.current = 0;
     const list = listRef.current;
-    if (list) list.scrollTop = listScrollTop.current;
-  }, [open, resolving, report.length]);
+    if (!list) return;
+    list.scrollTop = listScrollTop.current;
+    if (editing !== lastVisibleSelection.current) {
+      list.querySelector(".report-item.selected")?.scrollIntoView({ block: "nearest" });
+      listScrollTop.current = list.scrollTop;
+      lastVisibleSelection.current = editing;
+    }
+  }, [open, resolving, report.length, editing]);
 
   if (!open) return null;
-
-  const addAllTests = () => {
-    if (!info) return;
-    if (spec.type !== "box" && spec.type !== "hist" && spec.type !== "trend") {
-      notify("Switch to a box plot, histogram or trend first.");
-      return;
-    }
-    const tests = info.tests.map((t, i) => ({ t, i })).filter(({ t }) => t.count > 0);
-    if (tests.length > 20 && !window.confirm(`Add ${tests.length} plots (one per test) to the report?`)) return;
-    addReportItems(
-      tests.map(({ t, i }) => ({
-        spec: { ...spec, test: i, title: `${tidyName(t.name)} · ${PLOT_LABELS[spec.type]}` },
-        filters,
-      }))
-    );
-  };
 
   const editItem = (it: ReportItem) => {
     if(bindReportItem(it,info).issues.length){setResolving(true);return;}
@@ -166,14 +152,6 @@ export function ReportDrawer() {
               <IconOpen size={15} />
             </button>
           </div>
-          <div className="batch-row">
-            {editing&&report.some(r=>r.id===editing)&&<button className="btn" onClick={()=>useStore.getState().updateReportItem(editing)}>Update loaded item</button>}
-            {(spec.type === "box" || spec.type === "hist" || spec.type === "trend") && (
-              <button className="btn" onClick={addAllTests} title="One plot per test">
-                <IconLayers size={14} /> All tests
-              </button>
-            )}
-          </div>
         </div>
 
         <div className="report-validation-summary">
@@ -196,8 +174,8 @@ export function ReportDrawer() {
           {bound.map(({item:it,issues}, i) => {
             const description=info?reportItemDescription(it,info):{title:it.spec.title,subtitle:""};
             return (
-            <div className={`report-item${issues.length?" invalid":""}`} key={it.id} data-report-id={it.id}>
-              <button className="ri-main" onClick={() => editItem(it)} title={issues.length?"Resolve this report item":"Load this plot into the viewer"}>
+            <div className={`report-item${issues.length?" invalid":""}${it.id === editing ? " selected" : ""}`} key={it.id} data-report-id={it.id}>
+              <button className="ri-main" aria-current={it.id === editing || undefined} onClick={() => editItem(it)} title={issues.length?"Resolve this report item":"Load this plot into the viewer"}>
                 <span className="ri-icon">{issues.length?<IconAlert size={16}/>:iconFor(it.spec.type)}</span>
                 <span className="ri-text">
                   <span className="ri-title" title={description.title}>{description.title}</span>

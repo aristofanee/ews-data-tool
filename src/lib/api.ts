@@ -178,6 +178,9 @@ export async function boxPlot(req: {
 export async function waferMap(req: {
   lsl?: number | null;
   usl?: number | null;
+  noLsl?: boolean;
+  noUsl?: boolean;
+  countScope?: Filter;
   wafer: number | null;
   test: number | null;
   mode: "value" | "bin";
@@ -214,8 +217,14 @@ export async function pareto(req: {
 }
 
 export function histogramOptions(spec: PlotSpec) {
-  const { limitMode, limitK, yMin, yMax, lsl, usl, splitPlots } = spec;
-  return { range: { limitMode, limitK, yMin, yMax }, population: { lsl, usl, split: splitPlots } };
+  const { limitMode, limitK, yMin, yMax, splitPlots } = spec;
+  return { range: { limitMode, limitK, yMin, yMax }, population: { ...limitOverrides(spec), split: splitPlots } };
+}
+
+export function testIqrLimits(test: number): Promise<[number, number] | null> {
+  return cachedPlot("test_iqr_limits", { test }, () =>
+    !isTauri ? mock.testIqrLimits(test) : invoke<[number, number] | null>("test_iqr_limits", { test }),
+    () => 32);
 }
 
 export function testDistribution(test: number): Promise<TestDistribution | null> {
@@ -245,6 +254,7 @@ export async function trend(req: {
 }
 
 export async function scatter(req: {
+  axisSummaries?: { x: boolean; z: boolean };
   xTest: number;
   yTest: number;
   zMode: "none" | "continuous" | "category";
@@ -294,3 +304,4 @@ export interface LimitCountsResponse { total: number; inLimits: number | null; g
 export async function limitCounts(req: LimitCountsRequest): Promise<LimitCountsResponse> {
   return cachedPlot("limit_counts", req, () => !isTauri ? mock.limitCounts(req) : invoke<LimitCountsResponse>("limit_counts", { req }), d => 256 + d.groups.length * 96);
 }
+import { limitOverrides } from "./stats";

@@ -10,7 +10,7 @@ import type {
   PlotSelection,
   TestInfo,
 } from "./types";
-import { defaultSpec, emptyFilter } from "./types";
+import { defaultSpec, emptyFilter, scatterLimitsFor, type ScatterAxis } from "./types";
 import type { Theme } from "./lib/theme";
 import { testLabelWithUnits } from "./lib/format";
 import { bindReportItem, captureReferences, referenceKey, remapReference, reportFilters, validateTemplate } from "./lib/reportReferences";
@@ -34,7 +34,15 @@ function defaultSpecs(): Record<PlotType, PlotSpec> {
   ) as Record<PlotType, PlotSpec>;
 }
 
-const testLimitDefaults = { lsl: null, usl: null };
+const testLimitDefaults = { lsl: null, usl: null, noLsl: false, noUsl: false };
+
+function clearScatterLimitOverrides(spec: PlotSpec, axis: ScatterAxis) {
+  if (!spec.scatterLimits?.[axis]) return;
+  spec.scatterLimits = {
+    ...spec.scatterLimits,
+    [axis]: { ...spec.scatterLimits[axis], ...testLimitDefaults },
+  };
+}
 
 function clearTestLimits(specs: Record<PlotType, PlotSpec>): Record<PlotType, PlotSpec> {
   const next = { ...specs };
@@ -57,6 +65,9 @@ function isParetoCategory(info: DatasetInfo | null, value: string): boolean {
 /** Keep old templates and removed custom columns from leaving a dead category selected. */
 function sanitizeSpec(spec: PlotSpec, info: DatasetInfo | null): PlotSpec {
   const next = { ...spec, presentation: false };
+  next.limitK = Math.max(0.1, next.limitK);
+  next.top = Math.max(1, Math.round(next.top));
+  next.bins = next.bins === 0 || next.bins == null ? null : Math.max(1, Math.round(next.bins));
   if (next.type === "pareto") {
     if (next.xAxis !== "none" && !hasCategory(info, next.xAxis)) next.xAxis = "none";
     if (next.groupBy !== "none" && !isParetoCategory(info, next.groupBy)) next.groupBy = "none";
@@ -161,7 +172,7 @@ interface AppState {
   report: ReportItem[];
   plotSelection: PlotSelection | null;
   editingReportId: string | null;
-  updateReportItem: (id:string)=>void;
+  updateReportItem: (id: string, selection: PlotSelection | null) => void;
   requestedPlotSelection: { label: string | null; token: number } | null;
   activateReport: (id: string) => void;
   resolveReportReference: (key: string, target: string) => void;
@@ -189,7 +200,6 @@ interface AppState {
   toggleArrayFilter: (key: "lots" | "wafers" | "hbins" | "sbins", value: number) => void;
 
   addReport: (selection?: PlotSelection) => void;
-  addReportItems: (items: { spec: PlotSpec; filters: Filter }[]) => void;
   removeReport: (id: string) => void;
   moveReport: (id: string, dir: -1 | 1) => void;
   clearReport: () => void;
@@ -314,6 +324,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (next.test !== s.spec.test) next = { ...next, ...testLimitDefaults };
     next = { ...next, type, presentation: s.presentation };
     if (type === "scatter") {
+      if (next.scatterX !== s.spec.test) clearScatterLimitOverrides(next, "x");
       next = normalizeScatter({ ...next, test: s.spec.test }, tests);
       next.title = scatterSpecTitle(next, tests);
     } else {
@@ -323,14 +334,19 @@ export const useStore = create<AppState>((set, get) => ({
     }
     next = sanitizeSpec(next, s.info);
     specs[type] = next;
-    set({ spec: next, specs, plotSelection:null });
+    set({ spec: next, specs, plotSelection: null, editingReportId: null });
   },
   patchSpec: (p) => {
     if (p.presentation !== undefined && p.presentation !== get().presentation) get().setPresentation(p.presentation);
     const s = get();
     const testChanged = p.test !== undefined && p.test !== s.spec.test;
     const yChanged = p.scatterY !== undefined && p.scatterY !== s.spec.scatterY;
-    const next: PlotSpec = { ...s.spec, ...(testChanged || yChanged ? testLimitDefaults : {}), ...p };
+    const next: PlotSpec = { ...s.spec, ...((s.spec.type !== "scatter" && testChanged) || yChanged ? testLimitDefaults : {}), ...p };
+    if (next.type === "scatter") {
+      if (testChanged || next.scatterX !== s.spec.scatterX) clearScatterLimitOverrides(next, "x");
+      if (yChanged) clearScatterLimitOverrides(next, "y");
+      if (next.scatterZTest !== s.spec.scatterZTest) clearScatterLimitOverrides(next, "z");
+    }
     let title = p.title ?? s.spec.title;
     if (p.title === undefined) {
       if (next.type === "scatter") {
@@ -351,10 +367,22 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
     const spec = sanitizeSpec({ ...next, title }, s.info);
-    const rangeChanged = p.limitMode !== undefined ||
-      (["limitK", "yMin", "yMax", "lsl", "usl", "logY"] as const).some(key => spec[key] !== s.spec[key]);
+    const changedPlot = spec.type !== s.spec.type || spec.test !== s.spec.test ||
+      (spec.type === "scatter" && (
+        spec.scatterX !== s.spec.scatterX || spec.scatterY !== s.spec.scatterY ||
+        (spec.scatterZMode === "continuous" && s.spec.scatterZMode === "continuous" &&
+          spec.scatterZTest !== s.spec.scatterZTest)
+      ));
+    const scatterRangeChanged = p.scatterLimits !== undefined && (["x", "y"] as const).some(axis => {
+      const before = scatterLimitsFor(s.spec, axis), after = scatterLimitsFor(spec, axis);
+      return (["limitMode", "limitK", "yMin", "yMax", "lsl", "usl", "noLsl", "noUsl"] as const)
+        .some(field => before[field] !== after[field]);
+    });
+    const rangeChanged = scatterRangeChanged || p.limitMode !== undefined ||
+      (["limitK", "yMin", "yMax", "lsl", "usl", "noLsl", "noUsl", "logY"] as const).some(key => spec[key] !== s.spec[key]);
     set({
       spec,
+      editingReportId: changedPlot ? null : s.editingReportId,
       specs: { ...(testChanged ? clearTestLimits(s.specs) : s.specs), [spec.type]: spec },
       rangeRevisions: rangeChanged
         ? { ...s.rangeRevisions, [spec.type]: (s.rangeRevisions[spec.type] ?? 0) + 1 }
@@ -368,13 +396,14 @@ export const useStore = create<AppState>((set, get) => ({
     const specs = clearTestLimits(s.specs);
     if (s.spec.type === "scatter") {
       const tests = s.info?.tests ?? [];
-      const spec: PlotSpec = { ...s.spec, ...testLimitDefaults, test: index, scatterX: index };
+      const spec: PlotSpec = { ...s.spec, test: index, scatterX: index };
+      clearScatterLimitOverrides(spec, "x");
       spec.title = scatterSpecTitle(spec, tests);
-      set({ spec, specs: { ...specs, scatter: spec } });
+      set({ spec, specs: { ...specs, scatter: spec }, editingReportId: null });
       return;
     }
     const spec: PlotSpec = { ...s.spec, ...testLimitDefaults, test: index, title: autoTitle(test, s.spec.type) };
-    set({ spec, specs: { ...specs, [spec.type]: spec } });
+    set({ spec, specs: { ...specs, [spec.type]: spec }, editingReportId: null });
   },
 
   patchFilters: (p) => set({ filters: { ...get().filters, ...p } }),
@@ -405,22 +434,15 @@ export const useStore = create<AppState>((set, get) => ({
     const spec: PlotSpec = { ...s.spec, id: rid() };
     const item: ReportItem = { id: spec.id, spec, filters: reportFilters(s.filters), selection: selection ? structuredClone(selection) : undefined };
     item.references=captureReferences(item,s.info);
-    set({ report: [...s.report, item] });
+    set({ report: [...s.report, item], editingReportId: item.id });
     const title = spec.type === "map" && spec.test !== null
       ? autoTitle(s.info?.tests[spec.test] ?? null, "map") : spec.title;
     s.notify(`Added “${title}${selection ? ` · ${selection.label}` : ""}” to the report.`);
   },
-  addReportItems: (items) => {
-    const s = get();
-    const added: ReportItem[] = items.map((it) => {
-      const spec = { ...it.spec, id: rid(), presentation: s.presentation };
-      const item:ReportItem={ id: spec.id, spec, filters: reportFilters(it.filters) };
-      item.references=captureReferences(item,s.info);return item;
-    });
-    set({ report: [...s.report, ...added] });
-    s.notify(`Added ${added.length} plots to the report.`);
-  },
-  removeReport: (id) => set({ report: get().report.filter((r) => r.id !== id) }),
+  removeReport: (id) => set(s => ({
+    report: s.report.filter(r => r.id !== id),
+    editingReportId: s.editingReportId === id ? null : s.editingReportId,
+  })),
   moveReport: (id, dir) => {
     const list = [...get().report];
     const i = list.findIndex((r) => r.id === id);
@@ -429,11 +451,18 @@ export const useStore = create<AppState>((set, get) => ({
     [list[i], list[j]] = [list[j], list[i]];
     set({ report: list });
   },
-  clearReport: () => set({ report: [] }),
+  clearReport: () => set({ report: [], editingReportId: null }),
   setReportOpen: (reportOpen) => set({ reportOpen }),
   setTemplateName: (templateName) => set({ templateName }),
-  updateReportItem: (id) => {
-    const s=get(),item:ReportItem={id,spec:structuredClone({...s.spec,id}),filters:reportFilters(s.filters),selection:s.plotSelection?structuredClone(s.plotSelection):undefined};
+  updateReportItem: (id, selection) => {
+    const s = get();
+    if (s.editingReportId !== id || !s.report.some(r => r.id === id)) return;
+    const item: ReportItem = {
+      id,
+      spec: structuredClone({ ...s.spec, id }),
+      filters: reportFilters(s.filters),
+      selection: selection ? structuredClone(selection) : undefined,
+    };
     item.references=captureReferences(item,s.info);
     set({report:s.report.map(r=>r.id===id?item:r)});s.notify("Report item updated.");
   },
@@ -447,7 +476,7 @@ export const useStore = create<AppState>((set, get) => ({
   resolveReportReference: (key,target) => {
     const s=get();if(!s.info)return;
     const report=remapReference(s.report,key,target,s.info).map((item,i)=>{
-      if(s.report[i].references?.some(r=>r.kind==="test"&&referenceKey(r)===key))item.spec.title=item.spec.type==="scatter"?scatterSpecTitle(item.spec,s.info!.tests):autoTitle(item.spec.test!==null?s.info!.tests[item.spec.test]:null,item.spec.type);
+      if(s.report[i].references?.some(r=>r.kind==="test"&&!r.field.startsWith("customTest:")&&referenceKey(r)===key))item.spec.title=item.spec.type==="scatter"?scatterSpecTitle(item.spec,s.info!.tests):autoTitle(item.spec.test!==null?s.info!.tests[item.spec.test]:null,item.spec.type);
       return item;
     });set({report});
   },

@@ -1,17 +1,15 @@
 import { defaultSpec, emptyFilter, type DatasetInfo, type Filter, type PlotSpec, type ReportItem, type ReportReference, type ReportIssue, type TestIdentity, type WaferIdentity } from "../types";
 import { testLabelWithUnits } from "./format";
 import { categoryName } from "./categoryNames";
+import { categoryPassesCustomFilters, filterCategories, filterValues } from "./customFilters";
 
 const builtins = ["lot", "wafer", "site", "hbin", "sbin"];
 const types = ["box", "hist", "trend", "scatter", "pareto", "map", "binmap"];
-const isCustomFilterReference = (ref: ReportReference) => /^custom(?:Test|Category|Value):/.test(ref.field);
-
 export function reportFilters(filters: Filter): Filter {
-  const { custom: _custom, ...saved } = filters;
-  return structuredClone(saved);
+  return structuredClone(filters);
 }
 
-export const referenceKey = (r: ReportReference) => JSON.stringify([r.kind, r.value]);
+export const referenceKey = (r: ReportReference) => JSON.stringify([r.field.startsWith("customValue:") ? "customValue" : r.kind, r.value]);
 export const testIdentity = (t: TestIdentity): TestIdentity => ({number:t.number,name:t.name.trim(),units:t.units.trim()});
 export const waferIdentity = (info: DatasetInfo, i: number): WaferIdentity => ({lot:info.lots[info.wafers[i].lot],name:info.wafers[i].name});
 const unique = (indexes: number[]) => indexes.length === 1 ? indexes[0] : null;
@@ -39,6 +37,7 @@ export function referenceLabel(r: ReportReference): string {
   return `${r.value.number ?? ""} ${r.value.name}${r.value.units ? ` [${r.value.units}]` : ""}`.trim();
 }
 export function categoryChoices(spec: PlotSpec, field: string, info: DatasetInfo): string[] {
+  if(field.startsWith("customCategory:"))return filterCategories(info);
   if(field.startsWith("filterCategory:"))return (info.dataCategories??[]).map(c=>c.id);
   const custom=[...info.customColumns.map(c=>c.name),...(info.dataCategories??[]).map(c=>c.id)];
   if(field === "groupBy" && spec.type === "map") return ["lot","wafer",...custom];
@@ -47,16 +46,17 @@ export function categoryChoices(spec: PlotSpec, field: string, info: DatasetInfo
 }
 export function splitChoices(info: DatasetInfo, spec: PlotSpec, filters: ReportItem["filters"]): string[] {
   const cat=spec.type==="binmap" ? "wafer" : spec.groupBy;
+  const allowed = (value: string) => categoryPassesCustomFilters(filters, cat, value);
   const candidates=info.wafers.map((w,i)=>({w,i})).filter(({w,i})=>(!filters.lots.length||filters.lots.includes(w.lot))&&(!filters.wafers.length||filters.wafers.includes(i)));
   if(cat==="none")return ["All wafers (mean)"];
   if(cat==="wafer")return candidates.map(({i})=>{const w=waferIdentity(info,i);return `${w.lot} / ${w.name}`;});
   if(cat==="lot")return [...new Set(candidates.map(({w})=>info.lots[w.lot]))];
-  if(cat==="site")return (info.sites??[]).filter(v=>!filters.sites?.length||filters.sites.includes(v)).map(v=>v===65535?"Unknown site":`Site ${v}`);
-  if(cat==="hbin"||cat==="sbin")return info[cat==="hbin"?"hbins":"sbins"].filter(b=>!filters[cat==="hbin"?"hbins":"sbins"].length||filters[cat==="hbin"?"hbins":"sbins"].includes(b.code)).map(b=>`${cat.toUpperCase()} ${b.code}`);
+  if(cat==="site")return (info.sites??[]).filter(v=>(!filters.sites?.length||filters.sites.includes(v))&&allowed(String(v))).map(v=>v===65535?"Unknown site":`Site ${v}`);
+  if(cat==="hbin"||cat==="sbin")return info[cat==="hbin"?"hbins":"sbins"].filter(b=>(!filters[cat==="hbin"?"hbins":"sbins"].length||filters[cat==="hbin"?"hbins":"sbins"].includes(b.code))&&allowed(String(b.code))).map(b=>`${cat.toUpperCase()} ${b.code}`);
   const row=info.dataCategories?.find(c=>c.id===cat);
-  if(row)return row.values.flatMap((value,code)=>row.counts[code]>0&&(!filters.categories?.[cat]?.length||filters.categories[cat].includes(value))?[row.labels[code]]:[]);
+  if(row)return row.values.flatMap((value,code)=>row.counts[code]>0&&(!filters.categories?.[cat]?.length||filters.categories[cat].includes(value))&&allowed(value)?[row.labels[code]]:[]);
   const col=info.customColumns.find(c=>c.name===cat);
-  return col?[...new Set(candidates.map(({i})=>col.categories[col.waferValues[i]??0]||"Unassigned"))]:[];
+  return col?[...new Set(candidates.map(({i})=>col.categories[col.waferValues[i]??0]??"").filter(allowed).map(value=>value||"Unassigned"))]:[];
 }
 
 /** Capture identities now; a legacy template without identities is never trusted by index. */
@@ -87,6 +87,15 @@ export function captureReferences(item: ReportItem, info: DatasetInfo | null, le
     add(`filterCategory:${encodeURIComponent(category)}`,"category",category);
     values.forEach((label,i)=>add(`categoryFilter:${encodeURIComponent(category)}:${i}`,"split",{category,label}));
   }
+  for (const [index, rule] of (item.filters.custom ?? []).entries()) {
+    if (rule.kind === "numeric") {
+      const test = info?.tests[rule.test];
+      add(`customTest:${index}`, "test", !legacyTemplate && test ? testIdentity(test) : legacy(rule.test, `Filter test ${rule.test}`));
+    } else {
+      add(`customCategory:${index}`, "category", rule.category);
+      rule.values.forEach((label, valueIndex) => add(`customValue:${index}:${valueIndex}`, "split", { category: rule.category, label }));
+    }
+  }
   if(item.selection){
     const category=s.type==="binmap"?"wafer":s.groupBy,label=item.selection.label;
     const wi=info?.wafers.findIndex((_,i)=>{const id=waferIdentity(info,i);return `${id.lot} / ${id.name}`===label;})??-1;
@@ -116,6 +125,7 @@ function resolve(r:ReportReference, info:DatasetInfo, item:ReportItem):number|st
   if(r.kind==="split"){
     if(typeof v!=="object"||!("category"in v))return null;
     if(r.field.startsWith("categoryFilter:")){const c=info.dataCategories?.find(c=>c.id===v.category),i=c?.values.indexOf(v.label)??-1;return c&&i>=0&&c.counts[i]>0?v.label:null;}
+    if(r.field.startsWith("customValue:"))return filterValues(info,v.category).some(option=>option.value===v.label)?v.label:null;
     return v.category===(item.spec.type==="binmap"?"wafer":item.spec.groupBy)&&splitChoices(info,item.spec,item.filters).includes(v.label)?v.label:null;
   }
   if(typeof v!=="number")return null;
@@ -124,8 +134,7 @@ function resolve(r:ReportReference, info:DatasetInfo, item:ReportItem):number|st
 
 export function bindReportItem(source: ReportItem, info: DatasetInfo | null): { item:ReportItem; issues:ReportIssue[] } {
   const item=structuredClone(source);
-  delete item.filters.custom;
-  const refs=(item.references??captureReferences(item,info)).filter(ref=>!isCustomFilterReference(ref));
+  const refs=item.references??captureReferences(item,info);
   item.references=refs;
   const issues:ReportIssue[]=[],pending:ReportReference[]=[];
   // Clear positional filters before rebuilding them; unresolved entries are never queried.
@@ -135,6 +144,17 @@ export function bindReportItem(source: ReportItem, info: DatasetInfo | null): { 
   for(const r of refs){
     if(r.field==="selection"){pending.push(r);continue;}
     const target=info?resolve(r,info,item):null;
+    if (/^custom(?:Test|Category|Value):/.test(r.field)) {
+      if (target === null) { fail(r); continue; }
+      const [field, index, valueIndex] = r.field.split(":");
+      const rule = item.filters.custom?.[Number(index)];
+      if (field === "customTest" && rule?.kind === "numeric") rule.test = Number(target);
+      if (rule?.kind === "category") {
+        if (field === "customCategory") rule.category = String(target);
+        if (field === "customValue") rule.values[Number(valueIndex)] = String(target);
+      }
+      continue;
+    }
     if(target===null){fail(r);if(r.kind==="test")(item.spec as any)[r.field]=null;continue;}
     if(r.field.startsWith("filterCategory:"))continue;
     if(r.field.startsWith("categoryFilter:")&&typeof r.value==="object"&&"category"in r.value){(item.filters.categories[r.value.category]??=[]).push(String(target));}
@@ -159,6 +179,8 @@ export function bindReportItem(source: ReportItem, info: DatasetInfo | null): { 
 
 export function resolutionOptions(r:ReportReference, item:ReportItem, info:DatasetInfo):{value:string;label:string}[]{
   if(r.kind==="split"){
+    if(r.field.startsWith("customValue:")&&typeof r.value==="object"&&"category"in r.value)
+      return filterValues(info,r.value.category).map(option=>({label:option.label,value:JSON.stringify(option.value)}));
     if(r.field.startsWith("categoryFilter:")&&typeof r.value==="object"&&"category"in r.value){const category=r.value.category;const c=info.dataCategories?.find(c=>c.id===category);return c?c.values.flatMap((value,i)=>c.counts[i]>0?[{value:JSON.stringify(value),label:c.labels[i]}]:[]):[];}
     return splitChoices(info,item.spec,item.filters).map(label=>({value:label,label}));
   }
@@ -181,7 +203,7 @@ export function remapReference(items:ReportItem[],key:string,target:string,info:
       if(referenceKey(r)!==key)continue;
       const old=r.value;changed=true;
       if(r.kind==="split"){
-        if(r.field.startsWith("categoryFilter:")&&typeof r.value==="object"&&"category"in r.value){r.value={...r.value,label:JSON.parse(target)};continue;}
+        if(/^(categoryFilter|customValue):/.test(r.field)&&typeof r.value==="object"&&"category"in r.value){r.value={...r.value,label:JSON.parse(target)};continue;}
         const category=item.spec.type==="binmap"?"wafer":item.spec.groupBy;
         if(category==="wafer"){
           const i=info.wafers.findIndex((_,i)=>{const id=waferIdentity(info,i);return `${id.lot} / ${id.name}`===target;});
@@ -208,28 +230,49 @@ export function remapReference(items:ReportItem[],key:string,target:string,info:
 export function validateTemplate(value:unknown):asserts value is import("../store").TemplateFile {
   const t=value as any;
   if(!t||t.app!=="EWS Data Tool"||![1,2].includes(t.version)||!Array.isArray(t.plots))throw new Error("This is not a supported EWS report template.");
+  const customRule = (r: any) => r && typeof r.keep === "boolean" && (r.kind === "numeric"
+    ? Number.isInteger(r.test) && r.test >= 0 && Number.isFinite(r.min) && Number.isFinite(r.max) && r.min <= r.max &&
+      (r.includeEnds === undefined || typeof r.includeEnds === "boolean")
+    : r.kind === "category" && typeof r.category === "string" && r.category.length > 0 &&
+      Array.isArray(r.values) && r.values.length > 0 && r.values.every((v: unknown) => typeof v === "string"));
   const filter=(f:any)=>f&&["lots","wafers","hbins","sbins"].every(k=>Array.isArray(f[k])&&f[k].every((v:any)=>Number.isInteger(v)&&v>=0))&&(!f.sites||Array.isArray(f.sites)&&f.sites.every((v:any)=>Number.isInteger(v)&&v>=0))&&(!f.categories||typeof f.categories==="object"&&!Array.isArray(f.categories)&&Object.values(f.categories).every(v=>Array.isArray(v)&&v.every(s=>typeof s==="string")))&&(!f.stat||["sigma","iqr"].includes(f.stat.kind)&&Number.isFinite(f.stat.k)&&f.stat.k>0&&typeof f.stat.perWafer==="boolean");
-  if(t.filters&&!filter(t.filters))throw new Error("Invalid template filters.");
+  const validFilters = (f: any) => filter(f) && (f.custom === undefined || Array.isArray(f.custom) && f.custom.every(customRule));
+  if(t.filters&&!validFilters(t.filters))throw new Error("Invalid template filters.");
   for(const p of t.plots){
-    if(!p?.spec||!types.includes(p.spec.type)||typeof p.spec.title!=="string"||p.filters&&!filter(p.filters))throw new Error("Invalid report item in template.");
+    if(!p?.spec||!types.includes(p.spec.type)||typeof p.spec.title!=="string"||p.filters&&!validFilters(p.filters))throw new Error("Invalid report item in template.");
     for(const field of ["test","scatterX","scatterY","scatterZTest"])if(p.spec[field]!=null&&(!Number.isInteger(p.spec[field])||p.spec[field]<0))throw new Error("Invalid test reference in template.");
     for(const field of ["xAxis","groupBy","title"])if(p.spec[field]!==undefined&&typeof p.spec[field]!=="string")throw new Error("Invalid plot category or title.");
-    for(const field of ["logY","showLimits","splitPlots","showNormal","showBand","scatterFit","displayAllData"])if(p.spec[field]!==undefined&&typeof p.spec[field]!=="boolean")throw new Error("Invalid plot option.");
+    for(const field of ["logY","showLimits","splitPlots","showNormal","showBand","scatterFit","displayAllData","noLsl","noUsl"])if(p.spec[field]!==undefined&&typeof p.spec[field]!=="boolean")throw new Error("Invalid plot option.");
     for(const field of ["lsl","usl","yMin","yMax","limitK","top","bins","edgeExclusion"])if(p.spec[field]!=null&&!Number.isFinite(p.spec[field]))throw new Error("Invalid numeric plot option.");
     if(p.spec.limitMode!==undefined&&!["auto","manual","spec","sigma","iqr"].includes(p.spec.limitMode))throw new Error("Invalid limit mode.");
+    if (p.spec.scatterLimits !== undefined) {
+      const axes = p.spec.scatterLimits;
+      if (!axes || typeof axes !== "object" || Array.isArray(axes)) throw new Error("Invalid scatter limits.");
+      for (const [axis, raw] of Object.entries(axes)) {
+        const limits = raw as import("../types").PlotLimits;
+        if (!["x","y","z"].includes(axis) || !limits || typeof limits !== "object" ||
+          !["auto","manual","spec","sigma","iqr"].includes(limits.limitMode) ||
+          !Number.isFinite(limits.limitK) || limits.limitK < 0.1 || typeof limits.showLimits !== "boolean" ||
+          [limits.yMin, limits.yMax, limits.lsl, limits.usl].some(value => value !== null && !Number.isFinite(value)) ||
+          [limits.noLsl, limits.noUsl].some(value => value !== undefined && typeof value !== "boolean"))
+          throw new Error("Invalid scatter limits.");
+      }
+    }
     if(p.spec.binCategory!==undefined&&!["hard","soft"].includes(p.spec.binCategory))throw new Error("Invalid bin category.");
     if(p.selection&&typeof p.selection.label!=="string")throw new Error("Invalid selected split in template.");
     if(p.references!==undefined&&(!Array.isArray(p.references)||p.references.some((r:any)=>!r||typeof r.field!=="string"||!["test","category","lot","wafer","split","hbin","sbin","site"].includes(r.kind)||r.value==null)))throw new Error("Invalid template identities.");
     if(p.references){
       const fields=new Set();
+      const spec={...defaultSpec(p.spec.type,null,""),...p.spec};
+      const required=captureReferences({id:"validate",spec,filters:p.filters??t.filters??emptyFilter(),selection:p.selection},null,true);
       for(const r of p.references){
-        if(isCustomFilterReference(r))continue;
         if(r.explicit&&(!Number.isInteger(r.explicit.index)||r.explicit.index<0||typeof r.explicit.dataset!=="string"))throw new Error("Invalid explicit test match.");
         if(fields.has(r.field))throw new Error("Duplicate template reference.");fields.add(r.field);
         const kind = r.field==="selection"?["wafer","lot","split"]
           :["test","scatterY","scatterZTest"].includes(r.field)?["test"]
           :["xAxis","groupBy"].includes(r.field)||r.field.startsWith("filterCategory:")?["category"]
           :r.field.startsWith("categoryFilter:")?["split"]
+          :/^custom(?:Test|Category|Value):/.test(r.field)?required.filter(ref=>ref.field===r.field).map(ref=>ref.kind)
           :/^lots:\d+$/.test(r.field)?["lot"]:/^wafers:\d+$/.test(r.field)?["wafer"]:/^hbins:\d+$/.test(r.field)?["hbin"]:/^sbins:\d+$/.test(r.field)?["sbin"]:/^sites:\d+$/.test(r.field)?["site"]:[];
         if(!kind.includes(r.kind))throw new Error("Invalid reference field.");
         const v=r.value;
@@ -242,8 +285,6 @@ export function validateTemplate(value:unknown):asserts value is import("../stor
           :Number.isInteger(v)&&v>=0;
         if(!valid)throw new Error("Malformed template identity.");
       }
-      const spec={...defaultSpec(p.spec.type,null,""),...p.spec};
-      const required=captureReferences({id:"validate",spec,filters:p.filters??t.filters??emptyFilter(),selection:p.selection},null,true);
       if(required.some(r=>!fields.has(r.field)))throw new Error("Template identities are incomplete.");
     }
   }
@@ -255,5 +296,16 @@ export function validateTemplate(value:unknown):asserts value is import("../stor
 export function templatePlots(items:ReportItem[],info:DatasetInfo|null){
   // Explicit choices between indistinguishable tests are valid for this import;
   // the next import must resolve that ambiguity again rather than trust an index.
-  return items.map(item=>({spec:{...item.spec,lsl:null,usl:null},filters:reportFilters(item.filters),selection:item.selection,references:(item.references??captureReferences(item,info)).filter(ref=>!isCustomFilterReference(ref)).map(({explicit,...ref})=>ref)}));
+  return items.map(item => {
+    const spec = { ...item.spec, lsl: null, usl: null };
+    if (spec.scatterLimits) {
+      spec.scatterLimits = {};
+      for (const axis of ["x", "y", "z"] as const) {
+        const limits = item.spec.scatterLimits?.[axis];
+        if (limits) spec.scatterLimits[axis] = { ...limits, lsl: null, usl: null };
+      }
+    }
+    return { spec, filters: reportFilters(item.filters), selection: item.selection,
+      references: (item.references ?? captureReferences(item,info)).map(({explicit,...ref})=>ref) };
+  });
 }

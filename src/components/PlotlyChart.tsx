@@ -5,6 +5,7 @@ import { PLOTLY_CONFIG } from "../charts/plotlyTheme";
 import { rasterScatterPreview } from "../charts/scatterPreview";
 import { restoreBoundaryLimitLines } from "../charts/limitLineClipping";
 import { renderWithSvgFallback } from "../charts/plotlyFallback";
+import { drawScatterColorLegend, scatterColorLegendPlacement, SCATTER_COLOR_LEGEND_WIDTH } from "../charts/waferLegend";
 import { isTauri } from "../lib/api";
 import { DEFAULT_X_LABEL_DENSITY, useStore } from "../store";
 
@@ -17,6 +18,31 @@ interface Props {
 }
 
 const views = new Map<string, { axes: Record<string, { range: number[]; autorange: unknown }>; visible: unknown[] }>();
+
+function fitRotatedGroupHeadings(layout: Figure["layout"]) {
+  const headings = (layout.annotations ?? []).filter((annotation: any) =>
+    annotation.xref === "x" && annotation.yref === "paper" && annotation.y === 1.02);
+  if (!headings.some((heading: any) => heading.textangle)) return;
+  const measure = document.createElement("canvas").getContext("2d");
+  if (!measure) return;
+
+  const headingGap = 12;
+  const toolbarClearance = 28;
+  let requiredHeight = 0;
+  for (const heading of headings) {
+    const size = heading.font?.size ?? layout.font.size;
+    measure.font = `${size}px ${heading.font?.family ?? layout.font.family}`;
+    const lines = String(heading.text).split(/<br\s*\/?>/gi);
+    const width = Math.max(...lines.map(line => measure.measureText(line).width)) + 6;
+    const height = lines.length * size * 1.3 + 6;
+    const angle = Math.abs(heading.textangle ?? 0) * Math.PI / 180;
+    requiredHeight = Math.max(requiredHeight, width * Math.sin(angle) + height * Math.cos(angle));
+    // Keep the gap constant as the chart card is resized.
+    heading.y = 1;
+    heading.yshift = headingGap;
+  }
+  layout.margin.t = Math.max(layout.margin.t, Math.ceil(requiredHeight + headingGap + toolbarClearance));
+}
 
 export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cacheKey }: Props) {
   const ownRef = useRef<HTMLDivElement | null>(null);
@@ -75,6 +101,26 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     if (!figure) return;
     let alive = true;
     const graph = el as any;
+    const colorLegend = !isStatic ? figure.colorLegend : undefined;
+    const legendCanvas = colorLegend ? document.createElement("canvas") : null;
+    let legendSize = "";
+    if (legendCanvas) {
+      legendCanvas.className = "scatter-color-legend";
+      legendCanvas.setAttribute("aria-hidden", "true");
+      legendCanvas.style.width = `${SCATTER_COLOR_LEGEND_WIDTH}px`;
+    }
+    const drawLegend = () => {
+      if (!legendCanvas || !colorLegend) return;
+      if (legendCanvas.parentElement !== el) el.appendChild(legendCanvas);
+      const { top, height, clipTop } = scatterColorLegendPlacement(el, colorLegend);
+      const scale = window.devicePixelRatio || 1;
+      if (height <= 0 || legendSize === `${top}:${height}:${clipTop}:${scale}`) return;
+      legendSize = `${top}:${height}:${clipTop}:${scale}`;
+      legendCanvas.style.top = `${top}px`;
+      legendCanvas.style.height = `${height}px`;
+      legendCanvas.style.clipPath = clipTop ? `inset(${clipTop}px 0 0 0)` : "";
+      drawScatterColorLegend(legendCanvas, height, scale, colorLegend);
+    };
     const restoreLimitLines = () => restoreBoundaryLimitLines(el);
     const labels = isStatic ? undefined : figure.indexedXLabels;
     const tickFont = figure.layout.xaxis?.tickfont;
@@ -151,6 +197,7 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     const rendered = isStatic && figure.rasterScatter
       ? rasterScatterPreview(figure, el.clientWidth, el.clientHeight) : figure;
     const layout=structuredClone(rendered.layout);
+    if (!isStatic) fitRotatedGroupHeadings(layout);
     for(const [key,axis]of Object.entries(layout)as[string,any][]){
       if (!/^[xy]axis\d*$/.test(key)) continue;
       axis.autorange = !Array.isArray(axis.range);
@@ -165,7 +212,9 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
       svgFallback.current ||= usedFallback;
       if (!isStatic && !usedFallback) el.addEventListener("webglcontextlost", onContextLost, true);
       restoreLimitLines();
+      drawLegend();
       graph.on?.("plotly_afterplot", restoreLimitLines);
+      if (legendCanvas) graph.on?.("plotly_afterplot", drawLegend);
       graph.on?.("plotly_afterplot", updateTicks);
       updateTicks();
       if (!isStatic) {
@@ -197,6 +246,10 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
       el.removeEventListener('mousedown',resetFromPointer,true);
       window.removeEventListener("mouseup", finishClick, true);
       graph.removeListener?.("plotly_afterplot", restoreLimitLines);
+      if (legendCanvas) {
+        graph.removeListener?.("plotly_afterplot", drawLegend);
+        legendCanvas.remove();
+      }
       graph.removeListener?.("plotly_afterplot", updateTicks);
       capture();
       graph.removeListener?.("plotly_relayout", capture);

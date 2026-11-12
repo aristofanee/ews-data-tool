@@ -1,3 +1,5 @@
+import { effectiveLimit } from "../lib/stats";
+import { drawScatterColorLegend, scatterColorLegendPlacement, SCATTER_COLOR_LEGEND_WIDTH } from "./waferLegend";
 import Plotly from "plotly.js-dist-min";
 import type { Figure } from "./figures";
 import type { DatasetInfo, Filter, PlotSpec, Summary, TestInfo, PlotType } from "../types";
@@ -150,8 +152,8 @@ export async function renderExportFigure(fig: Figure, format: ImageFormat = "jpe
   }
   // Reserve room for the final counts, which are resolved against the rendered axis.
   const footerSpace = style?.statistics ? [limitFooter(style.total, style.total,
-    style.spec.lsl ?? style.test?.loSpec ?? null, style.spec.usl ?? style.test?.hiSpec ?? null, style.spec)] : notes;
-  const frame = imageFrame(width, height, title, "", layout.meta?.ewsPresentation === true, footerSpace, style?.statistics);
+    effectiveLimit(style.spec, "lsl", style.test?.loSpec), effectiveLimit(style.spec, "usl", style.test?.hiSpec), style.spec)] : notes;
+  const frame = imageFrame(width, height, title, fig.exportSubtitle ?? "", layout.meta?.ewsPresentation === true, footerSpace, style?.statistics);
   if (footerSpace !== notes) frame.drawNotes(notes);
   layout.title = undefined;
   layout.width = 1200; layout.height = frame.contentHeight; layout.autosize = false;
@@ -196,7 +198,7 @@ export async function renderExportFigure(fig: Figure, format: ImageFormat = "jpe
         const counts=await api.limitCounts({test,pairedTest:style.spec.type==="scatter"?style.spec.scatterX:null,filter:fig.exportFilter??emptyFilter(),
           lsl:range[0],usl:range[1],groupBy:style.spec.groupBy});
         const count=style.facetLabel?counts.groups.find(g=>g.label===style.facetLabel):counts;
-        const lsl=style.spec.lsl??style.test?.loSpec??null, usl=style.spec.usl??style.test?.hiSpec??null;
+        const lsl=effectiveLimit(style.spec, "lsl", style.test?.loSpec), usl=effectiveLimit(style.spec, "usl", style.test?.hiSpec);
         const close=(a:number,b:number)=>a===b||Math.abs(a-b)<=1e-6*Math.max(Math.abs(a),Math.abs(b),Number.MIN_VALUE);
         const matchesSpec=style.spec.limitMode!=="spec"||((lsl===null||close(range[0],lsl))&&(usl===null||close(range[1],usl)));
         frame.drawNotes([limitFooter(count?.total??0,count?.inLimits??0,lsl,usl,
@@ -206,6 +208,14 @@ export async function renderExportFigure(fig: Figure, format: ImageFormat = "jpe
     const url = await Plotly.toImage(host, { format: "png", width: 1200, height: frame.contentHeight, scale: frame.scale });
     const image = new Image(); image.src = url; await image.decode();
     frame.ctx.drawImage(image, 0, frame.top, 1200, frame.contentHeight);
+    if (fig.colorLegend) {
+      const legend = document.createElement("canvas");
+      const { top, height } = scatterColorLegendPlacement(host, fig.colorLegend);
+      if (height > 0) {
+        drawScatterColorLegend(legend, height, frame.scale, fig.colorLegend, true);
+        frame.ctx.drawImage(legend, 1200 - SCATTER_COLOR_LEGEND_WIDTH, frame.top + top, SCATTER_COLOR_LEGEND_WIDTH, height);
+      }
+    }
     drawExportBoundaryLimits(host,frame.ctx,frame.top);
     return encodeImage(frame.canvas, format);
   } finally { Plotly.purge(host); host.remove(); }

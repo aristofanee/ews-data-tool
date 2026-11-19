@@ -103,6 +103,8 @@ export interface Summary {
   q1: number;
   median: number;
   q3: number;
+  p00135: number;
+  p99865: number;
   whiskerLo: number;
   whiskerHi: number;
 }
@@ -378,6 +380,7 @@ export interface PlotSpec {
   top: number;
   bins: number | null;
   showNormal: boolean;
+  capabilityMethod: "sigma" | "percentile";
   showBand: boolean;
   /** Manual axis/colour-scale limits when limitMode is "manual". */
   yMin: number | null;
@@ -438,6 +441,7 @@ export const defaultSpec = (type: PlotType, test: number | null, title: string):
   top: 10,
   bins: null,
   showNormal: true,
+  capabilityMethod: "percentile",
   showBand: true,
   yMin: null,
   yMax: null,

@@ -10,7 +10,7 @@ import type {
 } from "../types";
 import { scatterLimitsFor } from "../types";
 import { axisTitle, fmt, fmtInt, testLabel, tidyName } from "../lib/format";
-import { effectiveLimit, capability, limitRange, mean, normalPdf, stdDev, summarize, scatterStatistics, type AxisStats } from "../lib/stats";
+import { effectiveLimit, populationCapability, limitRange, mean, normalPdf, stdDev, summarize, scatterStatistics, type AxisStats } from "../lib/stats";
 import { categoryName, statisticsFooter, type ExportPlotStyle } from "./imageExport";
 import type { Filter } from "../types";
 import { graphFontOffset } from "../lib/demoFonts";
@@ -72,6 +72,9 @@ function previewFigure(data: any[], layout: any, preview: boolean, xTitle: strin
     };
   }
   const axis = layout.xaxis;
+  if (axis.ticktext?.some((label: string) => label.length > 5) && axis.tickvals?.length > 4) {
+    axis.tickangle = -45;
+  }
   if (axis.tickvals?.length > 8) {
     const stride = Math.ceil(axis.tickvals.length / 8);
     if (axis.ticktext) axis.ticktext = axis.ticktext.filter((_: unknown, i: number) => i % stride === 0);
@@ -451,7 +454,7 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
 
   const lsl = effectiveLimit(spec, "lsl", data.test.loSpec);
   const usl = effectiveLimit(spec, "usl", data.test.hiSpec);
-  const limits = preview || !spec.showLimits
+  const limits = !spec.showLimits
     ? { shapes: [], annotations: [] }
     : limitLines(t, lsl, usl, "y", style, spec.logY);
 
@@ -515,7 +518,7 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
     showticklabels: !preview,
     type: spec.logY ? "log" : "linear",
   };
-  if (!preview) {
+  {
     const summary = (opts.facetLabel === undefined ? undefined : data.groupStats?.[opts.facetLabel]?.summary) ?? data.summary;
     applyAxisRange(
       layout,
@@ -688,7 +691,7 @@ function figureParetoCore(data: ParetoResponse, opts: FigureOpts): Figure {
             font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
           },
       showticklabels: !preview,
-      range: [0, Math.min(100, Math.max(1, failPeak * 1.2))],
+      range: [0, Math.min(100, (failPeak > 0 ? failPeak * 1.2 : 1))],
       ticksuffix: "%",
       rangemode: "tozero",
     };
@@ -718,6 +721,7 @@ function figureParetoCore(data: ParetoResponse, opts: FigureOpts): Figure {
           },
     };
     return { ...previewFigure(traces, layout, preview, data.groupLabel || "Group", "Fail [%]"),
+      indexedXLabels: preview ? undefined : labels,
       exportNotes: [`${spec.binCategory === "soft" ? "SBIN" : "HBIN"} · ${fmtInt(data.total)} tested dice · failure percentages use all tested dice`] };
   }
 
@@ -777,7 +781,7 @@ function figureParetoCore(data: ParetoResponse, opts: FigureOpts): Figure {
           font: { size: style.axisTitle, color: t.muted, family: CHART_FONT },
         },
     showticklabels: !preview,
-    range: [0, Math.min(100, Math.max(1, ...pcts.map((v) => v * 1.25)))],
+    range: [0, Math.min(100, (pcts.some(v => v > 0) ? Math.max(...pcts) * 1.25 : 1))],
     ticksuffix: "%",
     rangemode: "tozero",
   };
@@ -875,7 +879,7 @@ function figureHistCore(data: HistResponse, opts: FigureOpts): Figure {
 
   const lsl = effectiveLimit(spec, "lsl", data.test.loSpec);
   const usl = effectiveLimit(spec, "usl", data.test.hiSpec);
-  const limits = preview || !spec.showLimits
+  const limits = !spec.showLimits
     ? { shapes: [], annotations: [] }
     : limitLinesX(t, lsl, usl, style);
   const { shapes, annotations } = limits;
@@ -1025,12 +1029,12 @@ function figureTrendCore(data: TrendResponse, opts: FigureOpts): Figure {
   }
   const meanStats = summarize(points.map(p=>p.mean).filter(v=>!spec.logY||v>0));
   applyAxisRange(layout, "y", spec, meanStats, lsl, usl, min, max);
-  if (hasGrouping) layout.margin.t += addGroupBlocks(t, points, spec, style, shapes, annotations);
-  else if (addLabelBlocks(t, labels, shapes, annotations, style)) {
+  if (!preview && hasGrouping) layout.margin.t += addGroupBlocks(t, points, spec, style, shapes, annotations);
+  else if (!preview && addLabelBlocks(t, labels, shapes, annotations, style)) {
     layout.margin.t = Math.max(layout.margin.t, style.margin.t + Math.round(style.annotation * 1.1));
   }
   layout.shapes = shapes; layout.annotations = annotations;
-  return { ...previewFigure(traces, layout, preview, categoryTitle(spec.xAxis), `${testLabel(data.test)}${data.test.units ? ` [${data.test.units}]` : ""}`),
+  return { ...previewFigure(traces, layout, preview, "", `${testLabel(data.test)}${data.test.units ? ` [${data.test.units}]` : ""}`),
     indexedXLabels: preview ? undefined : short,
     exportNotes: [`${fmtInt(points.reduce((n, p) => n + p.n, 0))} considered measurements · ${fmtInt(points.length)} category means · ${spec.showBand ? "band: ±1 SD" : "band hidden"}`] };
 }
@@ -1292,7 +1296,7 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
     showgrid: true,
     zeroline: false,
   };
-  if (!preview) {
+  {
     const xLsl = effectiveLimit(xLimits, "lsl", data.xTest.loSpec);
     const xUsl = effectiveLimit(xLimits, "usl", data.xTest.hiSpec);
     const yLsl = effectiveLimit(yLimits, "lsl", data.yTest.loSpec);
@@ -1339,7 +1343,7 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
   }
   if (fitShape) layout.shapes = [...(layout.shapes ?? []), fitShape];
   if (annotations.length && !preview) layout.annotations = annotations;
-  return { ...previewFigure(traces, layout, preview, `${testLabel(data.xTest)}${data.xTest.units ? ` [${data.xTest.units}]` : ""}`, `${testLabel(data.yTest)}${data.yTest.units ? ` [${data.yTest.units}]` : ""}`), rasterScatter: preview, colorLegend,
+  return { ...previewFigure(traces, layout, preview, "", `${testLabel(data.yTest)}${data.yTest.units ? ` [${data.yTest.units}]` : ""}`), rasterScatter: preview, colorLegend,
     exportNotes: [`${fmtInt(series.reduce((n, s) => n + s.points.length, 0))} displayed points · ${fmtInt(data.total)} considered measurements${data.excluded ? ` · ${fmtInt(data.excluded)} filtered` : ""}`,
       ...(data.truncated ? ["Sampled display. Correlation and the fitted line use all considered measurements."] : [])] };
 }
@@ -1362,7 +1366,7 @@ function exportStyle(figure: Figure, opts: FigureOpts, test: import("../types").
 
 function capabilityFooter(summary: BoxResponse["summary"] | undefined, test: BoxResponse["test"], spec: PlotSpec) {
   if (!summary?.n) return "";
-  const { cpk } = capability(summary.mean, summary.sd, effectiveLimit(spec, "lsl", test.loSpec), effectiveLimit(spec, "usl", test.hiSpec));
+  const { cpk } = populationCapability(summary, effectiveLimit(spec, "lsl", test.loSpec), effectiveLimit(spec, "usl", test.hiSpec), spec.capabilityMethod);
   return statisticsFooter(summary, cpk);
 }
 export function figureBox(data: BoxResponse, opts: FigureOpts): Figure {

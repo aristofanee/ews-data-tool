@@ -2,7 +2,7 @@ import type { MapResponse, PlotSelection, PlotSpec, Summary } from "../types";
 import type { PlotData } from "./usePlotData";
 import { categoryName } from "./categoryNames";
 import { fmt, fmtInt } from "./format";
-import { effectiveLimit, capability, valueMapSummary } from "./stats";
+import { effectiveLimit, populationCapability, valueMapSummary } from "./stats";
 import { binLabel } from "./theme";
 
 export interface Stat {
@@ -65,7 +65,7 @@ export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection, 
         k: "In Limits", v: fmtInt(inLimits), tone: inLimits < s.n ? "warn" : undefined,
         title: "Dice inside the plot range. Statistics use the full filtered population.",
       });
-      const process = capability(s.mean, s.sd, effectiveLimit(spec, "lsl", d.test.loSpec), effectiveLimit(spec, "usl", d.test.hiSpec));
+      const process = populationCapability(s, effectiveLimit(spec, "lsl", d.test.loSpec), effectiveLimit(spec, "usl", d.test.hiSpec), spec.capabilityMethod);
       if (process.cp !== null) out.push({ k: "Cp", v: fmt(process.cp, 2) });
       if (process.cpk !== null) {
         const k = process.cpk;

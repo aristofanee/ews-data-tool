@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store";
-import type { CustomColumn, Filter } from "../types";
+import type { CustomColumn, DatasetInfo, Filter } from "../types";
 import * as api from "../lib/api";
 import { binColor } from "../lib/theme";
 import { fmtInt, statisticalRangeLabels, tidyName } from "../lib/format";
@@ -200,6 +200,32 @@ interface ColumnDraft {
   pending: Record<number, string>;
 }
 
+const ColumnWaferList = memo(function ColumnWaferList({ info, pending, selected, currentColumn, onToggle }: {
+  info: DatasetInfo;
+  pending: Record<number, string>;
+  selected: number[];
+  currentColumn: CustomColumn | null;
+  onToggle: (index: number) => void;
+}) {
+  const wafers = useMemo(() => info.wafers.map((w, i) => ({ w, i })).sort((a, b) =>
+    naturalCompare(info.lots[a.w.lot] ?? "", info.lots[b.w.lot] ?? "") ||
+    naturalCompare(a.w.name, b.w.name) || a.i - b.i), [info]);
+  const selection = useMemo(() => new Set(selected), [selected]);
+  return <div className="column-wafer-list">
+    {wafers.map(({ w, i }) => {
+      const code = currentColumn?.waferValues[i] ?? 0;
+      const label = Object.prototype.hasOwnProperty.call(pending, i) ? pending[i]
+        : code ? currentColumn?.categories[code] ?? "" : "";
+      const checked = selection.has(i);
+      return <label key={i} className={"wafer-check" + (checked ? " on" : "")}>
+        <input type="checkbox" checked={checked} onChange={() => onToggle(i)} />
+        <span className="wafer-check-name">{info.lots[w.lot]} / {w.name}</span>
+        {label && <span className="wafer-check-label">{label}</span>}
+      </label>;
+    })}
+  </div>;
+});
+
 function CustomColumnsPanel() {
   const info = useStore((s) => s.info);
   const filters = useStore((s) => s.filters);
@@ -209,6 +235,14 @@ function CustomColumnsPanel() {
   const setError = useStore((s) => s.setError);
   const notify = useStore((s) => s.notify);
   const [draft, setDraft] = useState<ColumnDraft | null>(null);
+  const toggleWafer = useCallback((wi: number) => {
+    setDraft(current => current ? {
+      ...current,
+      selected: current.selected.includes(wi)
+        ? current.selected.filter(index => index !== wi)
+        : [...current.selected, wi],
+    } : null);
+  }, []);
 
   if (!info) return null;
 
@@ -246,16 +280,6 @@ function CustomColumnsPanel() {
     return code ? currentColumn.categories[code] ?? "" : "";
   };
 
-  const toggleWafer = (wi: number) => {
-    if (!draft) return;
-    setDraft({
-      ...draft,
-      selected: draft.selected.includes(wi)
-        ? draft.selected.filter((x) => x !== wi)
-        : [...draft.selected, wi],
-    });
-  };
-
   const selectUnassigned = () => {
     if (!draft) return;
     setDraft({
@@ -266,7 +290,7 @@ function CustomColumnsPanel() {
 
   /** Stage a label for the selected wafers; nothing is sent to Rust yet. */
   const assignToSelected = () => {
-    if (!draft?.selected.length) return;
+    if (!draft?.selected.length || !draft.label.trim()) return;
     const label = draft.label.trim();
     const pending = { ...draft.pending };
     for (const wi of draft.selected) pending[wi] = label;
@@ -392,7 +416,7 @@ function CustomColumnsPanel() {
                     className="input"
                     value={draft.label}
                     autoFocus={draft.editing}
-                    placeholder={draft.editing ? "e.g. Split A (blank clears)" : "e.g. Split A"}
+                    placeholder="e.g. Split A"
                     list="custom-label-options"
                     onChange={(e) => setDraft({ ...draft, label: e.target.value })}
                     onKeyDown={(e) => {
@@ -402,7 +426,7 @@ function CustomColumnsPanel() {
                       }
                     }}
                   />
-                  <button className="btn" onClick={assignToSelected} type="button" disabled={!draft.selected.length}>
+                  <button className="btn" onClick={assignToSelected} type="button" disabled={!draft.selected.length || !draft.label.trim()}>
                     Assign
                   </button>
                 </div>
@@ -432,29 +456,8 @@ function CustomColumnsPanel() {
                   Unassigned
                 </button>
               </div>
-              <div className="column-wafer-list">
-                {info.wafers.map((w,i)=>({w,i})).sort((a,b)=>naturalCompare(info.lots[a.w.lot]??"",info.lots[b.w.lot]??"")||naturalCompare(a.w.name,b.w.name)||a.i-b.i).map(({w,i}) => {
-                  const current = labelFor(i);
-                  return (
-                    <label
-                      key={i}
-                      className={
-                        "wafer-check" + (draft.selected.includes(i) ? " on" : "")
-                      }
-                    >
-                      <input
-                        type="checkbox"
-                        checked={draft.selected.includes(i)}
-                        onChange={() => toggleWafer(i)}
-                      />
-                      <span className="wafer-check-name">
-                        {info.lots[w.lot]} / {w.name}
-                      </span>
-                      {current && <span className="wafer-check-label">{current}</span>}
-                    </label>
-                  );
-                })}
-              </div>
+              <ColumnWaferList info={info} pending={draft.pending} selected={draft.selected}
+                currentColumn={currentColumn} onToggle={toggleWafer} />
             </div>
             <div className="modal-foot">
               <button className="btn" onClick={() => setDraft(null)}>

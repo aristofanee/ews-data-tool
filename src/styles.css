@@ -1570,7 +1570,6 @@ select.input {
   inset: 0;
   background: rgba(15, 23, 42, 0.35);
   z-index: 40;
-  backdrop-filter: blur(1px);
 }
 
 [data-theme="dark"] .drawer-backdrop {
@@ -1842,7 +1841,6 @@ select.input {
   position: fixed;
   inset: 0;
   background: rgba(10, 18, 32, 0.45);
-  backdrop-filter: blur(3px);
   z-index: 60;
   display: grid;
   place-items: center;
@@ -2362,7 +2360,6 @@ select.input {
   justify-content: center;
   padding: 24px;
   background: rgba(15, 23, 42, 0.42);
-  backdrop-filter: blur(2px);
 }
 
 [data-theme="dark"] .modal-backdrop {

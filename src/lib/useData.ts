@@ -71,7 +71,7 @@ export function useExportCsv() {
       const base = info.lots.length === 1 ? safeName(info.lots[0]) : "ews_data";
       const path = await api.pickSavePath(`${base}_export.csv`, ["csv"]);
       if (!path) return;
-      setBusy(true, 25, "Writing CSV (this can take a moment for large lots)…");
+      setBusy(true, 0, "Preparing CSV…");
       const msg = await api.exportCsv(path, emptyFilter());
       notify(msg);
       setBusy(false);

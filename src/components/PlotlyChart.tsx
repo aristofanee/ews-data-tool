@@ -124,11 +124,9 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
     const restoreLimitLines = () => restoreBoundaryLimitLines(el);
     const labels = isStatic ? undefined : figure.indexedXLabels;
     const tickFont = figure.layout.xaxis?.tickfont;
-    const tickAngle = Math.abs(figure.layout.xaxis?.tickangle ?? 0) * Math.PI / 180;
     const measure = labels?.length ? document.createElement("canvas").getContext("2d") : null;
     if (measure) measure.font = `${tickFont.size}px ${tickFont.family}`;
-    const labelWidths = measure && labels?.map(label =>
-      Math.cos(tickAngle) * measure.measureText(label).width + Math.sin(tickAngle) * tickFont.size + 8);
+    const labelWidths = measure && labels?.map(label => measure.measureText(label).width);
     let tickFrame = 0;
     // Category positions stay fixed while the label stride follows the visible range.
     const updateTicks = () => {
@@ -143,13 +141,22 @@ export function PlotlyChart({ figure, hostRef, staticPlot: isStatic = false, cac
         let widest = 0;
         for (let i = start; i <= end; i++) widest = Math.max(widest, labelWidths[i]);
         const density = (isTauri ? DEFAULT_X_LABEL_DENSITY : useStore.getState().demoXLabelDensity) / 100;
-        const stride = Math.max(1, Math.ceil((high - low) * widest / (axis._length * density)));
+        const spacing = axis._length / Math.max(1, high - low);
+        const gap = 8;
+        const angle = widest + gap > spacing ? -45 : 0;
+        const radians = Math.abs(angle) * Math.PI / 180;
+        const occupiedWidth = Math.cos(radians) * widest + Math.sin(radians) * tickFont.size + gap;
+        const stride = Math.max(1, Math.ceil(occupiedWidth / (spacing * density)));
         const ticks: number[] = [];
         for (let i = start; i <= end; i += stride) ticks.push(i);
-        if (ticks.length === axis.tickvals?.length && ticks.every((tick, i) => tick === axis.tickvals[i])) return;
+        const tickvals = axis.type === "category" ? ticks.map(i => labels[i]) : ticks;
+        if (angle === axis.tickangle && tickvals.length === axis.tickvals?.length &&
+            tickvals.every((tick, i) => tick === axis.tickvals[i])) return;
         void Plotly.relayout(el, {
-          "xaxis.tickvals": ticks,
+          "xaxis.tickvals": tickvals,
           "xaxis.ticktext": ticks.map(i => labels[i]),
+          "xaxis.tickangle": angle,
+          "xaxis.automargin": true,
         }).catch(console.error);
       });
     };

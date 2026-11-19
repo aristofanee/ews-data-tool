@@ -556,12 +556,11 @@ export function ChartPanel({ data, loading, error }: PlotDataState) {
           </button>
         ))}
         <div className="tabs-spacer" />
-        {selectedReportId && (
-          <button className="btn" onClick={() => updateReportItem(selectedReportId, opened)}
-            disabled={loading || exporting || !!error} title="Save the current plot to the selected report item">
-            <IconRefresh size={15} /> Update report item
+          <button className="btn icon" onClick={() => selectedReportId && updateReportItem(selectedReportId, opened)}
+            disabled={!selectedReportId || loading || exporting || !!error}
+            aria-label="Update report item" title="Update report item">
+            <IconRefresh size={15} />
           </button>
-        )}
         <button className="btn" onClick={()=>addReport(opened??undefined)} disabled={loading||exporting||!!error} title={opened?"Add the opened plot to the report":"Add this plot to the report"}>
           <IconPlus size={15} /> Add to report
         </button>

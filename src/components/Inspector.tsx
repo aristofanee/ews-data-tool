@@ -285,6 +285,15 @@ export function Inspector({ autoBins }: { autoBins: number }) {
     </>
   );
 
+  const capabilityControl = <Row label="Cp/Cpk method">
+    <select className="input" aria-label="Cp/Cpk method" value={spec.capabilityMethod ?? "percentile"}
+      title="Percentile uses P99.865 - P0.135 as the spread and the median as the center."
+      onChange={e => patch({ capabilityMethod: e.target.value as "sigma" | "percentile" })}>
+      <option value="sigma">Sigma</option>
+      <option value="percentile">Percentile</option>
+    </select>
+  </Row>;
+
   const reset = () => {
     const fresh = defaultSpec(spec.type as PlotType, spec.test, spec.title);
     patch({
@@ -378,6 +387,7 @@ export function Inspector({ autoBins }: { autoBins: number }) {
             onChange={(v) => patch({ displayAllData: v })}
             title="In All points mode, draw every eligible dot in full-size plots and exports. Split thumbnails still sample regular dots."
           />
+          {capabilityControl}
         </Section>
       )}
 
@@ -501,6 +511,7 @@ export function Inspector({ autoBins }: { autoBins: number }) {
             onChange={(v) => patch({ showNormal: v })}
             disabled={spec.groupBy !== "none" && !spec.splitPlots}
           />
+          {capabilityControl}
         </Section>
       )}
 

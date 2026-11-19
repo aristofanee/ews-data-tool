@@ -57,6 +57,8 @@ export function summarize(values: ArrayLike<number>): Summary {
       q1: NaN,
       median: NaN,
       q3: NaN,
+      p00135: NaN,
+      p99865: NaN,
       whiskerLo: NaN,
       whiskerHi: NaN,
     };
@@ -93,6 +95,8 @@ export function summarize(values: ArrayLike<number>): Summary {
     q1,
     median: med,
     q3,
+    p00135: quantileSorted(v, 0.00135),
+    p99865: quantileSorted(v, 0.99865),
     whiskerLo: wLo,
     whiskerHi: wHi,
   };
@@ -133,6 +137,15 @@ export function capability(m: number, sd: number, lsl: number | null, usl: numbe
   else if (lsl !== null) cpk = (m - lsl) / (3 * sd);
   else if (usl !== null) cpk = (usl - m) / (3 * sd);
   return { cp, cpk };
+}
+
+export function populationCapability(summary: Summary, lsl: number | null, usl: number | null,
+  method: PlotSpec["capabilityMethod"] = "percentile") {
+  if (method === "sigma") return capability(summary.mean, summary.sd, lsl, usl);
+  const spread = summary.p99865 - summary.p00135;
+  if (!summary.n || !Number.isFinite(spread) || spread <= 0) return { cp: null, cpk: null };
+  // Nonparametric capability uses the central 99.73% width and the median.
+  return capability(summary.median, spread / 6, lsl, usl);
 }
 
 export function valueMapSummary(dice: readonly MapDie[]): Summary {

@@ -401,6 +401,7 @@ pub async fn scatter(
 
 #[tauri::command]
 pub async fn export_csv(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
     filter: Filter,
@@ -409,13 +410,22 @@ pub async fn export_csv(
     tauri::async_runtime::spawn_blocking(move || {
         let guard = arc.lock().unwrap();
         let ds = guard.as_ref().ok_or("No dataset loaded")?;
-        write_csv(ds, &path, &filter)
+        write_csv_progress(ds, &path, &filter, &mut |pct, msg| {
+            let _ = app.emit("import-progress", Progress { pct, msg: msg.into() });
+        })
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
+#[cfg(test)]
 fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String> {
+    write_csv_progress(ds, path, filter, &mut |_, _| {})
+}
+
+fn write_csv_progress(ds: &Dataset, path: &str, filter: &Filter,
+    progress: &mut dyn FnMut(f32, &str)) -> Result<String, String> {
+    progress(1.0, "Preparing CSV…");
     let mask = ds.base_mask(filter);
     // Derived numeric labels already have their complete source test in the CSV.
     // Avoid duplicate columns; edited/manual labels remain independent exports.
@@ -470,7 +480,13 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
 
     let mut count = 0usize;
     let mut line = String::with_capacity(256);
+    let mut last_percent = 1;
     for r in 0..ds.rows {
+        let percent = 2 + (r as u64 * 96 / ds.rows.max(1) as u64) as u32;
+        if percent > last_percent {
+            progress(percent as f32, "Writing CSV rows…");
+            last_percent = percent;
+        }
         if !mask[r] {
             continue;
         }
@@ -510,7 +526,9 @@ fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String
         w.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
         count += 1;
     }
+    progress(99.0, "Finalizing CSV…");
     w.flush().map_err(|e| e.to_string())?;
+    progress(100.0, "CSV exported");
     Ok(format!("Exported {count} rows"))
 }
 
@@ -657,7 +675,13 @@ mod tests {
         ds.tests[0].number = Some(1001); ds.tests[0].lo_spec = Some(1.0); ds.tests[0].hi_spec = Some(3.0);
         ds.tests[0].lo_limit = Some(0.5); ds.tests[0].hi_limit = Some(4.0);
         ds.custom_cols.push(crate::model::CustomColumn { name: "Split".into(), categories: vec!["".into(), "Group A".into()], wafer_values: vec![1] });
-        super::write_csv(&ds, output.to_str().unwrap(), &crate::model::Filter::default()).unwrap();
+        let mut progress = Vec::new();
+        super::write_csv_progress(&ds, output.to_str().unwrap(), &crate::model::Filter::default(),
+            &mut |pct, _| progress.push(pct)).unwrap();
+        assert_eq!(progress.first(), Some(&1.0));
+        assert_eq!(progress.last(), Some(&100.0));
+        assert!(progress.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(progress.iter().any(|pct| *pct > 25.0 && *pct < 99.0));
         let text = std::fs::read_to_string(&output).unwrap();
         assert!(text.lines().next().unwrap().contains("1001 - V [V]"));
         assert!(text.lines().nth(1).unwrap().starts_with("LSL,"));

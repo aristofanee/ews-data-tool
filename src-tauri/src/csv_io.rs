@@ -638,7 +638,7 @@ fn find_header(
             let width = headers.iter().filter(|h| !h.trim().is_empty()).count();
             if fallback
                 .as_ref()
-                .map_or(true, |b| width > b.3 || (width == b.3 && i > b.0))
+                .map_or(true, |b| width > b.3)
             {
                 fallback = Some((i, line, headers, width));
             }
@@ -691,7 +691,27 @@ fn read_metadata_and_probe(
 
 pub fn inspect_csv(path: &Path) -> Result<CsvInspection, String> {
     let mapped = mapped_text(path)?;
-    let text = decode(&mapped)?;
+    // Mapping only needs the preamble/header. Validating the entire UTF-8
+    // mapping here made large files incur a full scan before import began.
+    let mut end = mapped.len().min(256 * 1024);
+    let text = loop {
+        let mut boundary = end;
+        if end < mapped.len() {
+            if mapped.starts_with(&[0xFF, 0xFE]) || mapped.starts_with(&[0xFE, 0xFF]) {
+                boundary -= boundary % 2;
+                let last = [mapped[boundary - 2], mapped[boundary - 1]];
+                let code = if mapped[0] == 0xFF { u16::from_le_bytes(last) } else { u16::from_be_bytes(last) };
+                if (0xD800..=0xDBFF).contains(&code) { boundary -= 2; }
+            } else {
+                while boundary > 0 && mapped[boundary] & 0xC0 == 0x80 { boundary -= 1; }
+            }
+        }
+        let sample = decode(&mapped[..boundary])?;
+        if end == mapped.len() || find_header(&sample, detect_delimiter(&sample)).is_ok() {
+            break sample;
+        }
+        end = end.saturating_mul(2).min(mapped.len());
+    };
     let delim = detect_delimiter(&text);
     let (headers, header_line, _header_idx) = find_header(&text, delim)?;
     let lay = layout_from_headers(&headers);
@@ -1007,6 +1027,37 @@ pub fn import_csv_with_mapping(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inspection_reads_only_the_header_but_import_validates_the_whole_file() {
+        let path = write_temp("header-only-inspection", &format!(
+            "LOTX,WAFERX,COLX,ROWX,T1\n{}", "L,W,0,0,1\n".repeat(40_000)));
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(0xFF);
+        std::fs::write(&path, bytes).unwrap();
+        let inspection = inspect_csv(&path).unwrap();
+        assert_eq!(inspection.header_line, 1);
+        assert!(inspection.missing.contains(&"x".into()));
+        assert!(import_csv(&path, &mut |_, _| {}).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn header_inspection_accepts_utf16_surrogate_pairs_at_the_prefix_boundary() {
+        let header = "Lot,Wafer,X,Y,T\n";
+        // The first code unit of the emoji is the final unit in the prefix.
+        let text = format!("{header}{}😀\n", "A".repeat(131_070 - header.len()));
+        for little_endian in [true, false] {
+            let path = write_temp(if little_endian { "prefix-utf16le" } else { "prefix-utf16be" }, "");
+            let mut bytes = if little_endian { vec![0xFF, 0xFE] } else { vec![0xFE, 0xFF] };
+            for code in text.encode_utf16() {
+                bytes.extend_from_slice(&if little_endian { code.to_le_bytes() } else { code.to_be_bytes() });
+            }
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(inspect_csv(&path).unwrap().header_line, 1);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
     #[test]
     fn single_csv_reports_incremental_progress_in_both_formats() {
         for (name, header, suffix) in [

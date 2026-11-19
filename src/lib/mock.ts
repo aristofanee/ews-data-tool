@@ -390,6 +390,8 @@ function emptySummary(): Summary {
     q1: NaN,
     median: NaN,
     q3: NaN,
+    p00135: NaN,
+    p99865: NaN,
     whiskerLo: NaN,
     whiskerHi: NaN,
   };
@@ -862,12 +864,12 @@ export async function waferMap(req: {
     }
   }
 
-  // Wafer yield uses every tested die, independently of plot filters and
-  // coordinate averaging. Test yield uses considered source measurements.
+  // Yield uses the filtered source dice before coordinate averaging.
   pass = 0;
   fail = 0;
-  for (const w of selected) {
-    for (const bin of w.hbin) { if (bin === 1) pass++; else fail++; }
+  for (let j = 0; j < rowW.length; j++) {
+    if (!rowKeep[j]) continue;
+    if (rowW[j].hbin[rowI[j]] === 1) pass++; else fail++;
   }
   const lsl = effectiveLimit(req, "lsl", test?.loSpec);
   const usl = effectiveLimit(req, "usl", test?.hiSpec);
@@ -959,8 +961,9 @@ export async function binOverview(req: {
       }));
     let pass = 0;
     let fail = 0;
-    for (const code of w.hbin) {
-      if (code === 1) pass++;
+    for (let i = 0; i < w.hbin.length; i++) {
+      if (!binAllowed(w, i, req.filter)) continue;
+      if (w.hbin[i] === 1) pass++;
       else fail++;
     }
     if (dice.length) {
@@ -995,14 +998,12 @@ export async function pareto(req: {
     if (!waferAllowed(w, req.filter)) continue;
     const codes = req.category === "hard" ? w.hbin : w.sbin;
     for (let i = 0; i < codes.length; i++) {
-      if (!categoryAllowed(w,i,req.filter))continue;
-      if (req.filter.sites?.length && !req.filter.sites.includes(i % 4)) continue;
-      const visible = binAllowed(w, i, req.filter);
+      if (!binAllowed(w, i, req.filter)) continue;
       const code = codes[i];
       const pass = passOf(code);
       total++;
       if (pass) passTotal++;
-      if (visible) counts.set(code, (counts.get(code) ?? 0) + 1);
+      counts.set(code, (counts.get(code) ?? 0) + 1);
       if (req.groupBy && req.groupBy !== "none") {
         const label = categoryFor(ds, w, i, req.groupBy).name || ds.lots[w.lot];
         let g = grouped.get(label);
@@ -1012,7 +1013,7 @@ export async function pareto(req: {
         }
         g.total++;
         if (pass) g.pass++;
-        if (visible) g.counts.set(code, (g.counts.get(code) ?? 0) + 1);
+        g.counts.set(code, (g.counts.get(code) ?? 0) + 1);
       }
     }
   }

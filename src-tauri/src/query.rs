@@ -656,17 +656,15 @@ fn wafer_map_prepared(ds: &Dataset, req: &MapRequest, keep_ref: Option<&[bool]>,
         if req.wafer.is_some_and(|w| ds.wafer_of_row[r] != w)
             || (!req.filter.lots.is_empty() && !req.filter.lots.contains(&ds.lot_of_row[r]))
             || (!req.filter.wafers.is_empty() && !req.filter.wafers.contains(&ds.wafer_of_row[r])) { continue; }
-        // Physical wafer yield never changes with a test/outlier/bin filter.
+        if !considered[r] || keep_ref.is_some_and(|keep| !keep[r]) { continue; }
         if ds.hbin[r] == UNKNOWN_BIN { unknown_bins += 1; }
         if ds.hbin[r] == 1 { pass += 1; } else { fail += 1; }
-        if considered[r] && keep_ref.map_or(true, |k| k[r]) {
-            if let Some(v) = col.and_then(|c| c.get(r)).copied().filter(|v| v.is_finite()) {
-                test_total += 1;
-                if valid_limits {
-                    if lsl.map_or(true, |l| v >= l) && usl.map_or(true, |u| v <= u) {
-                        test_pass += 1;
-                    } else { test_fail += 1; }
-                }
+        if let Some(v) = col.and_then(|c| c.get(r)).copied().filter(|v| v.is_finite()) {
+            test_total += 1;
+            if valid_limits {
+                if lsl.map_or(true, |l| v >= l) && usl.map_or(true, |u| v <= u) {
+                    test_pass += 1;
+                } else { test_fail += 1; }
             }
         }
     }
@@ -782,13 +780,10 @@ pub fn bin_overview(ds: &Dataset, req: &BinOverviewRequest) -> BinOverviewRespon
     // and allocation per wafer. Import has already resolved duplicate dice.
     for r in 0..ds.rows {
         let wi = ds.wafer_of_row[r] as usize;
-        if (!req.filter.lots.is_empty() && !req.filter.lots.contains(&ds.lot_of_row[r]))
-            || (!req.filter.wafers.is_empty() && !req.filter.wafers.contains(&(wi as u16))) { continue; }
+        if !mask[r] { continue; }
         if ds.hbin[r] == 1 { totals[wi].0 += 1; } else { totals[wi].1 += 1; }
-        if mask[r] {
-            dice_by_wafer[wi].push(MapDie { x: ds.x[r], y: ds.y[r],
-                v: ds.hbin[r] as f32, hbin: ds.hbin[r], sbin: ds.sbin[r] });
-        }
+        dice_by_wafer[wi].push(MapDie { x: ds.x[r], y: ds.y[r],
+            v: ds.hbin[r] as f32, hbin: ds.hbin[r], sbin: ds.sbin[r] });
     }
     let mut wafers = Vec::new();
     for (wi, mut dice) in dice_by_wafer.into_iter().enumerate() {
@@ -915,11 +910,6 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty() && *s != "none");
-    // Bin selection controls which failures are displayed, not the tested
-    // population. Selecting a failing bin must not make its rate become 100%.
-    let mut population_filter = req.filter.clone();
-    population_filter.hbins.clear(); population_filter.sbins.clear();
-    let population = ds.base_mask(&population_filter);
     let mut counts: HashMap<u16, usize> = HashMap::new();
     let mut total = 0usize;
     let mut pass_total = 0usize;
@@ -928,7 +918,7 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
     let mut grouped: HashMap<String, ParetoGroupAcc> = HashMap::new();
 
     for r in 0..ds.rows {
-        if !population[r] {
+        if !mask[r] {
             continue;
         }
         let code = codes[r];
@@ -941,7 +931,7 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
         } else {
             unknown_total += 1;
         }
-        if mask[r] && code != crate::model::UNKNOWN_BIN { *counts.entry(code).or_insert(0) += 1; }
+        if code != crate::model::UNKNOWN_BIN { *counts.entry(code).or_insert(0) += 1; }
         if let Some(by) = group_by {
             let glabel = pareto_group_label(ds, by, r, multi_lot);
             let g = grouped.entry(glabel).or_default();
@@ -950,7 +940,7 @@ pub fn pareto(ds: &Dataset, req: &ParetoRequest) -> ParetoResponse {
             if pass {
                 g.pass += 1;
             }
-            if mask[r] && code != crate::model::UNKNOWN_BIN { *g.counts.entry(code).or_insert(0) += 1; }
+            if code != crate::model::UNKNOWN_BIN { *g.counts.entry(code).or_insert(0) += 1; }
         }
     }
 
@@ -2149,12 +2139,18 @@ mod tests {
         req.group_by = None;
         req.filter.hbins = vec![2];
         let selected = pareto(&ds, &req);
-        assert_eq!(selected.total, 4);
-        assert_eq!(selected.bars[0].pct, 25.0, "selecting a failing bin preserves the tested denominator");
+        assert_eq!(selected.total, 1);
+        assert_eq!(selected.bars[0].pct, 100.0);
+        let mut custom_req = ParetoRequest { category: BinCategory::Hard, filter: Filter::default(), top: Some(1), group_by: None };
+        custom_req.filter.custom.push(CustomFilter::Category { category: "hbin".into(), values: vec!["2".into()], keep: true });
+        let custom = pareto(&ds, &custom_req);
+        assert_eq!(serde_json::to_value(&selected).unwrap(), serde_json::to_value(&custom).unwrap());
+        let bins = bin_overview(&ds, &BinOverviewRequest { filter: req.filter.clone(), category: None });
+        assert_eq!((bins.wafers[0].pass, bins.wafers[0].fail), (0, 1));
         req.filter.sites = vec![0];
         let site = pareto(&ds, &req);
-        assert_eq!(site.total, 2);
-        assert_eq!(site.bars[0].pct, 50.0);
+        assert_eq!(site.total, 1);
+        assert_eq!(site.bars[0].pct, 100.0);
         let b = box_plot(&ds, &BoxRequest { population: None, test: 0, x_axis: "site".into(), group_by: None, filter: Filter::default(), max_points: None });
         assert_eq!(b.groups.len(), 2);
         assert_eq!(b.groups[0].x_label, "Site 0");
@@ -2203,7 +2199,7 @@ mod tests {
         let mut filtered = req;
         filtered.filter.hbins = vec![1];
         let m = wafer_map(&ds, &filtered);
-        assert_eq!((m.pass, m.fail), (1, 2), "bin filters must not change physical yield");
+        assert_eq!((m.pass, m.fail), (1, 0), "yield uses the filtered source dice");
         assert_eq!(m.test_yield_pct, Some(100.0));
     }
 

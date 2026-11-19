@@ -244,6 +244,7 @@ export function validateTemplate(value:unknown):asserts value is import("../stor
     for(const field of ["xAxis","groupBy","title"])if(p.spec[field]!==undefined&&typeof p.spec[field]!=="string")throw new Error("Invalid plot category or title.");
     for(const field of ["logY","showLimits","splitPlots","showNormal","showBand","scatterFit","displayAllData","noLsl","noUsl"])if(p.spec[field]!==undefined&&typeof p.spec[field]!=="boolean")throw new Error("Invalid plot option.");
     for(const field of ["lsl","usl","yMin","yMax","limitK","top","bins","edgeExclusion"])if(p.spec[field]!=null&&!Number.isFinite(p.spec[field]))throw new Error("Invalid numeric plot option.");
+    if(p.spec.capabilityMethod!==undefined&&!["sigma","percentile"].includes(p.spec.capabilityMethod))throw new Error("Invalid capability method.");
     if(p.spec.limitMode!==undefined&&!["auto","manual","spec","sigma","iqr"].includes(p.spec.limitMode))throw new Error("Invalid limit mode.");
     if (p.spec.scatterLimits !== undefined) {
       const axes = p.spec.scatterLimits;

@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>EWS Data Tool</title>
+    <style>
+      html { background: #f2f5fa; }
+      html[data-theme="dark"] { background: #070d18; }
+    </style>
+    <script>
+      try {
+        document.documentElement.dataset.theme = localStorage.getItem("ews-theme") === "dark" ? "dark" : "light";
+      } catch {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

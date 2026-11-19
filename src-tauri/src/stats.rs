@@ -12,6 +12,8 @@ pub struct Summary {
     pub q1: f32,
     pub median: f32,
     pub q3: f32,
+    pub p00135: f32,
+    pub p99865: f32,
     pub whisker_lo: f32,
     pub whisker_hi: f32,
 }
@@ -83,6 +85,8 @@ pub fn summarize(values: &[f32]) -> Summary {
         q1,
         median: med,
         q3,
+        p00135: quantile_sorted(&v, 0.00135),
+        p99865: quantile_sorted(&v, 0.99865),
         whisker_lo,
         whisker_hi,
     }

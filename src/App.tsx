@@ -36,6 +36,18 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    if (!api.isTauri) return;
+    // Reveal the native window after React and the initial theme have painted.
+    const frame = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        void import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
+          getCurrentWindow().show()).catch(console.error);
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
     return api.onImportProgress((pct, msg) => useStore.getState().setProgress(pct, msg));
   }, []);
 

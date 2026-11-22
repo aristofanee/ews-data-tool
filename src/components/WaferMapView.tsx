@@ -14,7 +14,7 @@ import {
 import { useStore } from "../store";
 import type { Theme } from "../lib/theme";
 import { fmtMap } from "../lib/format";
-import { binLabel } from "../lib/theme";
+import { binLabel, showBinLabel } from "../lib/theme";
 
 export interface MapExportApi {
   toDataURL: (
@@ -81,6 +81,7 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
       showSpecTicks: spec.showLimits,
       binNames,
       binCategory: spec.binCategory,
+      showBinLabel: showBinLabel(spec),
       binPass,
       vmin: limits.vmin,
       vmax: limits.vmax,
@@ -98,6 +99,8 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
       spec.presentation,
       fontRevision,
       spec.binCategory,
+      spec.showHardBinLabel,
+      spec.showSoftBinLabel,
       preview,
       data,
       binNames,
@@ -292,14 +295,14 @@ export function WaferMapView({ data, spec, onReady, onOpen, preview = false }: P
               {spec.binCategory === "soft" ? "SBIN" : "HBIN"}{" "}
               {spec.binCategory === "soft" ? hover.die.sbin : hover.die.hbin}
               <span>
-                {spec.binCategory === "soft" ? binNames[hover.die.sbin] ?? "" : ""}
+                {showBinLabel(spec) ? binNames[spec.binCategory === "soft" ? hover.die.sbin : hover.die.hbin] ?? "" : ""}
               </span>
             </div>
           )}
           {!data.isMean && <><div className="map-tip-row">
-            {binLabel("hard", hover.die.hbin, info?.hbins.find((b) => b.code === hover.die.hbin)?.name)}
+            {binLabel("hard", hover.die.hbin, info?.hbins.find((b) => b.code === hover.die.hbin)?.name, true, spec.showHardBinLabel ?? false)}
           </div>
-          <div className="map-tip-row">{binLabel("soft", hover.die.sbin, info?.sbins.find((b) => b.code === hover.die.sbin)?.name)}</div></>}
+          <div className="map-tip-row">{binLabel("soft", hover.die.sbin, info?.sbins.find((b) => b.code === hover.die.sbin)?.name, true, spec.showSoftBinLabel ?? true)}</div></>}
           {outOfSpec && <div className="map-tip-flag">Out of spec</div>}
         </div>
       )}

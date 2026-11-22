@@ -1,5 +1,5 @@
 import { effectiveLimit, limitOverrides } from "./stats";
-import { binYieldText } from "./theme";
+import { binYieldText, showBinLabel } from "./theme";
 import type { DatasetInfo, MapResponse, ReportItem } from "../types";
 import type { Theme } from "./theme";
 import * as api from "./api";
@@ -218,6 +218,7 @@ export async function generateReport(opts: {
       showSpecTicks: spec.showLimits,
       binNames: binNamesFor(spec.binCategory),
       binCategory: spec.binCategory,
+      showBinLabel: showBinLabel(spec),
       binPass: binPassFor(spec.binCategory),
       vmin: limits.vmin,
       vmax: limits.vmax,
@@ -260,7 +261,7 @@ export async function generateReport(opts: {
         const md:MapResponse={wafer:w.wafer,lotName:w.lotName,dice:w.dice,test:null,lsl:null,usl:null,vmin:NaN,vmax:NaN,
           pass:w.pass,fail:w.fail,yieldPct:w.yieldPct,isMean:false,waferCount:1,excluded:0};
         await beginImage(title);
-        image=renderMapImage(md,{theme,palette:spec.palette,mode:"bin",lsl:null,usl:null,binNames:binNamesFor(spec.binCategory),binCategory:spec.binCategory,
+        image=renderMapImage(md,{theme,palette:spec.palette,mode:"bin",lsl:null,usl:null,binNames:binNamesFor(spec.binCategory),binCategory:spec.binCategory,showBinLabel:showBinLabel(spec),
           exportSpec:{...spec,groupBy:"wafer"},exportGroupLabel:selected.label},IMAGE_WIDTH,imageHeight("binmap"),title,filterSubtitle,"jpeg");
       }else if(spec.type==="pareto"){
         const group=dataGroups(info,item.filters,spec.groupBy).find(g=>g.label===selected.label);
@@ -310,6 +311,7 @@ export async function generateReport(opts: {
         usl: null,
         binNames: binNamesFor(spec.binCategory),
         binCategory: spec.binCategory,
+        showBinLabel: showBinLabel(spec),
         binPass: binPassFor(spec.binCategory),
         presentation: spec.presentation,
       };

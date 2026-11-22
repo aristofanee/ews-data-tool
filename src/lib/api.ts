@@ -110,10 +110,12 @@ export async function datasetInfo(): Promise<DatasetInfo | null> {
 
 export async function addCustomColumn(
   name: string,
-  assignments: { wafer: number; label: string }[]
+  assignments: { wafer: number; label: string }[],
+  originalName: string | null = null,
 ): Promise<DatasetInfo> {
   invalidateMaps();
-  const info = !isTauri ? await mock.addCustomColumn(name, assignments) : await invoke<DatasetInfo>("add_custom_column", { name, assignments });
+  const info = !isTauri ? await mock.addCustomColumn(name, assignments, originalName)
+    : await invoke<DatasetInfo>("add_custom_column", { name, assignments, originalName });
   invalidateMaps();
   return info;
 }

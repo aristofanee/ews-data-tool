@@ -42,9 +42,14 @@ fn wafer_label(ds: &Dataset, wi: u16, multi_lot: bool) -> String {
 fn category_for_row(ds: &Dataset, category: &str, row: usize, multi_lot: bool) -> (u16, String) {
     match category {
         "" | "none" => (0, "All".to_string()),
-        "wafer" => {
+        "wafer" | "waferNumber" => {
             let wi = ds.wafer_of_row[row];
-            (wi, wafer_label(ds, wi, multi_lot))
+            let label = if category == "waferNumber" {
+                let w = &ds.wafers[wi as usize];
+                let number = w.number.as_deref().unwrap_or("Unassigned");
+                if multi_lot { format!("{} / {number}", ds.lot_name(w.lot)) } else { number.into() }
+            } else { wafer_label(ds, wi, multi_lot) };
+            (wi, label)
         }
         "lot" => {
             let lot = ds.lot_of_row[row];
@@ -886,6 +891,7 @@ fn pareto_group_title(ds: &Dataset, group_by: &str) -> String {
     match group_by {
         "lot" => "Lot".to_string(),
         "wafer" => "Wafer ID (OCR)".to_string(),
+        "waferNumber" => "Wafer".to_string(),
         "site" => "Site".to_string(),
         "hbin" => "HBIN".to_string(),
         "sbin" => "SBIN".to_string(),
@@ -1599,6 +1605,7 @@ fn scatter_col_label(ds: &Dataset, col: &str) -> String {
     match col {
         "lot" | "" => "Lot".to_string(),
         "wafer" => "Wafer ID (OCR)".to_string(),
+        "waferNumber" => "Wafer".to_string(),
         "site" => "Site".to_string(),
         "hbin" => "HBIN".to_string(),
         "sbin" => "SBIN".to_string(),
@@ -1886,6 +1893,24 @@ pub fn scatter(ds: &Dataset, req: &ScatterRequest) -> ScatterResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wafer_number_categories_keep_physical_wafers_distinct() {
+        let mut imp = crate::dataset::Imported::new();
+        for (lot_name, ocr, number) in [("L1","ABC-03","03"),("L2","XYZ-03","03")] {
+            let lot = imp.lot_index(lot_name);
+            let wafer = imp.wafer_index(lot,ocr);
+            imp.wafer_numbers[wafer as usize] = Some(number.into());
+            let row = imp.new_row(lot,wafer); imp.x[row] = 0; imp.y[row] = 0;
+        }
+        let mut ds = Dataset::new(); ds.merge(imp.finish());
+        assert_eq!(category_for_row(&ds,"waferNumber",0,true), (0,"L1 / 03".into()));
+        assert_eq!(category_for_row(&ds,"waferNumber",1,true), (1,"L2 / 03".into()));
+        assert_eq!(category_for_row(&ds,"waferNumber",0,false), (0,"03".into()));
+        assert_eq!(category_for_row(&ds,"wafer",0,false), (0,"ABC-03".into()));
+        assert_eq!(pareto_group_title(&ds,"waferNumber"), "Wafer");
+        assert_eq!(scatter_col_label(&ds,"waferNumber"), "Wafer");
+    }
+
     #[test]
     fn suggested_limits_use_quartiles_with_extreme_values() {
         let ds = small_dataset(&[-1000.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 1000.0, f32::NAN]);
@@ -2474,6 +2499,7 @@ mod tests {
         ds.lots = vec!["L".to_string()];
         ds.wafers = vec![
             WaferInfo {
+                number: None,
                 lot: 0,
                 name: "W1".to_string(),
                 dice: 5,
@@ -2490,6 +2516,7 @@ mod tests {
                 pos_x:None,pos_y:None,
             },
             WaferInfo {
+                number: None,
                 lot: 0,
                 name: "W2".to_string(),
                 dice: 5,

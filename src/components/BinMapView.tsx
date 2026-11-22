@@ -8,7 +8,7 @@ import {
   type MapOptions,
 } from "../charts/waferMap";
 import { useStore } from "../store";
-import type { Theme } from "../lib/theme";
+import { showBinLabel, type Theme } from "../lib/theme";
 import { MapGallery, useMapSelection } from "./MapGallery";
 import type { ImageExportJob } from "../lib/exportJobs";
 import { MapDetailView } from "./MapDetailView";
@@ -94,12 +94,13 @@ export function BinMapView({ data, spec, onReady, onSelection }: Props) {
       usl: null,
       binNames,
       binCategory: spec.binCategory,
+      showBinLabel: showBinLabel(spec),
       binPass,
       presentation: false,
       fontRevision,
       showLegend: false,
     }),
-    [theme, spec.palette, binNames, binPass, spec.binCategory, fontRevision]
+    [theme, spec.palette, binNames, binPass, spec.binCategory, spec.showHardBinLabel, spec.showSoftBinLabel, fontRevision]
   );
 
 

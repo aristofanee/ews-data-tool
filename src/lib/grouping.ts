@@ -38,10 +38,10 @@ export function dataGroups(
   if (kind === "none") {
     return [{ key: "all", label: meanLabel, wafer: null, filter }];
   }
-  if (kind === "wafer") {
+  if (kind === "wafer" || kind === "waferNumber") {
     return candidates.map(({ w, index }) => ({
       key: `w${index}`,
-      label: `${info.lots[w.lot] ?? `Lot ${w.lot}`} / ${w.name}`,
+      label: `${info.lots[w.lot] ?? `Lot ${w.lot}`} / ${kind === "waferNumber" ? w.number ?? "Unassigned" : w.name}`,
       wafer: index,
       filter,
     }));

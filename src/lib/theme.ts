@@ -1,3 +1,4 @@
+import type { PlotSpec } from "../types";
 export type Theme = "light" | "dark";
 
 export function binYieldText(value: number, dice: { hbin: number }[], decimals = 2, unknown = 0): string {
@@ -175,11 +176,16 @@ export function binColor(code: number, _pass = code === 1): string {
   return FAILURE_COLORS[Math.abs(code) % FAILURE_COLORS.length];
 }
 
-export function binLabel(category: "hard" | "soft", code: number, description?: string, prefix = true): string {
+/** Separate preferences preserve the user's choice when switching bin type. */
+export function showBinLabel(spec: Pick<PlotSpec, "binCategory" | "showHardBinLabel" | "showSoftBinLabel">): boolean {
+  return spec.binCategory === "soft" ? spec.showSoftBinLabel ?? true : spec.showHardBinLabel ?? false;
+}
+
+export function binLabel(category: "hard" | "soft", code: number, description?: string, prefix = true, showLabel = category === "soft"): string {
   if (code === 0xffff && description === "Others") return "Others";
   if (code === 0xffff) return prefix ? `${category === "soft" ? "SBIN" : "HBIN"} unknown` : "Unknown";
   const label = prefix ? `${category === "soft" ? "SBIN" : "HBIN"} ${code}` : String(code);
-  if (category === "hard") return label;
+  if (!showLabel) return label;
   const text = description?.trim();
   if (!text || /^(?:[HS]?BIN)\s*\d+$/i.test(text)) return label;
   return `${label} · ${text}`;

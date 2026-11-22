@@ -15,7 +15,7 @@ import { categoryName, statisticsFooter, type ExportPlotStyle } from "./imageExp
 import type { Filter } from "../types";
 import { graphFontOffset } from "../lib/demoFonts";
 import type { Theme } from "../lib/theme";
-import { binColor, binLabel, PALETTES } from "../lib/theme";
+import { binColor, binLabel, showBinLabel, PALETTES } from "../lib/theme";
 import { SCATTER_COLOR_LEGEND_WIDTH, type WaferColorLegend } from "./waferLegend";
 import {
   baseLayout,
@@ -62,6 +62,12 @@ function previewFigure(data: any[], layout: any, preview: boolean, xTitle: strin
   if (!preview) return { data, layout };
   const compact = (text: string, max = 36) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
   layout.margin = { l: 62, r: layout.yaxis2 ? 54 : 24, t: 22, b: 62 };
+  for (const annotation of layout.annotations ?? []) {
+    if (annotation.yref === "paper" && annotation.y === 1 && annotation.yanchor === "bottom") {
+      const size = annotation.font?.size ?? layout.font?.size ?? 18;
+      layout.margin.t = Math.max(layout.margin.t, Math.ceil(size * 1.3 + (annotation.yshift ?? 0) + 8));
+    }
+  }
   layout.showlegend = false;
   layout.font = { ...layout.font, size: 13 + graphFontOffset() };
   for (const [key, title] of [["xaxis", xTitle], ["yaxis", yTitle], ["yaxis2", "Yield [%]"]]) {
@@ -239,11 +245,13 @@ export function limitLinesX(
   t: ChartTheme,
   lsl: number | null,
   usl: number | null,
-  style: ChartStyle = chartStyle(false)
+  style: ChartStyle = chartStyle(false),
+  logX = false,
 ): LimitLines {
   const shapes: any[] = [];
   const annotations: any[] = [];
   const add = (v: number, label: string, side: "left" | "right") => {
+    if (logX && v <= 0) return;
     shapes.push({
       name: "ews-spec-limit",
       type: "line",
@@ -258,7 +266,7 @@ export function limitLinesX(
     });
     annotations.push({
       xref: "x",
-      x: v,
+      x: logX ? Math.log10(v) : v,
       xanchor: side,
       xshift: side === "left" ? Math.round(style.annotation * 0.5) : -Math.round(style.annotation * 0.5),
       yref: "paper",
@@ -289,7 +297,7 @@ function applyAxisRange(
   if (spec.limitMode === "auto") return;
   const range = limitRange(spec, stats, lsl, usl, fallbackLo, fallbackHi);
   if (!range) return;
-  if (spec.logY && axis === "y") {
+  if (layout[`${axis}axis`].type === "log") {
     if (range[0] <= 0 || range[1] <= 0) return;
     // Plotly's log-axis range is expressed in log10 units, not data units.
     layout[`${axis}axis`].range = [Math.log10(range[0]), Math.log10(range[1])];
@@ -311,7 +319,7 @@ function addGroupBlocks(t: ChartTheme, groups: { groupLabel: string }[], spec: P
   let start = 0;
   for (const label of groupLabels) {
     const length = groups.filter((g) => g.groupLabel === label).length;
-    const heading = spec.groupBy === "wafer" ? shortTick(label) : label;
+    const heading = ["wafer", "waferNumber"].includes(spec.groupBy) ? shortTick(label) : label;
     const textangle = dense && heading.length > 3 ? (groupLabels.length > 20 ? -75 : -55) : 0;
     hasRotatedHeading ||= textangle !== 0;
     annotations.push({ xref: "x", x: start + (length - 1) / 2,
@@ -482,7 +490,7 @@ function figureBoxCore(data: BoxResponse, opts: FigureOpts): Figure {
     const headingSpace = addGroupBlocks(t, groups, spec, style, limits.shapes, limits.annotations);
     if (!preview) layout.margin.t += headingSpace;
   }
-  else if (!preview && spec.xAxis === "wafer" && addLabelBlocks(t, xLabels, limits.shapes, limits.annotations, style)) {
+  else if (!preview && ["wafer", "waferNumber"].includes(spec.xAxis) && addLabelBlocks(t, xLabels, limits.shapes, limits.annotations, style)) {
     layout.margin.t += Math.round(style.annotation * 1.2);
   }
   layout.xaxis = {
@@ -604,7 +612,7 @@ function figureParetoCore(data: ParetoResponse, opts: FigureOpts): Figure {
     for (const s of data.series) {
       traces.push({
         type: "bar",
-        name: binLabel(spec.binCategory, s.code, s.name, false),
+        name: binLabel(spec.binCategory, s.code, s.name, false, showBinLabel(spec)),
         x: labels,
         y: s.pcts,
         customdata: s.counts,
@@ -613,7 +621,7 @@ function figureParetoCore(data: ParetoResponse, opts: FigureOpts): Figure {
           line: { width: 0 },
         },
         hovertemplate:
-          `<b>${binLabel(spec.binCategory, s.code, s.name)}</b><br>%{y:.2f}% of tested dice · %{customdata} dice<extra></extra>`,
+          `<b>${binLabel(spec.binCategory, s.code, s.name, true, showBinLabel(spec))}</b><br>%{y:.2f}% of tested dice · %{customdata} dice<extra></extra>`,
       });
     }
     traces.push({
@@ -726,7 +734,7 @@ function figureParetoCore(data: ParetoResponse, opts: FigureOpts): Figure {
   }
 
   const bars = data.bars;
-  const labels = bars.map((b) => binLabel(spec.binCategory, b.code, b.name, false));
+  const labels = bars.map((b) => binLabel(spec.binCategory, b.code, b.name, false, showBinLabel(spec)));
   const pcts = bars.map((b) => b.pct);
   const angle = labels.some((l) => l.length > 8) ? -38 : 0;
   traces.push({
@@ -1282,6 +1290,7 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
     showticklabels: !preview,
     showgrid: true,
     zeroline: false,
+    type: spec.logX ? "log" : "linear",
   };
   layout.yaxis = {
     ...layout.yaxis,
@@ -1305,7 +1314,7 @@ function figureScatterCore(data: ScatterResponse, opts: FigureOpts): Figure {
     const y = statistics.summary;
     if (x?.n) applyAxisRange(layout, "x", { ...xLimits, logY: false }, x, xLsl, xUsl, x.min, x.max);
     if (y.n) applyAxisRange(layout, "y", { ...yLimits, logY: spec.logY }, y, yLsl, yUsl, y.min, y.max);
-    const xLines = xLimits.showLimits ? limitLinesX(t, xLsl, xUsl, style) : null;
+    const xLines = xLimits.showLimits ? limitLinesX(t, xLsl, xUsl, style, spec.logX) : null;
     const yLines = yLimits.showLimits ? limitLines(t, yLsl, yUsl, "y", style, spec.logY) : null;
     if (xLines || yLines) {
       layout.shapes = [...(xLines?.shapes ?? []), ...(yLines?.shapes ?? [])];
@@ -1387,7 +1396,7 @@ export function figureTrend(data: TrendResponse, opts: FigureOpts): Figure {
     opts.facetLabel, opts.preview ? undefined : statisticsFooter({ n: values.length, mean: average, sd: stdDev(values, average) }));
 }
 export function figurePareto(data: ParetoResponse, opts: FigureOpts): Figure {
-  return exportStyle(figureParetoCore(data,opts),opts,null,categoryName(opts.spec.xAxis),data.total);
+  return exportStyle(figureParetoCore(data,opts),opts,null,data.mode === "global" || opts.facetKey !== undefined ? "" : categoryName(opts.spec.xAxis),data.total);
 }
 export function figureScatter(data: ScatterResponse, opts: FigureOpts): Figure {
   const label = opts.facetKey === undefined ? opts.facetLabel : data.series.find(s=>s.key===opts.facetKey)?.name;

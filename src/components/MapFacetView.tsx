@@ -6,7 +6,7 @@ import type { Filter, MapResponse, PlotSpec, PlotSelection } from "../types";
 import { emptyFilter } from "../types";
 import * as api from "../lib/api";
 import { useStore } from "../store";
-import type { Theme } from "../lib/theme";
+import { showBinLabel, type Theme } from "../lib/theme";
 import {
   mapColorLimits,
   renderMapImage,
@@ -72,10 +72,10 @@ export function MapFacetView({ spec, filter, onReady, onSelection }: Props) {
     (async () => {
       try {
         const out: Entry[] = [];
-        const unfilteredGroups = info && spec.groupBy !== "wafer"
+        const unfilteredGroups = info && !["wafer", "waferNumber"].includes(spec.groupBy)
           ? new Map(dataGroups(info, emptyFilter(), spec.groupBy).map(group => [group.key, group.filter]))
           : undefined;
-        const batch = spec.groupBy === "wafer" ? await api.waferMaps({
+        const batch = ["wafer", "waferNumber"].includes(spec.groupBy) ? await api.waferMaps({
           wafer: null, test: spec.test, mode: "value", filter, ...limitOverrides(spec),
         }) : null;
         for (const group of groups) {
@@ -164,7 +164,7 @@ export function MapFacetView({ spec, filter, onReady, onSelection }: Props) {
         const limits=mapColorLimits(sp,md);
         const opts:MapOptions={exportSpec:sp,exportGroupLabel:label,theme,palette:sp.palette,mode:"value",
           lsl:effectiveLimit(sp, "lsl", md.lsl),usl:effectiveLimit(sp, "usl", md.usl),showSpecTicks:sp.showLimits,
-          binNames,binCategory:sp.binCategory,binPass,...limits,presentation:false};
+          binNames,binCategory:sp.binCategory,showBinLabel:showBinLabel(sp),binPass,...limits,presentation:false};
         const group=exportGroups.find(g=>g.label===label);
         const footer=await mapExportFooter(md,opts,group?.filter??exportFilter);
         return renderMapImage(md,{...opts,exportFooter:footer},IMAGE_WIDTH,imageHeight("map"),`${sp.title} · ${label}`,subtitle,format);
@@ -201,7 +201,7 @@ export function MapFacetView({ spec, filter, onReady, onSelection }: Props) {
   }
 
   return <MapGallery entries={entries.map(({ md, label }) => ({ md, label,
-    lot: !md.isMean ? md.lotName : spec.groupBy === "lot" ? label : "Grouped maps" }))}
+    lot: ["wafer", "waferNumber"].includes(spec.groupBy) ? md.lotName : "" }))}
     spec={spec} mode="value" onOpen={setSelected} />;
 }
 import { describeFilters } from "../lib/customFilters";

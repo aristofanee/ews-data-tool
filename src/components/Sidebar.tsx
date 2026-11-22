@@ -4,7 +4,7 @@ import type { CustomColumn, DatasetInfo, Filter } from "../types";
 import * as api from "../lib/api";
 import { binColor } from "../lib/theme";
 import { fmtInt, statisticalRangeLabels, tidyName } from "../lib/format";
-import { fuzzyMatch } from "../lib/search";
+import { matchesSearch } from "../lib/search";
 import { naturalCompare } from "../lib/stats";
 import { CustomFiltersPanel } from "./CustomFiltersPanel";
 import {
@@ -193,6 +193,7 @@ function FilterPanel() {
 
 interface ColumnDraft {
   name: string;
+  originalName: string | null;
   editing: boolean;
   label: string;
   selected: number[];
@@ -235,6 +236,7 @@ function CustomColumnsPanel() {
   const setError = useStore((s) => s.setError);
   const notify = useStore((s) => s.notify);
   const [draft, setDraft] = useState<ColumnDraft | null>(null);
+  const [saving, setSaving] = useState(false);
   const toggleWafer = useCallback((wi: number) => {
     setDraft(current => current ? {
       ...current,
@@ -249,6 +251,7 @@ function CustomColumnsPanel() {
   const openNew = () => {
     setDraft({
       name: "",
+      originalName: null,
       editing: false,
       label: "",
       selected: filters.wafers.length ? [...filters.wafers] : [],
@@ -264,11 +267,11 @@ function CustomColumnsPanel() {
     col.waferValues.forEach((code, i) => {
       pending[i] = code ? col.categories[code] ?? "" : "";
     });
-    setDraft({ name: col.name, editing: true, label: "", selected, pending });
+    setDraft({ name: col.name, originalName: col.name, editing: true, label: "", selected, pending });
   };
 
   const currentColumn = draft
-    ? info.customColumns.find((c) => c.name === draft.name) ?? null
+    ? info.customColumns.find((c) => c.name === draft.originalName) ?? null
     : null;
 
   const labelFor = (wi: number) => {
@@ -300,8 +303,10 @@ function CustomColumnsPanel() {
 
   const name = draft?.name.trim() ?? "";
   const label = draft?.label.trim() ?? "";
-  const canSave = draft !== null && name !== "" &&
-    !["lot", "wafer", "hbin", "sbin", "site", "__wafer"].includes(name.toLowerCase()) &&
+  const canSave = !saving && draft !== null && name !== "" &&
+    !["lot", "wafer", "ocr", "wafernumber", "hbin", "sbin", "site", "__wafer"].includes(name.toLowerCase()) &&
+    !info.customColumns.some(column => column.name === name && column.name !== draft.originalName) &&
+    !info.dataCategories?.some(column => column.id === name) &&
     ((label !== "" && draft.selected.length > 0) ||
       Object.values(draft.pending).some((value) => draft.editing || value.trim() !== ""));
 
@@ -318,10 +323,12 @@ function CustomColumnsPanel() {
       label,
     }));
     try {
+      setSaving(true);
       const before = useStore.getState();
       const title = before.spec.title;
-      const updated = await api.addCustomColumn(name, assignments);
-      before.setInfo(updated, { keepFilters: true });
+      const updated = await api.addCustomColumn(name, assignments, draft.originalName);
+      before.setInfo(updated, { keepFilters: true,
+        renamedColumn: draft.originalName ? { from: draft.originalName, to: name } : undefined });
       useStore.getState().patchSpec({ title });
       const assigned = assignments.filter((a) => a.label.trim()).length;
       notify(
@@ -332,6 +339,8 @@ function CustomColumnsPanel() {
       setDraft(null);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -403,7 +412,7 @@ function CustomColumnsPanel() {
                 <input
                   className="input"
                   value={draft.name}
-                  disabled={draft.editing}
+                  disabled={saving}
                   autoFocus={!draft.editing}
                   placeholder="e.g. Split"
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
@@ -418,6 +427,7 @@ function CustomColumnsPanel() {
                     autoFocus={draft.editing}
                     placeholder="e.g. Split A"
                     list="custom-label-options"
+                    title="Type a label or choose a previously used label"
                     onChange={(e) => setDraft({ ...draft, label: e.target.value })}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
@@ -464,7 +474,7 @@ function CustomColumnsPanel() {
                 Cancel
               </button>
               <button className="btn primary" onClick={() => void apply()} disabled={!canSave}>
-                {draft.editing ? "Save labels" : "Create column"}
+                {saving ? "Saving…" : draft.editing ? "Save changes" : "Create column"}
               </button>
             </div>
           </div>
@@ -483,14 +493,10 @@ function TestList() {
 
   const rows = useMemo(() => {
     if (!info) return [];
-    const needle = q.trim().toLowerCase();
-    const tokens = needle.split(/\s+/).filter(Boolean);
     return info.tests
       .map((t, i) => ({ t, i }))
       .filter(({ t }) => {
-        if (!tokens.length) return true;
-        const hay = `${tidyName(t.name)} ${t.units}`.toLowerCase();
-        return tokens.every((token) => fuzzyMatch(hay, token));
+        return matchesSearch(`${tidyName(t.name)} ${t.units}`, q);
       });
   }, [info, q]);
 

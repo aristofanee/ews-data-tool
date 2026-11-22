@@ -5,6 +5,49 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
+pub(crate) const RUN_METADATA_NAMES: [&str; 11] = [
+    "Job Name", "Job Revision", "Tester Name", "Tester Type", "Tester Serial Number",
+    "Flow ID", "Probecard ID", "Product", "Temperature", "Date", "Time",
+];
+
+#[derive(Default)]
+struct RunMetadata {
+    fields: Vec<(usize, u32)>,
+    job_time: Vec<(usize, u32)>,
+    wafer_times: HashMap<(u8, u8), Vec<(usize, u32)>>,
+    head_times: HashMap<u8, Vec<(usize, u32)>>,
+    sites: HashMap<(u8, u8), (u8, Option<(usize, u32)>)>,
+}
+
+fn timestamp_fields(out: &mut Imported, timestamp: u32) -> Vec<(usize, u32)> {
+    if timestamp == 0 { return Vec::new(); }
+    // Use UTC so importing the same file on different PCs gives identical labels.
+    let Some(time) = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp as i64, 0) else { return Vec::new(); };
+    vec![
+        out.text_code("Date", &time.format("%Y-%m-%d").to_string()),
+        out.text_code("Time", &time.format("%H:%M:%S").to_string()),
+    ]
+}
+
+impl RunMetadata {
+    fn write_row(&self, out: &mut Imported, row: usize, site: (u8, u8)) {
+        let equipment = self.sites.get(&site);
+        let wafer_time = if let Some((group, _)) = equipment {
+            self.wafer_times.get(&(site.0, *group))
+                .or_else(|| self.wafer_times.get(&(site.0, 255)))
+        } else {
+            self.head_times.get(&site.0)
+        };
+        let time = wafer_time.filter(|fields| !fields.is_empty()).unwrap_or(&self.job_time);
+        let card = equipment.and_then(|(_, card)| card.as_ref());
+        for &(column, code) in self.fields.iter().chain(time).chain(card) {
+            let codes = &mut out.text_cols[column].codes;
+            codes.resize(row + 1, 0);
+            codes[row] = code;
+        }
+    }
+}
+
 struct Cur<'a> {
     b: &'a [u8],
     p: usize,
@@ -438,6 +481,7 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
     };
 
     let mut out = Imported::new();
+    let mut run_metadata = RunMetadata::default();
     let mut test_times = Vec::new();
     let mut numeric_part_ids = Vec::new();
     let mut off = 0usize;
@@ -481,9 +525,9 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
             // MIR - master information record
             (1, 10) => {
                 let mut c = Cur::new(body, be);
-                // SETUP_T, START_T, STAT_NUM, MODE_COD, RTST_COD, PROT_COD,
-                // BURN_TIM, CMOD_COD = 15 bytes before LOT_ID.
-                c.take(15);
+                c.take(4); // SETUP_T
+                let start = c.u32(); // START_T
+                c.take(7); // Station, mode, retest, protection, burn-in and command.
                 let lot = c.cn();
                 let lot = if lot.is_empty() {
                     "LOT".to_string()
@@ -497,11 +541,53 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 // a following lot that has no WCR of its own.
                 cur_geom = WaferGeom::default();
                 active_rows.clear();
+                run_metadata = RunMetadata::default();
+                for index in 1..=29 {
+                    let name = match index {
+                        1 => Some("Product"),
+                        2 => Some("Tester Name"),
+                        3 => Some("Tester Type"),
+                        4 => Some("Job Name"),
+                        5 => Some("Job Revision"),
+                        11 => Some("Temperature"),
+                        23 => Some("Flow ID"),
+                        28 => Some("Tester Serial Number"),
+                        _ => None,
+                    };
+                    if let Some(name) = name {
+                        let value = c.cn();
+                        if !value.is_empty() { run_metadata.fields.push(out.text_code(name, &value)); }
+                    } else {
+                        c.skip_cn();
+                    }
+                }
+                run_metadata.job_time = timestamp_fields(&mut out, start);
+            }
+            // SDR - equipment configuration for the listed head/site group.
+            (1, 80) => {
+                let mut c = Cur::new(body, be);
+                if c.remaining() < 3 { return Err("Truncated SDR site description".into()); }
+                let head = c.u8();
+                let group = c.u8();
+                let count = c.u8() as usize;
+                if c.remaining() < count { return Err("Truncated SDR site list".into()); }
+                let sites = c.take(count).to_vec();
+                c.skip_cn(); // HAND_TYP
+                c.skip_cn(); // HAND_ID
+                c.skip_cn(); // CARD_TYP
+                let card = c.cn();
+                let code = (!card.is_empty()).then(|| out.text_code("Probecard ID", &card));
+                for site in sites { run_metadata.sites.insert((head, site), (group, code)); }
             }
             // WIR - wafer information record
             (2, 10) => {
                 let mut c = Cur::new(body, be);
-                c.take(6);
+                let head = c.u8();
+                let group = c.u8();
+                let start = c.u32();
+                let time = timestamp_fields(&mut out, start);
+                run_metadata.wafer_times.insert((head, group), time.clone());
+                run_metadata.head_times.insert(head, time);
                 let name = c.cn();
                 let name = if name.is_empty() {
                     format!("W{}", out.wafers.len() + 1)
@@ -509,6 +595,7 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                     name
                 };
                 cur_wafer = out.wafer_index(cur_lot, &name);
+                out.wafer_numbers[cur_wafer as usize] = wafer_number_from_ocr(&name);
                 have_wafer = true;
                 if (cur_wafer as usize) < out.wafer_geom.len() {
                     out.wafer_geom[cur_wafer as usize] = cur_geom;
@@ -521,6 +608,7 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 let name = c.cn();
                 if !have_wafer && !name.is_empty() {
                     cur_wafer = out.wafer_index(cur_lot, &name);
+                    out.wafer_numbers[cur_wafer as usize] = wafer_number_from_ocr(&name);
                     have_wafer = true;
                     if (cur_wafer as usize) < out.wafer_geom.len() {
                         out.wafer_geom[cur_wafer as usize] = cur_geom;
@@ -604,6 +692,7 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                 }
                 let r = out.new_row(cur_lot, cur_wafer);
                 out.site[r] = Some(site.1);
+                run_metadata.write_row(&mut out, r, site);
                 active_rows.insert(site, r);
             }
             // PRR - part results record
@@ -621,7 +710,9 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
                             cur_wafer = out.wafer_index(cur_lot, "W1");
                             have_wafer = true;
                         }
-                        out.new_row(cur_lot, cur_wafer)
+                        let row = out.new_row(cur_lot, cur_wafer);
+                        run_metadata.write_row(&mut out, row, site);
+                        row
                     }
                 };
                 c.take(3);
@@ -1044,7 +1135,17 @@ fn parse_stdf_bytes(d: &[u8], progress: &mut dyn FnMut(f32, &str)) -> Result<Imp
 }
 
 pub(crate) const TEST_TIME_NAME: &str = "Test time";
-pub(crate) const PART_ID_TEST_NAME: &str = "Part ID (numeric)";
+/// Fab OCR convention: <lot>-<two-digit wafer><letter><digit>.
+/// Do not guess from filenames, arrival order or nonstandard OCRs.
+fn wafer_number_from_ocr(ocr: &str) -> Option<String> {
+    let (lot, suffix) = ocr.rsplit_once('-')?;
+    let bytes = suffix.as_bytes();
+    if lot.is_empty() || bytes.len() != 4 || !bytes[0..2].iter().all(u8::is_ascii_digit)
+        || !bytes[2].is_ascii_alphabetic() || !bytes[3].is_ascii_digit() { return None; }
+    Some(suffix[..2].to_string())
+}
+
+pub(crate) const PART_ID_TEST_NAME: &str = "PartID";
 
 pub(crate) fn prioritize_derived_tests(ds: &mut crate::model::Dataset) {
     let mut start = 0;
@@ -1091,6 +1192,98 @@ fn limits_differ(a: Option<f32>, b: Option<f32>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn run_metadata_retains_all_fields_and_site_context_through_csv() {
+        use crate::model::{Dataset, Filter};
+        for be in [false, true] {
+            let record = |typ: u8, sub: u8, body: &[u8]| {
+                let mut bytes = if be { (body.len() as u16).to_be_bytes() } else { (body.len() as u16).to_le_bytes() }.to_vec();
+                bytes.extend([typ, sub]);
+                bytes.extend_from_slice(body);
+                bytes
+            };
+            let integer = |value: u32| if be { value.to_be_bytes() } else { value.to_le_bytes() };
+            let short = |value: u16| if be { value.to_be_bytes() } else { value.to_le_bytes() };
+            let sdr = |head: u8, group: u8, site: u8, card: &str| {
+                let mut body = vec![head, group, 1, site];
+                for value in ["Prober model", "Prober-1", "Card model", card] { body.extend(cn(value)); }
+                record(1, 80, &body)
+            };
+            let wir = |head: u8, group: u8, start: u32, wafer: &str| {
+                let mut body = vec![head, group];
+                body.extend(integer(start));
+                body.extend(cn(wafer));
+                record(2, 10, &body)
+            };
+            let prr = |head: u8, site: u8, x: u16| {
+                let mut body = vec![head, site, 0];
+                for value in [0, 1, 1, x, 0] { body.extend(short(value)); }
+                record(5, 20, &body)
+            };
+            let mut bytes = record(0, 10, &[if be { 1 } else { 2 }, 4]);
+            let mut mir = vec![0; 15];
+            mir[4..8].copy_from_slice(&integer(1_704_067_200)); // 2024-01-01 UTC
+            let mut fields = vec![""; 30];
+            for (i, value) in [(0, "L1"), (1, "000450"), (2, "ATE-A"), (3, "Tester-model"),
+                (4, "Program-A"), (5, "001"), (11, "25"), (23, "Flow-A"), (28, "000123")] { fields[i] = value; }
+            for value in fields { mir.extend(cn(value)); }
+            bytes.extend(record(1, 10, &mir));
+            bytes.extend(sdr(1, 1, 0, "PC-01"));
+            bytes.extend(sdr(1, 2, 1, "PC-02"));
+            bytes.extend(sdr(2, 1, 0, "PC-03"));
+            bytes.extend(wir(1, 1, 1_704_157_200, "W1"));
+            bytes.extend(wir(1, 2, 1_704_160_800, "W1"));
+            bytes.extend(wir(2, 1, 1_704_164_400, "W1"));
+            for site in [[1, 0], [1, 1], [2, 0]] { bytes.extend(record(5, 10, &site)); }
+            bytes.extend(prr(2, 0, 3));
+            bytes.extend(prr(1, 1, 2));
+            bytes.extend(prr(1, 0, 1));
+            bytes.extend(wir(1, 1, 0, "W2"));
+            // PRR without PIR also needs the current metadata.
+            bytes.extend(prr(1, 0, 4));
+            let mut empty_mir = vec![0; 15];
+            empty_mir.extend(cn("L2"));
+            bytes.extend(record(1, 10, &empty_mir));
+            bytes.extend(wir(1, 255, 0, "W3"));
+            bytes.extend(record(5, 10, &[1, 0]));
+            bytes.extend(prr(1, 0, 5));
+
+            let mut ds = Dataset::new();
+            ds.merge(import_stdf_bytes(&bytes, "metadata-fixture", &mut |_, _| {}).unwrap());
+            ds.detect_numeric_labels();
+            ds.detect_data_categories();
+            assert_eq!(ds.rows, 5);
+            let value = |ds: &Dataset, name: &str, row: usize| {
+                let column = ds.text_cols.iter().find(|c| c.name == name).unwrap();
+                column.values[column.codes[row] as usize].clone()
+            };
+            for (name, expected) in [("Product", "000450"), ("Tester Name", "ATE-A"), ("Tester Type", "Tester-model"),
+                ("Job Name", "Program-A"), ("Job Revision", "001"), ("Temperature", "25"),
+                ("Flow ID", "Flow-A"), ("Tester Serial Number", "000123")] {
+                for row in 0..4 { assert_eq!(value(&ds, name, row), expected); }
+            }
+            for (row, card, time) in [(0, "PC-01", "01:00:00"), (1, "PC-02", "02:00:00"), (2, "PC-03", "03:00:00")] {
+                assert_eq!(value(&ds, "Probecard ID", row), card);
+                assert_eq!(value(&ds, "Date", row), "2024-01-02");
+                assert_eq!(value(&ds, "Time", row), time);
+            }
+            assert_eq!(value(&ds, "Date", 3), "2024-01-01");
+            assert_eq!(value(&ds, "Time", 3), "00:00:00");
+            for name in RUN_METADATA_NAMES { assert_eq!(value(&ds, name, 4), "", "new MIR must clear {name}"); }
+            assert!(ds.custom_column("Job Revision").is_some());
+            let output = std::env::temp_dir().join(format!("ews-stdf-context-{}-{be}.csv", std::process::id()));
+            crate::commands::write_csv(&ds, output.to_str().unwrap(), &Filter::default()).unwrap();
+            let mut loaded = Dataset::new();
+            loaded.merge(crate::csv_io::import_csv(&output, &mut |_, _| {}).unwrap());
+            std::fs::remove_file(output).unwrap();
+            assert_eq!(loaded.rows, ds.rows);
+            assert_eq!(loaded.tests.len(), ds.tests.len());
+            for name in RUN_METADATA_NAMES {
+                for row in 0..ds.rows { assert_eq!(value(&loaded, name, row), value(&ds, name, row)); }
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1243,6 +1436,27 @@ mod tests {
         b.extend_from_slice(&x.to_le_bytes());
         b.extend_from_slice(&y.to_le_bytes());
         b
+    }
+
+    #[test]
+    fn wafer_numbers_are_taken_only_from_standard_ocr_suffixes() {
+        for (ocr, expected) in [("L24-0417-03A4",Some("03")),("LOT-25z9",Some("25")),
+            ("LOT-03",None),("LOT-3A4",None),("LOT-003A4",None),("LOT-03A44",None),
+            ("LOT-03AA",None),("LOT-XXA4",None),("-03A4",None),("LOT-03Å4",None),("OCR",None)] {
+            assert_eq!(wafer_number_from_ocr(ocr).as_deref(),expected,"{ocr}");
+            if !ocr.is_ascii() { continue; }
+            let mut bytes = rec(0,10,&[2,4]);
+            let mut wir = vec![1,255]; wir.extend(0u32.to_le_bytes()); wir.extend(cn(ocr));
+            bytes.extend(rec(2,10,&wir)); bytes.extend(rec(5,10,&[1,0])); bytes.extend(rec(5,20,&prr_body(0,0)));
+            let mut ds = crate::model::Dataset::new(); ds.merge(parse_stdf_bytes(&bytes,&mut |_,_|{}).unwrap());
+            assert_eq!(ds.wafers[0].name,ocr);
+            assert_eq!(ds.wafers[0].number.as_deref(),expected);
+        }
+        let mut bytes = rec(0,10,&[2,4]);
+        let mut wrr = vec![0;26]; wrr.extend(cn("L24-0417-07B2"));
+        bytes.extend(rec(2,20,&wrr)); bytes.extend(rec(5,20,&prr_body(0,0)));
+        let imported = parse_stdf_bytes(&bytes,&mut |_,_|{}).unwrap();
+        assert_eq!(imported.wafer_numbers[0].as_deref(),Some("07"));
     }
 
     #[test]

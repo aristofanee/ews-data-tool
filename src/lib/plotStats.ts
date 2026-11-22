@@ -3,7 +3,7 @@ import type { PlotData } from "./usePlotData";
 import { categoryName } from "./categoryNames";
 import { fmt, fmtInt } from "./format";
 import { effectiveLimit, populationCapability, valueMapSummary } from "./stats";
-import { binLabel } from "./theme";
+import { binLabel, showBinLabel } from "./theme";
 
 export interface Stat {
   k: string;
@@ -14,6 +14,7 @@ export interface Stat {
 
 function categoryLabel(value: string): string {
   if (value === "site") return "Site";
+  if (value === "waferNumber") return "Wafer";
   if (value === "wafer") return "Wafer ID (OCR)";
   if (value === "lot") return "Lot";
   if (value === "hbin") return "HBIN";
@@ -123,7 +124,7 @@ export function statsFor(data: PlotData, spec: PlotSpec, facet?: PlotSelection, 
           tone: "good",
         },
       ];
-      if (top) out.push({ k: "Top bin", v: `${binLabel(spec.binCategory, top.code, top.name, false)} · ${top.pct.toFixed(1)}%` });
+      if (top) out.push({ k: "Top bin", v: `${binLabel(spec.binCategory, top.code, top.name, false, showBinLabel(spec))} · ${top.pct.toFixed(1)}%` });
       if (d.mode === "grouped") out.push({ k: "Groups", v: fmtInt(d.groups.length) });
       if (!facet && d.excluded > 0) out.push({ k: "Filtered", v: fmtInt(d.excluded), tone: "warn" });
       if (!facet && spec.groupBy !== "none") {

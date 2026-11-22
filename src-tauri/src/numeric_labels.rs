@@ -145,10 +145,11 @@ impl Dataset {
             let base = test.name.split_whitespace().collect::<Vec<_>>().join(" ");
             if names.contains(&base) { continue; } // Preserve explicit/manual labels.
             let mut name = if base.is_empty() || base_counts.get(&base).copied().unwrap_or(0) > 1 { test.display_name() } else { base };
-            if headers.contains(&name) || matches!(name.to_lowercase().as_str(), "lot" | "wafer" | "site" | "hbin" | "sbin" | "__wafer") { name.push_str(" label"); }
+            let source_header = test.display_with_units();
+            if (headers.contains(&name) && name != source_header) || matches!(name.to_lowercase().as_str(), "lot" | "wafer" | "ocr" | "wafernumber" | "site" | "hbin" | "sbin" | "__wafer") { name.push_str(" label"); }
             let preferred = name.clone();
             let mut suffix = 2;
-            while names.contains(&name) || headers.contains(&name) { name = format!("{preferred} {suffix}"); suffix += 1; }
+            while names.contains(&name) || (headers.contains(&name) && name != source_header) { name = format!("{preferred} {suffix}"); suffix += 1; }
             let mut distinct: Vec<f32> = values.into_iter().map(f32::from_bits).collect();
             distinct.sort_by(f32::total_cmp);
             let codes: HashMap<_, _> = distinct.iter().enumerate().map(|(i, &v)| (bits(v), (i + 1) as u16)).collect();

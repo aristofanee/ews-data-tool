@@ -26,7 +26,7 @@ export const PLOT_LABELS: Record<PlotType, string> = {
 };
 
 const PLOT_TYPES: PlotType[] = ["box", "map", "hist", "scatter", "trend", "binmap", "pareto"];
-const BUILTIN_CATEGORIES = ["lot", "wafer", "hbin", "sbin", "site"];
+const BUILTIN_CATEGORIES = ["lot", "wafer", "waferNumber", "hbin", "sbin", "site"];
 
 function defaultSpecs(): Record<PlotType, PlotSpec> {
   return Object.fromEntries(
@@ -57,6 +57,7 @@ function hasCategory(info: DatasetInfo | null, value: string): boolean {
 
 /** Pareto splits include the per-die site category as well as wafer labels. */
 function isParetoCategory(info: DatasetInfo | null, value: string): boolean {
+  if (value === "waferNumber") return !!info?.wafers.some(w => w.number != null);
   if (value === "lot" || value === "wafer" || value === "site") return true;
   if (!info) return true;
   return info.customColumns.some((c) => c.name === value) || !!info.dataCategories?.some(c=>c.id===value);
@@ -76,7 +77,7 @@ function sanitizeSpec(spec: PlotSpec, info: DatasetInfo | null): PlotSpec {
     if (next.groupBy !== "none") {
       const valid =
         next.type === "map"
-          ? next.groupBy === "lot" || next.groupBy === "wafer" || !!info?.customColumns.some((c) => c.name === next.groupBy) || !!info?.dataCategories?.some(c=>c.id===next.groupBy)
+          ? next.groupBy === "lot" || next.groupBy === "wafer" || next.groupBy === "waferNumber" || !!info?.customColumns.some((c) => c.name === next.groupBy) || !!info?.dataCategories?.some(c=>c.id===next.groupBy)
           : hasCategory(info, next.groupBy);
       if (!valid) next.groupBy = "none";
     }
@@ -184,7 +185,11 @@ interface AppState {
   dataVersion: number;
   csvPrompt: CsvPrompt | null;
 
-  setInfo: (info: DatasetInfo | null, opts?: { keepFilters?: boolean; reset?: boolean }) => void;
+  setInfo: (info: DatasetInfo | null, opts?: {
+    keepFilters?: boolean;
+    reset?: boolean;
+    renamedColumn?: { from: string; to: string };
+  }) => void;
   setBusy: (busy: boolean, pct?: number, msg?: string) => void;
   setProgress: (pct: number, msg: string) => void;
   setError: (e: string | null) => void;
@@ -251,8 +256,46 @@ export const useStore = create<AppState>((set, get) => ({
         report: [], editingReportId:null, plotSelection:null, requestedPlotSelection:null, reportOpen: false, templateName: "", showInspector: true, csvPrompt: null });
       return;
     }
-    const prev = get();
+    let prev = get();
     const patch: Partial<AppState> = { info };
+    if (opts?.renamedColumn && opts.renamedColumn.from !== opts.renamedColumn.to) {
+      const { from, to } = opts.renamedColumn;
+      const renameSpec = (spec: PlotSpec): PlotSpec => ({
+        ...spec,
+        xAxis: spec.xAxis === from ? to : spec.xAxis,
+        groupBy: spec.groupBy === from ? to : spec.groupBy,
+      });
+      const renameFilter = (filter: Filter): Filter => ({
+        ...filter,
+        categories: Object.fromEntries(Object.entries(filter.categories ?? {}).map(([key, values]) =>
+          [key === from ? to : key, values])),
+        custom: filter.custom?.map(rule => rule.kind === "category" && rule.category === from
+          ? { ...rule, category: to } : rule),
+      });
+      const oldKey = encodeURIComponent(from), newKey = encodeURIComponent(to);
+      const report = prev.report.map(item => ({
+        ...item,
+        spec: renameSpec(item.spec),
+        filters: renameFilter(item.filters),
+        references: (item.references ?? captureReferences(item, prev.info)).map(reference => {
+          let field = reference.field;
+          if (field === `filterCategory:${oldKey}`) field = `filterCategory:${newKey}`;
+          if (field.startsWith(`categoryFilter:${oldKey}:`)) {
+            field = `categoryFilter:${newKey}:${field.slice(`categoryFilter:${oldKey}:`.length)}`;
+          }
+          const value = reference.kind === "category" && reference.value === from ? to
+            : typeof reference.value === "object" && "category" in reference.value && reference.value.category === from
+              ? { ...reference.value, category: to } : reference.value;
+          return { ...reference, field, value };
+        }),
+      }));
+      prev = { ...prev, spec: renameSpec(prev.spec),
+        specs: Object.fromEntries(Object.entries(prev.specs).map(([type, spec]) => [type, renameSpec(spec)])) as Record<PlotType, PlotSpec>,
+        filters: renameFilter(prev.filters), report };
+      patch.filters = prev.filters;
+      patch.report = report;
+      if (prev.plotSelection) patch.requestedPlotSelection = { label: prev.plotSelection.label, token: Date.now() };
+    }
     if (!opts?.keepFilters) patch.filters = emptyFilter();
     if (info) {
       let test = prev.spec.test;
@@ -379,7 +422,7 @@ export const useStore = create<AppState>((set, get) => ({
         .some(field => before[field] !== after[field]);
     });
     const rangeChanged = scatterRangeChanged || p.limitMode !== undefined ||
-      (["limitK", "yMin", "yMax", "lsl", "usl", "noLsl", "noUsl", "logY"] as const).some(key => spec[key] !== s.spec[key]);
+      (["limitK", "yMin", "yMax", "lsl", "usl", "noLsl", "noUsl", "logX", "logY"] as const).some(key => spec[key] !== s.spec[key]);
     set({
       spec,
       editingReportId: changedPlot ? null : s.editingReportId,

@@ -273,6 +273,7 @@ pub fn add_custom_column(
     state: State<'_, AppState>,
     name: String,
     assignments: Vec<ColumnAssignment>,
+    original_name: Option<String>,
 ) -> Result<DatasetInfo, String> {
     let mut guard = state.ds.lock().unwrap();
     let ds = guard.as_mut().ok_or("No dataset loaded")?;
@@ -280,7 +281,7 @@ pub fn add_custom_column(
         .into_iter()
         .map(|a| (a.wafer, a.label))
         .collect();
-    ds.set_custom_column(&name, &labels)?;
+    ds.update_custom_column(&name, &labels, original_name.as_deref())?;
     Ok(ds.info())
 }
 
@@ -419,7 +420,7 @@ pub async fn export_csv(
 }
 
 #[cfg(test)]
-fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String> {
+pub(crate) fn write_csv(ds: &Dataset, path: &str, filter: &Filter) -> Result<String, String> {
     write_csv_progress(ds, path, filter, &mut |_, _| {})
 }
 
@@ -427,56 +428,56 @@ fn write_csv_progress(ds: &Dataset, path: &str, filter: &Filter,
     progress: &mut dyn FnMut(f32, &str)) -> Result<String, String> {
     progress(1.0, "Preparing CSV…");
     let mask = ds.base_mask(filter);
-    // Derived numeric labels already have their complete source test in the CSV.
-    // Avoid duplicate columns; edited/manual labels remain independent exports.
-    let custom:Vec<_>=ds.custom_cols.iter().filter(|c|!ds.numeric_label_sources.contains_key(&c.name)&&!ds.text_label_sources.contains_key(&c.name)).collect();
+    // Plan columns once so headers, limit rows and data always use identical ordering.
+    #[derive(Clone, Copy)]
+    enum Column { Lot, Ocr, Wafer, X, Y, Hbin, Sbin, Site, Test(usize), Text(usize), Custom(usize) }
+    let mut columns = vec![("Lot".to_string(), Column::Lot), ("OCR".into(), Column::Ocr), ("Wafer".into(), Column::Wafer)];
+    let mut used: std::collections::HashSet<String> = ["Lot", "OCR", "Wafer", "X", "Y", "HBIN", "SBIN", "Site"]
+        .into_iter().map(String::from).chain(ds.tests.iter().map(|t| t.display_with_units())).collect();
+    let mut emitted_tests = std::collections::HashSet::new();
+    let mut emitted_text = std::collections::HashSet::new();
+    for (index, custom) in ds.custom_cols.iter().enumerate() {
+        if let Some(&source) = ds.numeric_label_sources.get(&custom.name) {
+            if emitted_tests.insert(source) { columns.push((ds.tests[source].display_with_units(), Column::Test(source))); }
+        } else if let Some(source) = ds.text_label_sources.get(&custom.name)
+            .and_then(|name| ds.text_cols.iter().position(|c| &c.name == name)) {
+            if emitted_text.insert(source) {
+                let mut name = ds.text_cols[source].name.clone();
+                while used.contains(&name) { name.push_str(" text"); }
+                used.insert(name.clone()); columns.push((name, Column::Text(source)));
+            }
+        } else {
+            let mut name = custom.name.clone();
+            // Preserve a raw text source separately when its derived label was edited.
+            while used.contains(&name) || ds.text_cols.iter().any(|c| c.name == name) { name.push_str(" label"); }
+            used.insert(name.clone()); columns.push((name, Column::Custom(index)));
+        }
+    }
+    columns.extend([("X".into(),Column::X),("Y".into(),Column::Y),("HBIN".into(),Column::Hbin),("SBIN".into(),Column::Sbin),("Site".into(),Column::Site)]);
+    for (index, test) in ds.tests.iter().enumerate() {
+        if !emitted_tests.contains(&index) { columns.push((test.display_with_units(), Column::Test(index))); }
+    }
+    for (index, col) in ds.text_cols.iter().enumerate() {
+        if emitted_text.contains(&index) { continue; }
+        let mut name = col.name.clone();
+        while used.contains(&name) { name.push_str(" text"); }
+        used.insert(name.clone()); columns.push((name, Column::Text(index)));
+    }
     let file = std::fs::File::create(&path).map_err(|e| format!("Cannot create file: {e}"))?;
     let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
-
-    write!(w, "lot,wafer,x,y,hbin,sbin,site").map_err(|e| e.to_string())?;
-    for t in ds.tests.iter() {
-        // Keep units in the header so the export can be re-imported with them.
-        write!(w, ",{}", csv_escape(&t.display_with_units())).map_err(|e| e.to_string())?;
-    }
-    let mut used:std::collections::HashSet<String> = ["lot","wafer","x","y","hbin","sbin","site"].into_iter().map(String::from).chain(ds.tests.iter().map(|t|t.display_with_units())).collect();
-    for col in &ds.text_cols {let mut name=col.name.clone();while used.contains(&name){name.push_str(" text");}used.insert(name.clone());write!(w,",{}",csv_escape(&name)).map_err(|e|e.to_string())?;}
-    let custom_headers:Vec<_>=custom.iter().map(|c|{let mut name=c.name.clone();while used.contains(&name){name.push_str(" label");}used.insert(name.clone());name}).collect();
-    for name in &custom_headers {
-        write!(w, ",{}", csv_escape(name)).map_err(|e| e.to_string())?;
-    }
-    writeln!(w).map_err(|e| e.to_string())?;
-
-    let mut lows = String::from("LSL");
-    for _ in 0..6 {
-        lows.push(',');
-    }
-    for t in ds.tests.iter() {
-        lows.push(',');
-        if let Some(v) = t.lo_spec.or(t.lo_limit) {
-            lows.push_str(&fmt_csv_num(v));
+    writeln!(w, "{}", columns.iter().map(|(name,_)|csv_escape(name)).collect::<Vec<_>>().join(",")).map_err(|e|e.to_string())?;
+    for (label, low) in [("LSL",true),("USL",false)] {
+        write!(w,"{label}").map_err(|e|e.to_string())?;
+        for (_, col) in columns.iter().skip(1) {
+            write!(w,",").map_err(|e|e.to_string())?;
+            if let Column::Test(index) = col {
+                let t = &ds.tests[*index];
+                let limit = if low { t.lo_spec.or(t.lo_limit) } else { t.hi_spec.or(t.hi_limit) };
+                if let Some(value) = limit { write!(w,"{}",fmt_csv_num(value)).map_err(|e|e.to_string())?; }
+            }
         }
+        writeln!(w).map_err(|e|e.to_string())?;
     }
-    for _ in &ds.text_cols {lows.push(',');}
-    for _ in custom.iter() {
-        lows.push(',');
-    }
-    writeln!(w, "{lows}").map_err(|e| e.to_string())?;
-
-    let mut highs = String::from("USL");
-    for _ in 0..6 {
-        highs.push(',');
-    }
-    for t in ds.tests.iter() {
-        highs.push(',');
-        if let Some(v) = t.hi_spec.or(t.hi_limit) {
-            highs.push_str(&fmt_csv_num(v));
-        }
-    }
-    for _ in &ds.text_cols {highs.push(',');}
-    for _ in custom.iter() {
-        highs.push(',');
-    }
-    writeln!(w, "{highs}").map_err(|e| e.to_string())?;
 
     let mut count = 0usize;
     let mut line = String::with_capacity(256);
@@ -492,35 +493,25 @@ fn write_csv_progress(ds: &Dataset, path: &str, filter: &Filter,
         }
         line.clear();
         let wref = &ds.wafers[ds.wafer_of_row[r] as usize];
-        line.push_str(&format!(
-            "{},{},{},{},{},{}",
-            csv_escape(ds.lot_name(wref.lot)),
-            csv_escape(&wref.name),
-            ds.x[r],
-            ds.y[r],
-            ds.hbin[r],
-            ds.sbin[r]
-        ));
-        line.push(',');
-        if let Some(site) = ds.site.get(r).copied().flatten() { line.push_str(&site.to_string()); }
-        for c in ds.cols.iter() {
-            let v = c[r];
-            if v.is_finite() {
-                line.push(',');
-                line.push_str(&fmt_csv_num(v));
-            } else {
-                line.push(',');
+        for (index, (_, col)) in columns.iter().enumerate() {
+            if index > 0 { line.push(','); }
+            match *col {
+                Column::Lot => line.push_str(&csv_escape(ds.lot_name(wref.lot))),
+                Column::Ocr => line.push_str(&csv_escape(&wref.name)),
+                Column::Wafer => line.push_str(&csv_escape(wref.number.as_deref().unwrap_or(""))),
+                Column::X => line.push_str(&ds.x[r].to_string()),
+                Column::Y => line.push_str(&ds.y[r].to_string()),
+                Column::Hbin => { if ds.hbin[r] != crate::model::UNKNOWN_BIN { line.push_str(&ds.hbin[r].to_string()); } },
+                Column::Sbin => { if ds.sbin[r] != crate::model::UNKNOWN_BIN { line.push_str(&ds.sbin[r].to_string()); } },
+                Column::Site => { if let Some(site) = ds.site.get(r).copied().flatten() { line.push_str(&site.to_string()); } },
+                Column::Test(i) => { let value = ds.cols[i][r]; if value.is_finite() { line.push_str(&fmt_csv_num(value)); } },
+                Column::Text(i) => { let col = &ds.text_cols[i]; line.push_str(&csv_escape(&col.values[col.codes[r] as usize])); },
+                Column::Custom(i) => {
+                    let col = &ds.custom_cols[i];
+                    let code = col.wafer_values.get(ds.wafer_of_row[r] as usize).copied().unwrap_or(0);
+                    line.push_str(&csv_escape(&col.label(code)));
+                }
             }
-        }
-        for col in &ds.text_cols {line.push(',');line.push_str(&csv_escape(&col.values[col.codes[r]as usize]));}
-        for c in custom.iter() {
-            let code = c
-                .wafer_values
-                .get(ds.wafer_of_row[r] as usize)
-                .copied()
-                .unwrap_or(0);
-            line.push(',');
-            line.push_str(&csv_escape(&c.label(code)));
         }
         line.push('\n');
         w.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
@@ -707,6 +698,131 @@ mod tests {
     }
 
     #[test]
+    fn csv_exports_ocr_wafer_and_custom_columns_first_without_losing_limits() {
+        use crate::model::{Dataset, Filter};
+        let source = std::env::temp_dir().join(format!("ews-identities-{}.csv", std::process::id()));
+        let output = source.with_extension("export.csv");
+        std::fs::write(&source, "Lot,Wafer,OCR,X,Y,HBIN,SBIN,Site,Split,Current [A],PartID,Part ID\nLSL,,,,,,,,,0.1,,\nUSL,,,,,,,,,0.9,,\nL1,03,ABC-03,0,0,1,1,2,A,0.4,1,0001\nL1,03,ABC-03,1,0,,,2,A,0.5,2,0002\nL2,03,XYZ-03,0,0,2,7,1,B,0.6,3,0003\nL2,03,XYZ-03,1,0,1,1,1,B,0.7,4,0004\n").unwrap();
+        let mut ds = Dataset::new();
+        ds.merge(crate::csv_io::import_csv(&source, &mut |_, _| {}).unwrap());
+        ds.set_custom_column("Manual", &[(0,"N2".into()), (1,"450".into())]).unwrap();
+        super::write_csv(&ds, output.to_str().unwrap(), &Filter::default()).unwrap();
+        let text = std::fs::read_to_string(&output).unwrap();
+        assert!(text.starts_with("Lot,OCR,Wafer,Split,Manual,X,Y,HBIN,SBIN,Site,Current [A],PartID,Part ID\n"), "{text}");
+        let mut loaded = Dataset::new();
+        loaded.merge(crate::csv_io::import_csv(&output, &mut |_, _| {}).unwrap());
+        assert_eq!(loaded.rows, 4);
+        assert_eq!(loaded.wafers.iter().map(|w| (w.name.as_str(),w.number.as_deref())).collect::<Vec<_>>(), vec![("ABC-03",Some("03")),("XYZ-03",Some("03"))]);
+        assert_eq!(loaded.tests.len(), 2);
+        assert_eq!(loaded.tests[0].lo_spec, Some(0.1));
+        assert_eq!(loaded.tests[0].hi_spec, Some(0.9));
+        assert_eq!(loaded.tests[1].name, "PartID");
+        assert_eq!(loaded.cols, ds.cols);
+        assert_eq!(loaded.hbin, ds.hbin);
+        assert_eq!(loaded.sbin, ds.sbin);
+        let split = loaded.custom_column("Split").unwrap();
+        assert_eq!(split.label(split.wafer_values[0]), "A");
+        assert_eq!(split.label(split.wafer_values[1]), "B");
+        let raw = loaded.text_cols.iter().find(|c|c.name == "Part ID").unwrap();
+        assert_eq!(raw.values[raw.codes[0] as usize], "0001");
+        std::fs::remove_file(source).unwrap(); std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn custom_column_rename_is_atomic_and_uses_the_new_csv_header() {
+        use crate::model::{Dataset, Filter};
+        let mut imported = crate::dataset::Imported::new();
+        let lot = imported.lot_index("L");
+        for name in ["W1", "W2"] {
+            let wafer = imported.wafer_index(lot, name);
+            imported.new_row(lot, wafer);
+        }
+        let mut ds = Dataset::new();
+        ds.merge(imported.finish());
+        ds.set_custom_column("Split", &[(0, "A".into()), (1, "B".into())]).unwrap();
+        ds.set_custom_column("Other", &[(0, "C".into())]).unwrap();
+        ds.numeric_label_sources.insert("Split".into(), 0);
+        let before = serde_json::to_value(&ds.custom_cols).unwrap();
+        for name in ["", "wafer", "Other"] {
+            assert!(ds.update_custom_column(name, &[(0, "Changed".into())], Some("Split")).is_err());
+            assert_eq!(serde_json::to_value(&ds.custom_cols).unwrap(), before);
+            assert!(ds.numeric_label_sources.contains_key("Split"));
+        }
+        ds.update_custom_column("Renamed split", &[(0, "Updated".into())], Some("Split")).unwrap();
+        let column = ds.custom_column("Renamed split").unwrap();
+        assert_eq!(column.label(column.wafer_values[0]), "Updated");
+        assert_eq!(column.label(column.wafer_values[1]), "B");
+        assert!(ds.custom_column("Split").is_none());
+        assert!(!ds.numeric_label_sources.contains_key("Split"));
+        assert!(ds.update_custom_column("Again", &[], Some("Split")).is_err());
+        let output = std::env::temp_dir().join(format!("ews-renamed-column-{}.csv", std::process::id()));
+        super::write_csv(&ds, output.to_str().unwrap(), &Filter::default()).unwrap();
+        let csv = std::fs::read_to_string(&output).unwrap();
+        assert!(csv.lines().next().unwrap().starts_with("Lot,OCR,Wafer,Renamed split,Other,X,Y,HBIN,SBIN,Site"));
+        assert!(!csv.lines().next().unwrap().split(',').any(|name| name == "Split"));
+        std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn mixed_numeric_text_wafer_labels_roundtrip_independent_of_row_order() {
+        use crate::model::{Dataset, Filter, TestInfo};
+        let mut imported = crate::dataset::Imported::new();
+        let lot = imported.lot_index("L");
+        for wi in 0..21 {
+            let wafer = imported.wafer_index(lot, &format!("W{:02}", wi + 1));
+            for x in 0..300 {
+                let row = imported.new_row(lot, wafer);
+                imported.x[row] = x;
+                imported.y[row] = 0;
+            }
+        }
+        let mut test = TestInfo::new("Voltage");
+        test.units = "V".into();
+        imported.tests.push(test);
+        imported.cols.push(vec![0.42; 21 * 300]);
+        let mut original = Dataset::new();
+        original.merge(imported.finish());
+        let path = std::env::temp_dir().join(format!("ews-mixed-labels-{}.csv", std::process::id()));
+        for numeric_label in ["450", "0450"] {
+            let assignments = (0..21).map(|wi| (wi, if wi < 16 { numeric_label.into() } else { "N2".into() })).collect::<Vec<_>>();
+            original.set_custom_column("Process", &assignments).unwrap();
+            super::write_csv(&original, path.to_str().unwrap(), &Filter::default()).unwrap();
+            let csv = std::fs::read_to_string(&path).unwrap();
+            for text_first in [false, true] {
+                let mut lines = csv.lines().map(str::to_string).collect::<Vec<_>>();
+                if text_first {
+                    let index = lines.iter().position(|line| line.starts_with("L,W17,")).unwrap();
+                    let row = lines.remove(index);
+                    lines.insert(3, row);
+                }
+                std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+                let mut loaded = Dataset::new();
+                loaded.merge(crate::csv_io::import_csv(&path, &mut |_, _| {}).unwrap());
+                loaded.detect_numeric_labels();
+                loaded.detect_data_categories();
+                assert_eq!(loaded.rows, 6300);
+                assert_eq!(loaded.tests.len(), 1);
+                let column = loaded.custom_column("Process").expect("original label name");
+                for (i, wafer) in loaded.wafers.iter().enumerate() {
+                    let number: usize = wafer.name[1..].parse().unwrap();
+                    assert_eq!(column.label(column.wafer_values[i]), if number <= 16 { numeric_label } else { "N2" });
+                }
+                assert_eq!(loaded.cols, original.cols);
+                super::write_csv(&loaded, path.to_str().unwrap(), &Filter::default()).unwrap();
+                let exported = std::fs::read_to_string(&path).unwrap();
+                assert_eq!(exported.lines().next().unwrap().split(',').filter(|name| *name == "Process").count(), 1);
+                assert!(!exported.lines().next().unwrap().contains(" label"));
+                let mut reader = csv::Reader::from_reader(exported.as_bytes());
+                let index = reader.headers().unwrap().iter().position(|h| h == "Process").unwrap();
+                let values = reader.records().skip(2).map(|r| r.unwrap()[index].to_string()).collect::<Vec<_>>();
+                assert_eq!(values.iter().filter(|v| *v == "N2").count(), 1500);
+                assert_eq!(values.iter().filter(|v| *v == numeric_label).count(), 4800);
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn numeric_csv_labels_keep_source_values_and_roundtrip_without_duplicate_columns() {
         let source=std::env::temp_dir().join(format!("ews-numeric-source-{}.csv",std::process::id()));
         let output=std::env::temp_dir().join(format!("ews-numeric-export-{}.csv",std::process::id()));
@@ -714,13 +830,13 @@ mod tests {
         let mut ds=crate::model::Dataset::new();ds.merge(crate::csv_io::import_csv(&source,&mut |_,_|{}).unwrap());
         let values=ds.cols.clone();ds.detect_numeric_labels();
         assert_eq!(ds.tests.len(),2);assert_eq!(ds.cols,values);
-        assert_eq!(ds.custom_cols[0].name,"Split label");
+        assert_eq!(ds.custom_cols[0].name,"Split");
         super::write_csv(&ds,output.to_str().unwrap(),&Default::default()).unwrap();
         let text=std::fs::read_to_string(&output).unwrap();
         assert!(!text.lines().next().unwrap().contains("Split label"));
         let mut loaded=crate::model::Dataset::new();loaded.merge(crate::csv_io::import_csv(&output,&mut |_,_|{}).unwrap());loaded.detect_numeric_labels();
         assert_eq!(loaded.cols,values);assert_eq!(loaded.tests.len(),2);assert_eq!(loaded.custom_cols[0].categories,ds.custom_cols[0].categories);
-        ds.set_custom_column("Split label",&[(0,"Manual A".into()),(1,"Manual B".into())]).unwrap();
+        ds.set_custom_column("Split",&[(0,"Manual A".into()),(1,"Manual B".into())]).unwrap();
         super::write_csv(&ds,output.to_str().unwrap(),&Default::default()).unwrap();
         let loaded=crate::csv_io::import_csv(&output,&mut |_,_|{}).unwrap();
         let manual=loaded.custom_cols.iter().find(|c|c.name=="Split label").unwrap();

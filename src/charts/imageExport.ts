@@ -25,8 +25,15 @@ import { categoryName } from "../lib/categoryNames";
 export function exportPlotTitle(spec: PlotSpec, test: Pick<TestInfo,"number"|"name"|"units"> | null, xLabel: string, groupLabel?: string): string {
   const kind = ({box:"Box plot",map:"Map",binmap:"BinMap",hist:"Histogram",scatter:"Scatter",trend:"Trend",pareto:"Pareto"})[spec.type];
   const measured = spec.type === "pareto" || spec.type === "binmap" ? (spec.binCategory === "soft" ? "SBIN" : "HBIN") : testLabelWithUnits(test);
-  const prefix = groupLabel ? `[${categoryName(spec.groupBy === "none" ? "wafer" : spec.groupBy)} ${groupLabel}] ` : "";
-  return `${prefix}${measured} vs ${xLabel} · ${kind}`;
+  const grouping = spec.groupBy === "none" ? "wafer" : spec.groupBy;
+  // Keep the full lot/wafer key for queries and filenames; omit the redundant
+  // lot only in the visible title of a wafer-specific image.
+  const separator = groupLabel?.indexOf(" / ") ?? -1;
+  const group = groupLabel && ["wafer", "waferNumber"].includes(grouping) && separator >= 0
+    ? groupLabel.slice(separator + 3) : groupLabel;
+  const prefix = group ? `[${categoryName(grouping)} ${group}] ` : "";
+  const globalPareto = spec.type === "pareto" && (spec.xAxis === "none" || !xLabel || xLabel === "Bin");
+  return `${prefix}${measured}${globalPareto ? "" : ` vs ${xLabel}`} · ${kind}`;
 }
 export function limitFooter(total: number, inside: number | null, lsl: number | null = null, usl: number | null = null, spec?: PlotSpec): string {
   const text=`Total: ${total.toLocaleString("en-US")}`;

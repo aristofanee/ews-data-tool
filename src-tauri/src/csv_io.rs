@@ -245,15 +245,23 @@ impl MetaColumn {
     }
 }
 
-fn push_meta_columns(imp: &mut Imported, collectors: Vec<MetaColumn>) {
+fn push_meta_columns(imp: &mut Imported, collectors: Vec<MetaColumn>) -> Result<(), String> {
     let mut seen = HashSet::new();
     for collector in collectors {
+        if collector.name == "Wafer" {
+            if collector.conflict { return Err("Conflicting Wafer numbers for the same lot and OCR".into()); }
+            for (wafer, number) in collector.by_wafer { imp.wafer_numbers[wafer as usize] = Some(number); }
+            continue;
+        }
         if let Some(column) = collector.finish(imp.wafers.len()) {
             if seen.insert(column.name.clone()) {
                 imp.custom_cols.push(column);
             }
         }
     }
+    // Wafer is a built-in identity field, never an extra text/category column.
+    imp.text_cols.retain(|column| column.name != "Wafer");
+    Ok(())
 }
 
 fn validate_text_columns(columns:&[MetaColumn])->Result<(),String>{
@@ -329,6 +337,7 @@ fn layout_from_headers(headers: &[String]) -> Layout {
             | "parametername" | "item" | "measurementname" => Some(&mut lay.test),
             "value" | "result" | "meas" | "measurement" | "reading" | "data"
             | "measuredvalue" => Some(&mut lay.value),
+            "partid" if h.trim() == "PartID" => None, // Exported numeric test, distinct from raw "Part ID".
             "partid" | "part" | "dieid" | "unitid" | "serial" => Some(&mut lay.part),
             _ => None,
         };
@@ -689,6 +698,53 @@ fn read_metadata_and_probe(
     Ok((metadata, probe))
 }
 
+/// Recover raw values when a sampled numeric column contains text later on.
+/// Re-read only for these mixed columns, preserving numeric-looking labels
+/// exactly (including leading zeroes) without storing every CSV cell twice.
+fn preserve_mixed_columns(
+    imp: &mut Imported,
+    meta: &mut Vec<MetaColumn>,
+    columns: &[(usize, usize, String)],
+    text: &str,
+    delim: u8,
+    header_idx: usize,
+    lay: &Layout,
+) -> Result<(), String> {
+    let mut collectors: Vec<_> = columns.iter().map(|(_, _, name)| MetaColumn::new(name.clone())).collect();
+    let mut reader = reader_for(text, delim);
+    let mut record = csv::StringRecord::new();
+    for _ in 0..=header_idx {
+        reader.read_record(&mut record).map_err(|e| format!("Invalid CSV record: {e}"))?;
+    }
+    let mut ignored = Vec::new();
+    let (_, probe) = read_metadata_and_probe(&mut reader, lay, text, &mut ignored)?;
+    let mut row = 0;
+    let mut write = |record: &csv::StringRecord| -> Result<(), String> {
+        let wafer = *imp.row_wafer.get(row).ok_or("CSV row alignment changed while preserving mixed columns")?;
+        for (collector, (_, index, name)) in collectors.iter_mut().zip(columns) {
+            let value = record.get(*index).unwrap_or("");
+            collector.observe(wafer, value);
+            imp.write_text(name, row, value);
+        }
+        row += 1;
+        Ok(())
+    };
+    for record in &probe { write(record)?; }
+    while reader.read_record(&mut record).map_err(|e| format!("Invalid CSV record: {e}"))? {
+        if !accept_die_record(&record, lay, text, &mut ignored)? { continue; }
+        write(&record)?;
+    }
+    if row != imp.row_wafer.len() { return Err("CSV row alignment changed while preserving mixed columns".into()); }
+    meta.extend(collectors);
+    validate_text_columns(meta)?;
+    // Remove the temporary numeric projections only after raw recovery succeeds.
+    for &(index, _, _) in columns.iter().rev() {
+        imp.tests.remove(index);
+        imp.cols.remove(index);
+    }
+    Ok(())
+}
+
 pub fn inspect_csv(path: &Path) -> Result<CsvInspection, String> {
     let mapped = mapped_text(path)?;
     // Mapping only needs the preamble/header. Validating the entire UTF-8
@@ -795,7 +851,7 @@ pub fn import_csv_with_mapping(
             .collect();
         let mut meta: Vec<MetaColumn> = meta_indices
             .iter()
-            .map(|&i| MetaColumn::new(if Some(i) == lay.wafer_number { "Wafer number".into() } else { meta_name(&headers[i]) }))
+            .map(|&i| MetaColumn::new(if Some(i) == lay.wafer_number { "Wafer".into() } else { meta_name(&headers[i]) }))
             .collect();
         validate_text_columns(&meta)?;
 
@@ -884,7 +940,7 @@ pub fn import_csv_with_mapping(
         imp.tests = tests;
         imp.cols = cols;
         imp.col_index.clear();
-        push_meta_columns(&mut imp, meta);
+        push_meta_columns(&mut imp, meta)?;
         preamble.apply(&mut imp);
         imp.csv_skipped_lines = skipped;
         return Ok(imp.finish());
@@ -918,6 +974,15 @@ pub fn import_csv_with_mapping(
             }
             continue;
         }
+        let context_header = crate::stdf::RUN_METADATA_NAMES.iter().any(|name| norm(name) == norm(&headers[i]));
+        let has_test_metadata = col_meta.get(&i).is_some_and(|meta| meta.number.is_some()
+            || meta.unit.as_ref().is_some_and(|unit| !unit.is_empty()) || meta.low.is_some() || meta.high.is_some());
+        if context_header && !has_test_metadata {
+            // Program revisions, serials and temperatures can look numeric.
+            // Preserve their original text on a STDF -> CSV -> import cycle.
+            meta_indices.push(i);
+            continue;
+        }
         let total = probe.len().max(1);
         let ok = probe
             .iter()
@@ -930,7 +995,7 @@ pub fn import_csv_with_mapping(
             meta_indices.push(i);
         }
     }
-    if numeric.is_empty() {
+    if numeric.is_empty() && meta_indices.is_empty() {
         return Err("No numeric columns found. Expected a wide table (one column per test) or a long table with 'test' and 'value' columns.".into());
     }
 
@@ -970,12 +1035,15 @@ pub fn import_csv_with_mapping(
     }
     let mut meta: Vec<MetaColumn> = meta_indices
         .iter()
-        .map(|&i| MetaColumn::new(if Some(i) == lay.wafer_number { "Wafer number".into() } else { meta_name(&headers[i]) }))
+        .map(|&i| MetaColumn::new(if Some(i) == lay.wafer_number { "Wafer".into() } else { meta_name(&headers[i]) }))
         .collect();
 
     validate_text_columns(&meta)?;
     if lay.part.is_some()&&meta.iter().any(|c|c.name=="Part ID") {return Err("Duplicate CSV text column “Part ID”. Rename the extra column before importing.".into());}
-    let push_row = |imp: &mut Imported,
+    let mut mixed = vec![false; numeric.len()];
+    let inferred: Vec<_> = imp.tests.iter().map(|test| test.number.is_none() && test.units.is_empty()
+        && test.lo_spec.is_none() && test.hi_spec.is_none()).collect();
+    let mut push_row = |imp: &mut Imported,
                     rec: &csv::StringRecord,
                     meta: &mut Vec<MetaColumn>| {
         let lot_name = lay.lot.and_then(|i| rec.get(i)).unwrap_or("LOT");
@@ -1000,7 +1068,12 @@ pub fn import_csv_with_mapping(
             .map(parse_u16)
             .unwrap_or(UNKNOWN_BIN);
         for (k, &ci) in numeric.iter().enumerate() {
-            let v = parse_f32(rec.get(ci).unwrap_or(""));
+            let raw = rec.get(ci).unwrap_or("");
+            let v = parse_f32(raw);
+            if inferred[k] && v.is_nan() && !raw.trim().is_empty() &&
+                !["nan", "n/a", "na", "-", "null"].iter().any(|missing| raw.eq_ignore_ascii_case(missing)) {
+                mixed[k] = true;
+            }
             imp.cols[k].push(v);
         }
         imp.records += 1;
@@ -1019,7 +1092,13 @@ pub fn import_csv_with_mapping(
     }
 
     progress(96.0, "Finalizing CSV…");
-    push_meta_columns(&mut imp, meta);
+    let mixed: Vec<_> = numeric.iter().enumerate().filter_map(|(k, &index)| mixed[k]
+        .then(|| (k, index, meta_name(&headers[index])))).collect();
+    if !mixed.is_empty() {
+        progress(96.0, "Preserving mixed numeric/text columns…");
+        preserve_mixed_columns(&mut imp, &mut meta, &mixed, &text, delim, header_idx, &lay)?;
+    }
+    push_meta_columns(&mut imp, meta)?;
     preamble.apply(&mut imp);
     imp.csv_skipped_lines = skipped;
     Ok(imp.finish())
@@ -1027,6 +1106,26 @@ pub fn import_csv_with_mapping(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mixed_column_recovery_preserves_alignment_when_invalid_dice_are_skipped() {
+        let mut csv = String::from("Lot,Wafer,X,Y,Process,Voltage [V]\n");
+        for x in 0..300 { csv.push_str(&format!("L,W1,{x},0,450,0.42\n")); }
+        csv.push_str("L,W2,,0,N2,0.43\nL,W2,0,0,N2,N/A\n");
+        let path = write_temp("mixed-with-skipped-row", &csv);
+        let imported = import_csv(&path, &mut |_, _| {}).unwrap();
+        assert_eq!(imported.x.len(), 301);
+        assert_eq!(imported.csv_skipped_lines, vec![302]);
+        assert_eq!(imported.tests.len(), 1);
+        assert!(imported.cols[0][300].is_nan());
+        let column = imported.custom_cols.iter().find(|c| c.name == "Process").unwrap();
+        assert_eq!(column.label(column.wafer_values[0]), "450");
+        assert_eq!(column.label(column.wafer_values[1]), "N2");
+        let raw = imported.text_cols.iter().find(|c| c.name == "Process").unwrap();
+        assert_eq!(raw.values[raw.codes[299] as usize], "450");
+        assert_eq!(raw.values[raw.codes[300] as usize], "N2");
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn inspection_reads_only_the_header_but_import_validates_the_whole_file() {
         let path = write_temp("header-only-inspection", &format!(
@@ -1107,8 +1206,8 @@ mod tests {
         assert_eq!(imp.tests[0].lo_spec, Some(1.5)); assert_eq!(imp.tests[1].hi_spec, Some(0.7));
         let split = imp.custom_cols.iter().find(|c| c.name == "Split").unwrap();
         assert_eq!(split.label(split.wafer_values[0]), "Group A");
-        let number = imp.custom_cols.iter().find(|c| c.name == "Wafer number").unwrap();
-        assert_eq!(number.label(number.wafer_values[0]), "03");
+        assert_eq!(imp.wafer_numbers[0].as_deref(), Some("03"));
+        assert!(!imp.text_cols.iter().any(|c| c.name == "Wafer"));
         assert!(!imp.tests.iter().any(|t| t.name == "Wafer"));
         let _ = std::fs::remove_file(p);
     }

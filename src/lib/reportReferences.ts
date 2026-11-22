@@ -3,7 +3,7 @@ import { testLabelWithUnits } from "./format";
 import { categoryName } from "./categoryNames";
 import { categoryPassesCustomFilters, filterCategories, filterValues } from "./customFilters";
 
-const builtins = ["lot", "wafer", "site", "hbin", "sbin"];
+const builtins = ["lot", "wafer", "waferNumber", "site", "hbin", "sbin"];
 const types = ["box", "hist", "trend", "scatter", "pareto", "map", "binmap"];
 export function reportFilters(filters: Filter): Filter {
   return structuredClone(filters);
@@ -40,8 +40,8 @@ export function categoryChoices(spec: PlotSpec, field: string, info: DatasetInfo
   if(field.startsWith("customCategory:"))return filterCategories(info);
   if(field.startsWith("filterCategory:"))return (info.dataCategories??[]).map(c=>c.id);
   const custom=[...info.customColumns.map(c=>c.name),...(info.dataCategories??[]).map(c=>c.id)];
-  if(field === "groupBy" && spec.type === "map") return ["lot","wafer",...custom];
-  if(field === "groupBy" && spec.type === "pareto") return ["lot","wafer","site",...custom];
+  if(field === "groupBy" && spec.type === "map") return ["lot","wafer","waferNumber",...custom];
+  if(field === "groupBy" && spec.type === "pareto") return ["lot","wafer","waferNumber","site",...custom];
   return [...builtins,...custom];
 }
 export function splitChoices(info: DatasetInfo, spec: PlotSpec, filters: ReportItem["filters"]): string[] {
@@ -49,6 +49,7 @@ export function splitChoices(info: DatasetInfo, spec: PlotSpec, filters: ReportI
   const allowed = (value: string) => categoryPassesCustomFilters(filters, cat, value);
   const candidates=info.wafers.map((w,i)=>({w,i})).filter(({w,i})=>(!filters.lots.length||filters.lots.includes(w.lot))&&(!filters.wafers.length||filters.wafers.includes(i)));
   if(cat==="none")return ["All wafers (mean)"];
+  if(cat==="waferNumber")return candidates.map(({w})=>`${info.lots[w.lot]} / ${w.number ?? "Unassigned"}`);
   if(cat==="wafer")return candidates.map(({i})=>{const w=waferIdentity(info,i);return `${w.lot} / ${w.name}`;});
   if(cat==="lot")return [...new Set(candidates.map(({w})=>info.lots[w.lot]))];
   if(cat==="site")return (info.sites??[]).filter(v=>(!filters.sites?.length||filters.sites.includes(v))&&allowed(String(v))).map(v=>v===65535?"Unknown site":`Site ${v}`);
@@ -242,7 +243,7 @@ export function validateTemplate(value:unknown):asserts value is import("../stor
     if(!p?.spec||!types.includes(p.spec.type)||typeof p.spec.title!=="string"||p.filters&&!validFilters(p.filters))throw new Error("Invalid report item in template.");
     for(const field of ["test","scatterX","scatterY","scatterZTest"])if(p.spec[field]!=null&&(!Number.isInteger(p.spec[field])||p.spec[field]<0))throw new Error("Invalid test reference in template.");
     for(const field of ["xAxis","groupBy","title"])if(p.spec[field]!==undefined&&typeof p.spec[field]!=="string")throw new Error("Invalid plot category or title.");
-    for(const field of ["logY","showLimits","splitPlots","showNormal","showBand","scatterFit","displayAllData","noLsl","noUsl"])if(p.spec[field]!==undefined&&typeof p.spec[field]!=="boolean")throw new Error("Invalid plot option.");
+    for(const field of ["logX","logY","showLimits","splitPlots","showNormal","showBand","scatterFit","displayAllData","noLsl","noUsl","showHardBinLabel","showSoftBinLabel"])if(p.spec[field]!==undefined&&typeof p.spec[field]!=="boolean")throw new Error("Invalid plot option.");
     for(const field of ["lsl","usl","yMin","yMax","limitK","top","bins","edgeExclusion"])if(p.spec[field]!=null&&!Number.isFinite(p.spec[field]))throw new Error("Invalid numeric plot option.");
     if(p.spec.capabilityMethod!==undefined&&!["sigma","percentile"].includes(p.spec.capabilityMethod))throw new Error("Invalid capability method.");
     if(p.spec.limitMode!==undefined&&!["auto","manual","spec","sigma","iqr"].includes(p.spec.limitMode))throw new Error("Invalid limit mode.");

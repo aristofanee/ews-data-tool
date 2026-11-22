@@ -11,6 +11,7 @@ export interface TestInfo {
 }
 
 export interface WaferInfo {
+  number?: string | null;
   lot: number;
   name: string;
   dice: number;
@@ -366,6 +367,7 @@ export interface PlotSpec {
   /** Colour / grouping / split category. `none` means one default-coloured series. */
   groupBy: string;
   logY: boolean;
+  logX: boolean;
   showPoints: ShowPoints;
   displayAllData: boolean;
   lsl: number | null;
@@ -377,6 +379,8 @@ export interface PlotSpec {
   palette: string;
   edgeExclusion: number;
   binCategory: "hard" | "soft";
+  showHardBinLabel?: boolean;
+  showSoftBinLabel?: boolean;
   top: number;
   bins: number | null;
   showNormal: boolean;
@@ -429,6 +433,7 @@ export const defaultSpec = (type: PlotType, test: number | null, title: string):
   xAxis: type === "pareto" ? "none" : "wafer",
   groupBy: "none",
   logY: false,
+  logX: false,
   showPoints: "outliers",
   displayAllData: type === "box" || type === "scatter",
   lsl: null,
@@ -438,6 +443,8 @@ export const defaultSpec = (type: PlotType, test: number | null, title: string):
   palette: "brand",
   edgeExclusion: 0,
   binCategory: "hard",
+  showHardBinLabel: false,
+  showSoftBinLabel: true,
   top: 10,
   bins: null,
   showNormal: true,

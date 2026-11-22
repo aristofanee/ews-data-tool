@@ -5,6 +5,7 @@ import * as api from "../lib/api";
 import { WindowControls } from "./WindowControls";
 import {
   IconDownload,
+  IconFile,
   IconFolder,
   IconMoon,
   IconOpen,
@@ -89,15 +90,17 @@ export function TopBar() {
           <IconDownload size={15} /> Export CSV
         </button>
         <button className="btn" disabled={!info || !api.isTauri} onClick={importMetadata}
-          title="Fill missing wafer geometry and bin descriptions from reference STDF files of the same product">Metadata</button>
+          title="Fill missing wafer geometry and bin descriptions from reference STDF files of the same product">
+          <IconFile size={15} /> Metadata
+        </button>
         <span className="topbar-sep" />
-        <button className="btn icon" onClick={saveTemplate} title="Save template (all report plots + settings)">
+        <button className="btn icon" disabled={!info} onClick={saveTemplate} title="Save template (all report plots + settings)">
           <IconSave size={16} />
         </button>
-        <button className="btn icon" onClick={loadTemplate} title="Load template">
+        <button className="btn icon" disabled={!info} onClick={loadTemplate} title="Load template">
           <IconOpen size={16} />
         </button>
-        <button className="btn report-btn" onClick={() => setReportOpen(true)} title="Open the report builder">
+        <button className="btn report-btn" disabled={!info} onClick={() => setReportOpen(true)} title="Open the report builder">
           <IconReport size={16} /> Report
           {reportCount > 0 && <span className="badge">{reportCount}</span>}
         </button>

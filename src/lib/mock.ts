@@ -226,6 +226,7 @@ function buildDataset(): MockDataset {
   const waferInfos: WaferInfo[] = wafers.map((w) => ({
     lot: w.lot,
     name: w.name,
+    number: w.name.match(/(\d+)$/)?.[1] ?? null,
     dice: w.x.length,
     xMin: -RADIUS,
     xMax: RADIUS,
@@ -420,6 +421,10 @@ function categoryFor(
   col: string
 ): { code: number; name: string } {
   switch (col) {
+    case "waferNumber": {
+      const number = ds.info.wafers[w.index].number ?? "Unassigned";
+      return { code: w.index, name: ds.lots.length > 1 ? `${ds.lots[w.lot]} / ${number}` : number };
+    }
     case "wafer":
       return { code: w.index, name: labelOf(w, ds.lots.length > 1) };
     case "hbin":
@@ -458,6 +463,8 @@ function scatterGroupLabel(ds: MockDataset, col: string): string {
     case "lot":
     case "":
       return "Lot";
+    case "waferNumber":
+      return "Wafer";
     case "wafer":
       return "Wafer ID (OCR)";
     case "hbin":
@@ -1072,7 +1079,7 @@ export async function pareto(req: {
     const groupLabel =
       req.groupBy === "site" ? "Site" : req.groupBy === "lot"
         ? "Lot"
-        : req.groupBy === "wafer"
+        : req.groupBy === "waferNumber" ? "Wafer" : req.groupBy === "wafer"
           ? "Wafer ID (OCR)"
           : ds.customCols.find((c) => c.name === req.groupBy)?.name ?? "Group";
     return delay({
@@ -1476,19 +1483,24 @@ export async function scatter(req: {
 
 export async function addCustomColumn(
   name: string,
-  assignments: { wafer: number; label: string }[]
+  assignments: { wafer: number; label: string }[],
+  originalName: string | null = null,
 ): Promise<DatasetInfo> {
   const ds = dataset();
   const clean = name.trim();
   if (!clean) throw new Error("Enter a column name.");
-  if (["lot", "wafer", "hbin", "sbin", "site", "__wafer"].some((r) => r === clean.toLowerCase())) {
+  if (["lot", "wafer", "ocr", "wafernumber", "hbin", "sbin", "site", "__wafer"].some((r) => r === clean.toLowerCase())) {
     throw new Error(`“${clean}” is a reserved column name.`);
   }
-  let col = ds.customCols.find((c) => c.name === clean);
-  if (!col) {
-    col = { name: clean, categories: [""], waferValues: new Array(ds.wafers.length).fill(0) };
-    ds.customCols.push(col);
+  if (ds.info.dataCategories?.some(c => c.id === clean)) throw new Error(`A category named “${clean}” already exists.`);
+  const existing = ds.customCols.findIndex(c => c.name === (originalName ?? clean));
+  if (originalName !== null && existing < 0) throw new Error("The label column no longer exists.");
+  if (ds.customCols.some((c, i) => c.name === clean && i !== existing)) {
+    throw new Error(`A label column named “${clean}” already exists.`);
   }
+  const col: CustomColumn = existing >= 0 ? structuredClone(ds.customCols[existing])
+    : { name: clean, categories: [""], waferValues: new Array(ds.wafers.length).fill(0) };
+  col.name = clean;
   for (const a of assignments) {
     if (a.wafer < 0 || a.wafer >= ds.wafers.length) continue;
     const label = a.label.trim();
@@ -1504,6 +1516,8 @@ export async function addCustomColumn(
     col.waferValues[a.wafer] = code;
   }
   if (col.categories.length <= 1) throw new Error("Assign at least one wafer label.");
+  if (existing >= 0) ds.customCols[existing] = col;
+  else ds.customCols.push(col);
   return delay(refreshInfo(ds));
 }
 

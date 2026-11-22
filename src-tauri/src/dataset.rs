@@ -31,6 +31,7 @@ pub struct Imported {
     pub hbin_names: HashMap<u16, (String, bool)>,
     pub sbin_names: HashMap<u16, (String, bool)>,
     pub wafer_geom: Vec<WaferGeom>,
+    pub wafer_numbers: Vec<Option<String>>,
     pub records: u64,
     pub col_index: HashMap<(u32, u16), usize>,
     /// Text metadata imported from a CSV (for example an Excel-added Split
@@ -59,6 +60,7 @@ impl Imported {
             hbin_names: HashMap::new(),
             sbin_names: HashMap::new(),
             wafer_geom: Vec::new(),
+            wafer_numbers: Vec::new(),
             records: 0,
             col_index: HashMap::new(),
             custom_cols: Vec::new(),
@@ -81,6 +83,7 @@ impl Imported {
         self.wafers.push((lot, name.to_string()));
         self.wafer_lookup.entry(lot).or_default().insert(name.to_string(), (self.wafers.len() - 1) as u16);
         self.wafer_geom.push(WaferGeom::default());
+        self.wafer_numbers.push(None);
         (self.wafers.len() - 1) as u16
     }
 
@@ -99,6 +102,15 @@ impl Imported {
     pub fn write_text(&mut self,name:&str,row:usize,value:&str){
         let index=self.text_cols.iter().position(|c|c.name==name).unwrap_or_else(||{self.text_cols.push(TextColumn::new(name.into()));self.text_cols.len()-1});
         self.text_cols[index].write(row,value);
+    }
+
+    /// Prepare a dictionary code once for metadata shared by many die rows.
+    pub fn text_code(&mut self, name: &str, value: &str) -> (usize, u32) {
+        let index = self.text_cols.iter().position(|c| c.name == name).unwrap_or_else(|| {
+            self.text_cols.push(TextColumn::new(name.into()));
+            self.text_cols.len() - 1
+        });
+        (index, self.text_cols[index].code_for(value))
     }
 
     /// Return the index of a test column, creating an empty one if needed.
@@ -261,6 +273,7 @@ impl Dataset {
                 // A later file may carry the WCR geometry for an existing
                 // wafer. Fill only missing values so the first definition wins.
                 let w = &mut self.wafers[j];
+                if let Some(number) = imp.wafer_numbers.get(wi).cloned().flatten() { w.number = Some(number); }
                 if w.diameter_mm.is_none() {
                     w.diameter_mm = geom.diameter_mm;
                 }
@@ -284,6 +297,7 @@ impl Dataset {
                 wafer_map.push(j as u16);
             } else {
                 self.wafers.push(WaferInfo {
+                    number: imp.wafer_numbers.get(wi).cloned().flatten(),
                     lot: glot,
                     name: name.clone(),
                     dice: 0,

@@ -63,7 +63,7 @@ body,
 
 body {
   margin: 0;
-  font-family: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, -apple-system, sans-serif;
+  font-family: var(--demo-ui-font, "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, -apple-system, sans-serif);
   font-size: 13px;
   color: var(--text);
   background: var(--bg);
@@ -973,6 +973,8 @@ select.input {
 .demo-label-density { display: flex; align-items: center; gap: 8px; }
 .demo-label-density input { width: 140px; }
 .demo-label-density output { min-width: 4ch; }
+.demo-ui-font { display: flex; align-items: center; gap: 8px; }
+.demo-ui-font select { width: 220px; }
 .demo-font-controls > span { color: var(--muted); }
 
 .facet-card.preview:hover {

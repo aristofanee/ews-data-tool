@@ -5,12 +5,14 @@ import type { Figure } from "./figures";
  * This avoids thousands of SVG nodes per facet and WebGL context limits. */
 export function rasterScatterPreview(figure: Figure, width: number, height: number): Figure {
   const layout = structuredClone(figure.layout);
+  const logX = layout.xaxis?.type === "log";
+  const xValue = (x: number) => logX ? (x > 0 ? Math.log10(x) : NaN) : x;
   const logY = layout.yaxis?.type === "log";
   const yValue = (y: number) => logY ? (y > 0 ? Math.log10(y) : NaN) : y;
   let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
   for (const trace of figure.data) {
     for (let i = 0; i < trace.x.length; i++) {
-      const x = trace.x[i], y = yValue(trace.y[i]);
+      const x = xValue(trace.x[i]), y = yValue(trace.y[i]);
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       xmin = Math.min(xmin, x); xmax = Math.max(xmax, x);
       ymin = Math.min(ymin, y); ymax = Math.max(ymax, y);
@@ -50,7 +52,7 @@ export function rasterScatterPreview(figure: Figure, width: number, height: numb
     };
     if (!numeric) ctx.fillStyle = marker.color;
     for (let i = 0; i < trace.x.length; i++) {
-      const x = trace.x[i], y = yValue(trace.y[i]);
+      const x = xValue(trace.x[i]), y = yValue(trace.y[i]);
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       if (numeric) ctx.fillStyle = color(marker.color[i]);
       ctx.beginPath();

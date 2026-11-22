@@ -1,6 +1,6 @@
 import { useStore } from "../store";
 import { defaultSpec, scatterLimitsFor, type LimitMode, type PlotLimits, type PlotType, type ScatterAxis } from "../types";
-import { PALETTES, paletteGradient } from "../lib/theme";
+import { PALETTES, paletteGradient, showBinLabel } from "../lib/theme";
 import { fmt, fmtInt, statisticalRangeLabels, testLabelWithUnits } from "../lib/format";
 import { Fragment, useState, type ReactNode } from "react";
 import { TestCombobox } from "./TestCombobox";
@@ -181,7 +181,7 @@ export function Inspector({ autoBins }: { autoBins: number }) {
       const current = useStore.getState().spec;
       patch({ scatterLimits: { ...current.scatterLimits, [axis]: { ...scatterLimitsFor(current, axis), ...values } } });
     };
-    const showLog = axis === "y" || (!axis && !colour);
+    const showLog = axis === "x" || axis === "y" || (!axis && !colour);
     return <>
       <Check label={colour ? "Show spec ticks (USL/LSL)" : "Show spec limits (USL/LSL)"}
         checked={settings.showLimits} onChange={showLimits => change({ showLimits })} />
@@ -231,8 +231,10 @@ export function Inspector({ autoBins }: { autoBins: number }) {
         <Row label="Max"><Num value={settings.yMax} onChange={yMax => change({ yMax })} placeholder="auto" /></Row>
         <Row label="Min"><Num value={settings.yMin} onChange={yMin => change({ yMin })} placeholder="auto" /></Row>
       </>}
-      {showLog && <Check label={spec.type === "hist" ? "Logarithmic count axis" : "Logarithmic Y axis"}
-        checked={spec.logY} onChange={logY => patch({ logY })} />}
+      {showLog && <Check label={axis === "x" ? "Logarithmic X axis"
+        : spec.type === "hist" ? "Logarithmic count axis" : "Logarithmic Y axis"}
+        checked={axis === "x" ? spec.logX : spec.logY}
+        onChange={value => patch(axis === "x" ? { logX: value } : { logY: value })} />}
       <button className="link-btn" onClick={() => change({ limitMode: "auto", yMin: null, yMax: null })}
         disabled={settings.limitMode === "auto" && settings.yMin === null && settings.yMax === null}>
         Reset limits
@@ -244,6 +246,7 @@ export function Inspector({ autoBins }: { autoBins: number }) {
       {noneLabel !== undefined && <option value="none">{noneLabel}</option>}
       <option value="lot">Lot</option>
       <option value="wafer">Wafer ID (OCR)</option>
+      {info.wafers.some(w => w.number != null) && <option value="waferNumber">Wafer</option>}
       <option value="hbin">HBIN</option>
       <option value="sbin">SBIN</option>
       <option value="site">Site</option>
@@ -260,6 +263,7 @@ export function Inspector({ autoBins }: { autoBins: number }) {
     <>
       <option value="none">None</option>
       <option value="wafer">Wafer ID (OCR)</option>
+      {info.wafers.some(w => w.number != null) && <option value="waferNumber">Wafer</option>}
       <option value="lot">Lot</option>
       {info.dataCategories?.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
       {info.customColumns.map((c) => (
@@ -275,6 +279,7 @@ export function Inspector({ autoBins }: { autoBins: number }) {
       <option value="none">None</option>
       <option value="lot">Lot</option>
       <option value="wafer">Wafer ID (OCR)</option>
+      {info.wafers.some(w => w.number != null) && <option value="waferNumber">Wafer</option>}
       <option value="site">Site</option>
       {info.dataCategories?.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
       {info.customColumns.map((c) => (
@@ -437,6 +442,8 @@ export function Inspector({ autoBins }: { autoBins: number }) {
               onChange={(v) => patch({ binCategory: v })}
             />
           </Row>
+          <Check label="Show bin label" checked={showBinLabel(spec)}
+            onChange={value => patch(spec.binCategory === "soft" ? { showSoftBinLabel: value } : { showHardBinLabel: value })} />
         </Section>
       )}
 
@@ -452,6 +459,8 @@ export function Inspector({ autoBins }: { autoBins: number }) {
               onChange={(v) => patch({ binCategory: v })}
             />
           </Row>
+          <Check label="Show bin label" checked={showBinLabel(spec)}
+            onChange={value => patch(spec.binCategory === "soft" ? { showSoftBinLabel: value } : { showHardBinLabel: value })} />
           <Row label="Top bins">
             <Num value={spec.top} onChange={(v) => { if (v !== null) patch({ top: Math.round(v) }); }} step="1" min={1} />
           </Row>

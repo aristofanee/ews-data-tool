@@ -23,6 +23,7 @@ export interface MapOptions {
   usl: number | null;
   binNames?: Record<number, string>;
   binCategory?: "hard" | "soft";
+  showBinLabel?: boolean;
   /** Codes that count as passing for the selected bin category. */
   binPass?: number[];
   /** Optional explicit colour-scale limits. */
@@ -771,7 +772,7 @@ export class WaferMapRenderer {
       ctx.fillStyle = t.text;
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
-      const label = binLabel(soft ? "soft" : "hard", code, this.opts?.binNames?.[code], false);
+      const label = binLabel(soft ? "soft" : "hard", code, this.opts?.binNames?.[code], false, this.opts?.showBinLabel);
       const maxWidth = width - 55 * k;
       const lines: string[] = [];
       let line = "";
@@ -817,7 +818,7 @@ function exportBinLegend(ctx: CanvasRenderingContext2D, dice: MapDie[], opts: Ma
     for (let columns = 1; columns <= Math.min(maxColumns, Math.max(1, entries.length)); columns++) {
       const rows = Math.ceil(entries.length / columns), cellW = availableWidth / columns;
       const cells = entries.map(([code, count]) => {
-        const lines = wrapImageText(ctx, binLabel(category, code, opts.binNames?.[code], false), cellW - 78);
+        const lines = wrapImageText(ctx, binLabel(category, code, opts.binNames?.[code], false, opts.showBinLabel), cellW - 78);
         return { code, count, lines, h: Math.max(size + 8, lines.length * (size + 4) + 8) };
       });
       const rowHeights = Array.from({ length: rows }, (_, row) => Math.max(...cells.slice(row * columns, (row + 1) * columns).map(c => c.h)));

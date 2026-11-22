@@ -265,7 +265,7 @@ function SplitPlotView({
   const viewKey = usePlotViewKey(spec);
   const rangeRevision = useStore(s => s.rangeRevisions[spec.type] ?? 0);
   // Axis edits reset the zoom, while keeping the currently opened group.
-  const selectionKey = usePlotViewKey({...spec,limitMode:"auto",limitK:3,yMin:null,yMax:null,lsl:null,usl:null,logY:false});
+  const selectionKey = usePlotViewKey({...spec,limitMode:"auto",limitK:3,yMin:null,yMax:null,lsl:null,usl:null,logX:false,logY:false});
   const [selected, setSelected] = usePlotSelection(`split:${spec.type}`, selectionKey);
   useRestorePlotSelection(facets.map(f=>f.label),setSelected);
   const facet = selected !== null ? facets[selected] : undefined;

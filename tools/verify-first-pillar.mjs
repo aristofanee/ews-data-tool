@@ -35,17 +35,26 @@ try {
     const data = await api.boxPlot({ test: state.spec.test, xAxis: "wafer", filter: state.filters });
     const spec = data.summary;
     // These symmetric limits must yield Cp == Cpk == 2 in the UI.
-    useStore.getState().patchSpec({ lsl: spec.mean - 6 * spec.sd, usl: spec.mean + 6 * spec.sd });
+    // This expectation uses standard deviation, so select the sigma method
+    // explicitly instead of depending on the app's current default method.
+    useStore.getState().patchSpec({ capabilityMethod: "sigma", lsl: spec.mean - 6 * spec.sd, usl: spec.mean + 6 * spec.sd });
     return { expectedCp: 2 };
   });
-  await page.waitForFunction(() => [...document.querySelectorAll(".stat")].some(
-    (s) => s.querySelector(".stat-k")?.textContent === "Cp" && s.querySelector(".stat-v")?.textContent === "2.00"));
+  await page.waitForFunction(() => ["Cp", "Cpk"].every((key) => [...document.querySelectorAll(".stat")].some(
+    (s) => s.querySelector(".stat-k")?.textContent === key && s.querySelector(".stat-v")?.textContent === "2.00")));
   await page.locator(".tab").filter({ hasText: "Wafer map" }).click();
-  await page.waitForFunction(() => document.body.textContent.includes("Test yield (LSL/USL)"));
+  await page.waitForFunction(() => [...document.querySelectorAll(".stats .stat-k")].some(
+    (el) => el.textContent === "Test yield"));
   const mapStats = await page.locator(".stats").innerText();
-  assert.match(mapStats, /Wafer yield \(HBIN 1\)/i);
+  assert.match(mapStats, /Test yield\s+[\d.]+%/i);
+  // Wafer yield is now shown in the dedicated Bin map view.
+  await page.locator(".tab").filter({ hasText: "Bin map" }).click();
+  await page.waitForFunction(() => [...document.querySelectorAll(".stats .stat-k")].some(
+    (el) => el.textContent === "Wafer yield (HBIN 1)"));
+  const binStats = await page.locator(".stats").innerText();
+  assert.match(binStats, /Wafer yield \(HBIN 1\)\s+[\d.]+%/i);
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ box, capability: result, mapStats, errors }, null, 2));
+  console.log(JSON.stringify({ box, capability: result, mapStats, binStats, errors }, null, 2));
 } finally {
   await browser?.close();
   server?.kill();

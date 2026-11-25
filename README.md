@@ -54,6 +54,15 @@ hover values, zoom/pan and high-resolution JPG export.
 
 ## Getting started
 
+Moving to a work laptop or a different coding assistant? Start with the
+[handover guide](docs/HANDOVER.md). Shared coding instructions are in
+[AGENTS.md](AGENTS.md), with a Copilot entry point in
+[.github/copilot-instructions.md](.github/copilot-instructions.md).
+
+From the repository root, `npm run doctor` checks tool availability,
+`npm run check` builds the frontend and runs default Rust tests, and
+`npm run test:browser` runs the self-contained browser regression using Edge.
+
 ### Desktop app (recommended)
 
 Download the latest Windows installer from the

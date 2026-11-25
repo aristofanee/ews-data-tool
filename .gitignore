@@ -26,3 +26,8 @@ Thumbs.db
 shots/desktop-test.png
 shots/desktop-test.json
 shots/desktop-export.csv
+
+# Reproducible local artifacts. Existing tracked README screenshots stay tracked.
+/shots/*
+/tmp/
+/output/

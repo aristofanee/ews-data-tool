@@ -1,0 +1,2 @@
+# PDFs can contain mostly ASCII but byte offsets must survive checkout exactly.
+*.pdf binary
